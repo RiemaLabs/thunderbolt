@@ -2,12 +2,12 @@ theory Thunderbolt begin
 
 // Function signature and definition of the equational theory E
 
-functions: Alice/0, Bob/0, Carol/0, Cmte/0, CommitteeApproved/2,
-           FinalizationSuccess/1, Finalized/1, HasTweakedSig/2, Locked/1,
-           Owner/2, Prepared/1, SetupCommittee/0, Spent/1, TransferEvent/3,
-           TransferFinalized/2, Transferred/3, TweakFor/3, TweakedSig/2,
-           UTXO/1, adec/2, aenc/2, fst/1, h/1, pair/2, pk/1, sign/2, snd/1,
-           true/0, verify/3
+functions: Alice/0, ApprovedTransfer/2, Bob/0, Carol/0, Cmte/0,
+           CommitteeApproved/2, FinalizationSuccess/1, Finalized/1,
+           HasTweakedSig/2, Locked/1, Owner/2, PendingApproval/2, Prepared/1,
+           SetupCommittee/0, Spent/1, TransferEvent/3, TransferFinalized/2,
+           Transferred/3, TweakFor/3, TweakedSig/2, UTXO/1, adec/2, aenc/2,
+           fst/1, h/1, pair/2, pk/1, sign/2, snd/1, true/0, verify/3
 equations:
     adec(aenc(x.1, pk(x.2)), x.2) = x.1,
     fst(<x.1, x.2>) = x.1,
@@ -34,7 +34,10 @@ rule (modulo E) SetupThunderbolt:
 rule (modulo E) PrepareUTXO:
    [ Fr( ~id ) ]
   --[ Prepared( ~id ) ]->
-   [ Locked( ~id ), !Owner( Alice, ~id ), !UTXO( ~id ) ]
+   [
+   Locked( ~id ), !Owner( Alice, ~id ), !UTXO( ~id ),
+   PendingApproval( ~id, Alice )
+   ]
 
   /* has exactly the trivial AC variant */
 
@@ -116,7 +119,22 @@ solve( (#i < #j)  ∥ (#j < #i) )
     case PrepareUTXO
     solve( Locked( ~id ) ▶₁ #i )
       case PrepareUTXO
-      by solve( ApprovedTransfer( ~id, Alice ) ▶₂ #i )
+      solve( ApprovedTransfer( ~id, Alice ) ▶₂ #i )
+        case CommitteeApproval
+        solve( !Owner( u, ~id ) ▶₀ #j )
+          case PrepareUTXO
+          solve( Locked( ~id ) ▶₁ #j )
+            case PrepareUTXO
+            by contradiction /* cyclic */
+          qed
+        next
+          case Reassign
+          by solve( Locked( ~id ) ▶₁ #j )
+        next
+          case Transfer
+          by solve( Locked( ~id ) ▶₁ #j )
+        qed
+      qed
     qed
   next
     case Reassign
@@ -167,7 +185,22 @@ next
     case PrepareUTXO
     solve( Locked( ~id ) ▶₁ #i )
       case PrepareUTXO
-      by solve( ApprovedTransfer( ~id, Alice ) ▶₂ #i )
+      solve( ApprovedTransfer( ~id, Alice ) ▶₂ #i )
+        case CommitteeApproval
+        solve( !Owner( u, ~id ) ▶₀ #j )
+          case PrepareUTXO
+          solve( Locked( ~id ) ▶₁ #j )
+            case PrepareUTXO
+            by contradiction /* cyclic */
+          qed
+        next
+          case Reassign
+          by solve( Locked( ~id ) ▶₁ #j )
+        next
+          case Transfer
+          by solve( Locked( ~id ) ▶₁ #j )
+        qed
+      qed
     qed
   next
     case Reassign
@@ -316,7 +349,10 @@ solve( !Owner( u, id ) ▶₀ #i )
   case PrepareUTXO
   solve( Locked( ~id ) ▶₁ #i )
     case PrepareUTXO
-    by solve( ApprovedTransfer( ~id, Alice ) ▶₂ #i )
+    solve( ApprovedTransfer( ~id, Alice ) ▶₂ #i )
+      case CommitteeApproval
+      by contradiction /* from formulas */
+    qed
   qed
 next
   case Reassign
@@ -369,7 +405,25 @@ solve( !Committee( committee ) ▶₀ #k )
         case PrepareUTXO
         solve( Locked( ~id ) ▶₁ #l )
           case PrepareUTXO
-          by solve( ApprovedTransfer( ~id, Alice ) ▶₂ #l )
+          solve( ApprovedTransfer( ~id, Alice ) ▶₂ #l )
+            case CommitteeApproval
+            solve( TransferEvent( Alice, Bob, ~id ) @ #j )
+              case Transfer
+              solve( !Owner( Alice, ~id ) ▶₀ #j )
+                case PrepareUTXO
+                solve( !TweakFor( Alice, Bob, tAB ) ▶₁ #j )
+                  case GenerateTweaks
+                  solve( !TweakFor( Cmte, Bob, tKB ) ▶₂ #j )
+                    case GenerateTweaks
+                    solve( !UTXO( ~id ) ▶₄ #j )
+                      case PrepareUTXO
+                      SOLVED // trace found
+                    qed
+                  qed
+                qed
+              qed
+            qed
+          qed
         qed
       next
         case Reassign
@@ -426,68 +480,99 @@ qed
 
 lemma transferCompletionPossible:
   exists-trace
-  "∃ id #i #j #k.
-    ((((Prepared( id ) @ #i) ∧ (Transferred( Alice, Bob, id ) @ #j)) ∧
-      (Finalized( id ) @ #k)) ∧
-     (#i < #j)) ∧
-    (#j < #k)"
+  "∃ id #i #j #k #l.
+    ((((((Prepared( id ) @ #i) ∧
+         (CommitteeApproved( id, Alice ) @ #j)) ∧
+        (Transferred( Alice, Bob, id ) @ #k)) ∧
+       (Finalized( id ) @ #l)) ∧
+      (#i < #j)) ∧
+     (#j < #k)) ∧
+    (#k < #l)"
 /*
 guarded formula characterizing all satisfying traces:
-"∃ id #i #j #k.
+"∃ id #i #j #k #l.
   (Prepared( id ) @ #i) ∧
-  (Transferred( Alice, Bob, id ) @ #j) ∧
-  (Finalized( id ) @ #k)
+  (CommitteeApproved( id, Alice ) @ #j) ∧
+  (Transferred( Alice, Bob, id ) @ #k) ∧
+  (Finalized( id ) @ #l)
  ∧
-  (#i < #j) ∧ (#j < #k)"
+  (#i < #j) ∧ (#j < #k) ∧ (#k < #l)"
 */
 simplify
-solve( !Owner( u, ~id ) ▶₀ #k )
-  case PrepareUTXO
-  solve( Locked( ~id ) ▶₁ #k )
+solve( !Committee( committee ) ▶₀ #j )
+  case SetupThunderbolt
+  solve( !UTXO( ~id ) ▶₁ #j )
     case PrepareUTXO
-    by solve( ApprovedTransfer( ~id, Alice ) ▶₂ #k )
-  qed
-next
-  case Reassign
-  solve( Locked( ~id ) ▶₁ #k )
-    case PrepareUTXO
-    solve( ApprovedTransfer( ~id, Carol ) ▶₂ #k )
-      case CommitteeApproval
-      solve( Transferred( Alice, Bob, ~id ) @ #j )
-        case Transfer
-        solve( !Owner( Alice, ~id ) ▶₀ #j )
+    solve( PendingApproval( ~id, Alice ) ▶₂ #j )
+      case PrepareUTXO
+      solve( !Owner( u, ~id ) ▶₀ #l )
+        case PrepareUTXO
+        solve( Locked( ~id ) ▶₁ #l )
           case PrepareUTXO
-          solve( !TweakFor( Alice, Bob, tAB ) ▶₁ #j )
-            case GenerateTweaks
-            solve( !TweakFor( Cmte, Bob, tKB ) ▶₂ #j )
-              case GenerateTweaks
-              solve( !UTXO( ~id ) ▶₄ #j )
+          solve( ApprovedTransfer( ~id, Alice ) ▶₂ #l )
+            case CommitteeApproval
+            solve( Transferred( Alice, Bob, ~id ) @ #k )
+              case Transfer
+              solve( !Owner( Alice, ~id ) ▶₀ #k )
                 case PrepareUTXO
-                SOLVED // trace found
+                solve( !TweakFor( Alice, Bob, tAB ) ▶₁ #k )
+                  case GenerateTweaks
+                  solve( !TweakFor( Cmte, Bob, tKB ) ▶₂ #k )
+                    case GenerateTweaks
+                    solve( !UTXO( ~id ) ▶₄ #k )
+                      case PrepareUTXO
+                      SOLVED // trace found
+                    qed
+                  qed
+                qed
               qed
             qed
           qed
         qed
-      qed
-    qed
-  qed
-next
-  case Transfer
-  solve( Locked( ~id ) ▶₁ #k )
-    case PrepareUTXO
-    solve( ApprovedTransfer( ~id, Bob ) ▶₂ #k )
-      case CommitteeApproval
-      solve( Transferred( Alice, Bob, ~id ) @ #j )
-        case Transfer
-        solve( !Owner( Alice, ~id ) ▶₀ #j )
+      next
+        case Reassign
+        solve( Locked( ~id ) ▶₁ #l )
           case PrepareUTXO
-          solve( !TweakFor( Alice, Bob, tAB ) ▶₁ #j )
-            case GenerateTweaks
-            solve( !TweakFor( Cmte, Bob, tKB ) ▶₂ #j )
-              case GenerateTweaks
-              solve( !UTXO( ~id ) ▶₄ #j )
+          solve( ApprovedTransfer( ~id, Carol ) ▶₂ #l )
+            case CommitteeApproval
+            solve( Transferred( Alice, Bob, ~id ) @ #k )
+              case Transfer
+              solve( !Owner( Alice, ~id ) ▶₀ #k )
                 case PrepareUTXO
-                SOLVED // trace found
+                solve( !TweakFor( Alice, Bob, tAB ) ▶₁ #k )
+                  case GenerateTweaks
+                  solve( !TweakFor( Cmte, Bob, tKB ) ▶₂ #k )
+                    case GenerateTweaks
+                    solve( !UTXO( ~id ) ▶₄ #k )
+                      case PrepareUTXO
+                      SOLVED // trace found
+                    qed
+                  qed
+                qed
+              qed
+            qed
+          qed
+        qed
+      next
+        case Transfer
+        solve( Locked( ~id ) ▶₁ #l )
+          case PrepareUTXO
+          solve( ApprovedTransfer( ~id, Bob ) ▶₂ #l )
+            case CommitteeApproval
+            solve( Transferred( Alice, Bob, ~id ) @ #k )
+              case Transfer
+              solve( !Owner( Alice, ~id ) ▶₀ #k )
+                case PrepareUTXO
+                solve( !TweakFor( Alice, Bob, tAB ) ▶₁ #k )
+                  case GenerateTweaks
+                  solve( !TweakFor( Cmte, Bob, tKB ) ▶₂ #k )
+                    case GenerateTweaks
+                    solve( !UTXO( ~id ) ▶₄ #k )
+                      case PrepareUTXO
+                      SOLVED // trace found
+                    qed
+                  qed
+                qed
               qed
             qed
           qed
@@ -528,7 +613,25 @@ solve( !Committee( committee ) ▶₀ #k )
         case PrepareUTXO
         solve( Locked( ~id ) ▶₁ #l )
           case PrepareUTXO
-          by solve( ApprovedTransfer( ~id, Alice ) ▶₂ #l )
+          solve( ApprovedTransfer( ~id, Alice ) ▶₂ #l )
+            case CommitteeApproval
+            solve( TransferEvent( Alice, Bob, ~id ) @ #j )
+              case Transfer
+              solve( !Owner( Alice, ~id ) ▶₀ #j )
+                case PrepareUTXO
+                solve( !TweakFor( Alice, Bob, tAB ) ▶₁ #j )
+                  case GenerateTweaks
+                  solve( !TweakFor( Cmte, Bob, tKB ) ▶₂ #j )
+                    case GenerateTweaks
+                    solve( !UTXO( ~id ) ▶₄ #j )
+                      case PrepareUTXO
+                      SOLVED // trace found
+                    qed
+                  qed
+                qed
+              qed
+            qed
+          qed
         qed
       next
         case Reassign
@@ -582,6 +685,10 @@ solve( !Committee( committee ) ▶₀ #k )
     qed
   qed
 qed
+
+
+
+
 
 
 

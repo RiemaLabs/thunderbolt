@@ -11,7 +11,8 @@ functions: Alice/0, Bob/0, Carol/0, Cmte/0,
            SetupCommittee/0, 
            Spent/1, TransferEvent/3, Transferred/3, 
            TweakFor/3, TweakedSig/2, UTXO/1,
-           CommitteeApproved/2, TransferFinalized/2
+           CommitteeApproved/2, TransferFinalized/2,
+           PendingApproval/2, ApprovedTransfer/2
 
 // Protocol rules
 rule SetupThunderbolt:
@@ -22,7 +23,7 @@ rule SetupThunderbolt:
 rule PrepareUTXO:
    [ Fr(~id) ]
   --[ Prepared(~id) ]->
-   [ Locked(~id), !Owner(Alice, ~id), !UTXO(~id) ]
+   [ Locked(~id), !Owner(Alice, ~id), !UTXO(~id), PendingApproval(~id, Alice) ]
 
 rule GenerateTweaks:
    [ Fr(~tAB), Fr(~tKB), Fr(~tBC), Fr(~tKC) ]
@@ -122,11 +123,12 @@ lemma canFinalize:
 // There exists a trace where a transfer can be successfully completed
 lemma transferCompletionPossible:
   exists-trace
-  "∃ id #i #j #k.
+  "∃ id #i #j #k #l.
     Prepared(id) @ #i ∧
-    Transferred(Alice, Bob, id) @ #j ∧ 
-    Finalized(id) @ #k ∧
-    #i < #j ∧ #j < #k"
+    CommitteeApproved(id, Alice) @ #j ∧
+    Transferred(Alice, Bob, id) @ #k ∧ 
+    Finalized(id) @ #l ∧
+    #i < #j ∧ #j < #k ∧ #k < #l"
 
 // There exists a trace where a UTXO can be successfully finalized
 lemma finalizationSuccessPossible:
