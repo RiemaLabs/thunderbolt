@@ -6,13 +6,13 @@ builtins: signing, hashing, asymmetric-encryption
 // Functions and constants used in the protocol
 functions: Alice/0, Bob/0, Carol/0, Cmte/0, 
            FinalizationSuccess/1, Finalized/1,
-           HasTweakedSig/2, 
            Locked/1, Owner/2, Prepared/1, 
            SetupCommittee/0, 
-           Spent/1, TransferEvent/3, Transferred/3, 
-           TweakFor/3, TweakedSig/2, UTXO/1,
+           Spent/1, TransferEvent/3, 
+           TweakFor/3, UTXO/1,
            CommitteeApproved/2, TransferFinalized/2,
-           PendingApproval/2, ApprovedTransfer/2
+           PendingApproval/2, ApprovedTransfer/2,
+           ValidSignature/1, HasTweakSecret/1, TweakedSig/2
 
 // Protocol rules
 rule SetupThunderbolt:
@@ -36,8 +36,7 @@ rule Transfer:
    [ !Owner(Alice, id), 
      !TweakFor(Alice, Bob, tAB), !TweakFor(Cmte, Bob, tKB),
      Fr(~sig), !UTXO(id) ]
-  --[ Transferred(Alice, Bob, id), HasTweakedSig(Bob, ~sig),
-      TransferEvent(Alice, Bob, id), TweakedSig(Bob, ~sig),
+  --[ TransferEvent(Alice, Bob, id), TweakedSig(Bob, ~sig),
       ValidSignature(~sig), HasTweakSecret(Bob) ]->
    [ !Owner(Bob, id), Out(<Bob, ~sig>), PendingApproval(id, Bob) ]
 
@@ -46,8 +45,7 @@ rule Reassign:
    [ !Owner(Bob, id), 
      !TweakFor(Bob, Carol, tBC), !TweakFor(Cmte, Carol, tKC),
      Fr(~sig) ]
-  --[ Transferred(Bob, Carol, id), HasTweakedSig(Carol, ~sig),
-      TransferEvent(Bob, Carol, id), TweakedSig(Carol, ~sig),
+  --[ TransferEvent(Bob, Carol, id), TweakedSig(Carol, ~sig),
       ValidSignature(~sig), HasTweakSecret(Carol) ]->
    [ !Owner(Carol, id), Out(<Carol, ~sig>), PendingApproval(id, Carol) ]
 
@@ -71,19 +69,12 @@ lemma OneTimeSpendability:
   "∀ utxo #i #j.
     (Finalized(utxo) @ #i) ∧ (Finalized(utxo) @ #j) ⇒ (#i = #j)"
 
-// When a transfer occurs, the receiver should obtain a tweaked signature
+// When a transfer occurs, the receiver should have a tweaked signature
 lemma OwnershipTransfer:
   all-traces
-  "∀ sender receiver u #i.
-    Transferred(sender, receiver, u) @ #i
-    ⇒ ∃ sig. HasTweakedSig(receiver, sig) @ #i"
-
-// UTXOs can only be spent with proper authorization
-lemma SpendAuthorization:
-  all-traces
-  "∀ a b id #i.
-    Transferred(a, b, id) @ #i
-    ⇒ ∃ twe. HasTweakedSig(b, twe) @ #i"
+  "∀ sender receiver id #i.
+    TransferEvent(sender, receiver, id) @ #i
+    ⇒ ∃ sig. TweakedSig(receiver, sig) @ #i"
 
 // Only the intended recipient who knows the correct tweak secrets can recover a valid signature from a tweaked signature
 lemma OwnershipSoundness:
@@ -126,7 +117,7 @@ lemma transferCompletionPossible:
   "∃ id #i #j #k #l.
     Prepared(id) @ #i ∧
     CommitteeApproved(id, Alice) @ #j ∧
-    Transferred(Alice, Bob, id) @ #k ∧ 
+    TransferEvent(Alice, Bob, id) @ #k ∧ 
     Finalized(id) @ #l ∧
     #i < #j ∧ #j < #k ∧ #k < #l"
 

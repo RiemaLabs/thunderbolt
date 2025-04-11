@@ -4,9 +4,9 @@ theory Thunderbolt begin
 
 functions: Alice/0, ApprovedTransfer/2, Bob/0, Carol/0, Cmte/0,
            CommitteeApproved/2, FinalizationSuccess/1, Finalized/1,
-           HasTweakedSig/2, Locked/1, Owner/2, PendingApproval/2, Prepared/1,
+           HasTweakSecret/1, Locked/1, Owner/2, PendingApproval/2, Prepared/1,
            SetupCommittee/0, Spent/1, TransferEvent/3, TransferFinalized/2,
-           Transferred/3, TweakFor/3, TweakedSig/2, UTXO/1, adec/2, aenc/2,
+           TweakFor/3, TweakedSig/2, UTXO/1, ValidSignature/1, adec/2, aenc/2,
            fst/1, h/1, pair/2, pk/1, sign/2, snd/1, true/0, verify/3
 equations:
     adec(aenc(x.1, pk(x.2)), x.2) = x.1,
@@ -57,7 +57,6 @@ rule (modulo E) Transfer:
    !TweakFor( Cmte, Bob, tKB ), Fr( ~sig ), !UTXO( id )
    ]
   --[
-  Transferred( Alice, Bob, id ), HasTweakedSig( Bob, ~sig ),
   TransferEvent( Alice, Bob, id ), TweakedSig( Bob, ~sig ),
   ValidSignature( ~sig ), HasTweakSecret( Bob )
   ]->
@@ -72,7 +71,6 @@ rule (modulo E) Reassign:
    !TweakFor( Cmte, Carol, tKC ), Fr( ~sig )
    ]
   --[
-  Transferred( Bob, Carol, id ), HasTweakedSig( Carol, ~sig ),
   TransferEvent( Bob, Carol, id ), TweakedSig( Carol, ~sig ),
   ValidSignature( ~sig ), HasTweakSecret( Carol )
   ]->
@@ -249,39 +247,18 @@ qed
 
 lemma OwnershipTransfer:
   all-traces
-  "∀ sender receiver u #i.
-    (Transferred( sender, receiver, u ) @ #i) ⇒
-    (∃ sig. HasTweakedSig( receiver, sig ) @ #i)"
+  "∀ sender receiver id #i.
+    (TransferEvent( sender, receiver, id ) @ #i) ⇒
+    (∃ sig. TweakedSig( receiver, sig ) @ #i)"
 /*
 guarded formula characterizing all counter-examples:
-"∃ sender receiver u #i.
-  (Transferred( sender, receiver, u ) @ #i)
+"∃ sender receiver id #i.
+  (TransferEvent( sender, receiver, id ) @ #i)
  ∧
-  ∀ sig. (HasTweakedSig( receiver, sig ) @ #i) ⇒ ⊥"
+  ∀ sig. (TweakedSig( receiver, sig ) @ #i) ⇒ ⊥"
 */
 simplify
-solve( Transferred( sender, receiver, u ) @ #i )
-  case Reassign
-  by contradiction /* from formulas */
-next
-  case Transfer
-  by contradiction /* from formulas */
-qed
-
-lemma SpendAuthorization:
-  all-traces
-  "∀ a b id #i.
-    (Transferred( a, b, id ) @ #i) ⇒
-    (∃ twe. HasTweakedSig( b, twe ) @ #i)"
-/*
-guarded formula characterizing all counter-examples:
-"∃ a b id #i.
-  (Transferred( a, b, id ) @ #i)
- ∧
-  ∀ twe. (HasTweakedSig( b, twe ) @ #i) ⇒ ⊥"
-*/
-simplify
-solve( Transferred( a, b, id ) @ #i )
+solve( TransferEvent( sender, receiver, id ) @ #i )
   case Reassign
   by contradiction /* from formulas */
 next
@@ -483,7 +460,7 @@ lemma transferCompletionPossible:
   "∃ id #i #j #k #l.
     ((((((Prepared( id ) @ #i) ∧
          (CommitteeApproved( id, Alice ) @ #j)) ∧
-        (Transferred( Alice, Bob, id ) @ #k)) ∧
+        (TransferEvent( Alice, Bob, id ) @ #k)) ∧
        (Finalized( id ) @ #l)) ∧
       (#i < #j)) ∧
      (#j < #k)) ∧
@@ -493,7 +470,7 @@ guarded formula characterizing all satisfying traces:
 "∃ id #i #j #k #l.
   (Prepared( id ) @ #i) ∧
   (CommitteeApproved( id, Alice ) @ #j) ∧
-  (Transferred( Alice, Bob, id ) @ #k) ∧
+  (TransferEvent( Alice, Bob, id ) @ #k) ∧
   (Finalized( id ) @ #l)
  ∧
   (#i < #j) ∧ (#j < #k) ∧ (#k < #l)"
@@ -511,7 +488,7 @@ solve( !Committee( committee ) ▶₀ #j )
           case PrepareUTXO
           solve( ApprovedTransfer( ~id, Alice ) ▶₂ #l )
             case CommitteeApproval
-            solve( Transferred( Alice, Bob, ~id ) @ #k )
+            solve( TransferEvent( Alice, Bob, ~id ) @ #k )
               case Transfer
               solve( !Owner( Alice, ~id ) ▶₀ #k )
                 case PrepareUTXO
@@ -535,7 +512,7 @@ solve( !Committee( committee ) ▶₀ #j )
           case PrepareUTXO
           solve( ApprovedTransfer( ~id, Carol ) ▶₂ #l )
             case CommitteeApproval
-            solve( Transferred( Alice, Bob, ~id ) @ #k )
+            solve( TransferEvent( Alice, Bob, ~id ) @ #k )
               case Transfer
               solve( !Owner( Alice, ~id ) ▶₀ #k )
                 case PrepareUTXO
@@ -559,7 +536,7 @@ solve( !Committee( committee ) ▶₀ #j )
           case PrepareUTXO
           solve( ApprovedTransfer( ~id, Bob ) ▶₂ #l )
             case CommitteeApproval
-            solve( Transferred( Alice, Bob, ~id ) @ #k )
+            solve( TransferEvent( Alice, Bob, ~id ) @ #k )
               case Transfer
               solve( !Owner( Alice, ~id ) ▶₀ #k )
                 case PrepareUTXO
