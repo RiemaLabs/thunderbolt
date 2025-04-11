@@ -6,13 +6,14 @@ builtins: signing, hashing, asymmetric-encryption
 // Functions and constants used in the protocol
 functions: Alice/0, Bob/0, Carol/0, Cmte/0, 
            FinalizationSuccess/1, Finalized/1,
-           Locked/1, Owner/2, Prepared/1, 
+           Locked/1, Prepared/1, 
            SetupCommittee/0, 
            Spent/1, TransferEvent/3, 
            TweakFor/3, UTXO/1,
            CommitteeApproved/2, TransferFinalized/2,
-           PendingApproval/2, ApprovedTransfer/2,
-           ValidSignature/1, HasTweakSecret/1, TweakedSig/2
+           ApprovedTransfer/2,
+           ValidSignature/1, HasTweakSecret/1, TweakedSig/2,
+           OwnerState/3 
 
 // Protocol rules
 rule SetupThunderbolt:
@@ -23,7 +24,7 @@ rule SetupThunderbolt:
 rule PrepareUTXO:
    [ Fr(~id) ]
   --[ Prepared(~id) ]->
-   [ Locked(~id), !Owner(Alice, ~id), !UTXO(~id), PendingApproval(~id, Alice) ]
+   [ Locked(~id), !OwnerState(Alice, ~id, 'Pending'), !UTXO(~id) ]
 
 rule GenerateTweaks:
    [ Fr(~tAB), Fr(~tKB), Fr(~tBC), Fr(~tKC) ]
@@ -31,33 +32,23 @@ rule GenerateTweaks:
    [ !TweakFor(Alice, Bob, ~tAB), !TweakFor(Cmte, Bob, ~tKB),
      !TweakFor(Bob, Carol, ~tBC), !TweakFor(Cmte, Carol, ~tKC) ]
 
-// Transfer from Alice to Bob with committee involvement
 rule Transfer:
-   [ !Owner(Alice, id), 
-     !TweakFor(Alice, Bob, tAB), !TweakFor(Cmte, Bob, tKB),
+   [ !OwnerState(sender, id, 'Approved'), 
+     !TweakFor(sender, receiver, t_sr), !TweakFor(Cmte, receiver, t_cr),
      Fr(~sig), !UTXO(id) ]
-  --[ TransferEvent(Alice, Bob, id), TweakedSig(Bob, ~sig),
-      ValidSignature(~sig), HasTweakSecret(Bob) ]->
-   [ !Owner(Bob, id), Out(<Bob, ~sig>), PendingApproval(id, Bob) ]
-
-// Reassign from Bob to Carol with committee involvement
-rule Reassign:
-   [ !Owner(Bob, id), 
-     !TweakFor(Bob, Carol, tBC), !TweakFor(Cmte, Carol, tKC),
-     Fr(~sig) ]
-  --[ TransferEvent(Bob, Carol, id), TweakedSig(Carol, ~sig),
-      ValidSignature(~sig), HasTweakSecret(Carol) ]->
-   [ !Owner(Carol, id), Out(<Carol, ~sig>), PendingApproval(id, Carol) ]
+  --[ TransferEvent(sender, receiver, id), TweakedSig(receiver, ~sig),
+      ValidSignature(~sig), HasTweakSecret(receiver) ]->
+   [ !OwnerState(receiver, id, 'Pending'), Out(<receiver, ~sig>) ]
 
 // Committee approves a transfer
 rule CommitteeApproval:
-   [ !Committee(committee), !UTXO(id), PendingApproval(id, u), Fr(~approval) ]
+   [ !Committee(committee), !UTXO(id), !OwnerState(u, id, 'Pending'), Fr(~approval) ]
   --[ CommitteeApproved(id, u) ]->
-   [ ApprovedTransfer(id, u) ]
+   [ !OwnerState(u, id, 'Approved') ]
 
 // Finalize the transfer with committee approval
 rule Finalize:
-   [ !Owner(u, id), Locked(id), ApprovedTransfer(id, u) ]
+   [ !OwnerState(u, id, 'Approved'), Locked(id) ]
   --[ Finalized(id), FinalizationSuccess(id), TransferFinalized(u, id) ]->
    [ Spent(id) ]
 
