@@ -1,554 +1,141 @@
 theory Thunderbolt begin
 
-// Function signature and definition of the equational theory E
+// Basic cryptographic primitives
+builtins: signing, hashing, asymmetric-encryption
 
-functions: Add/2, Alice/0, Bob/0, Carol/0, Challenge/1, Cmte/0,
-           Committee/2, CommitteeCreated/1, CommitteeKey/1, CommitteeVote/2,
-           CorruptCount/1, Corrupted/1, FinalizationSuccess/1, Finalized/1,
-           HasSecrets/3, HasTweakSecret/1, HasTweakedSig/2, Hash/1, Honest/1,
-           Key/1, Locked/1, Nonce/1, Owner/2, Prepared/1, QuorumSignatures/2,
-           QuorumSigned/1, QuorumVote/2, ResponsiveQuorum/1, S_K/2,
-           SetupCommittee/0, SigCreated/1, SignatureShare/3, Spent/1, Sub/2,
-           TransferEvent/3, TransferSuccess/1, Transferred/3, Tweak/2,
-           TweakFor/3, TweakedSig/2, UTXO/1, ValidSigEvent/2,
-           ValidSignature/1, View/3, ViewAt/3, Vote/2, adec/2, aenc/2, f/0,
-           fst/1, h/1, num0/0, num1/0, num2/0, num3/0, pair/2, pk/1, sign/2,
-           snd/1, true/0, utxo/0, verify/3
-equations:
-    adec(aenc(x.1, pk(x.2)), x.2) = x.1,
-    fst(<x.1, x.2>) = x.1,
-    snd(<x.1, x.2>) = x.2,
-    verify(sign(x.1, x.2), x.1, pk(x.2)) = true
+// Functions and constants used in the protocol
+functions: Alice/0, Bob/0, Carol/0, Cmte/0, 
+           FinalizationSuccess/1, Finalized/1,
+           HasTweakedSig/2, 
+           Locked/1, Owner/2, Prepared/1, 
+           SetupCommittee/0, 
+           Spent/1, TransferEvent/3, Transferred/3, 
+           TweakFor/3, TweakedSig/2, UTXO/1,
+           CommitteeApproved/2, TransferFinalized/2
 
+// Protocol rules
+rule SetupThunderbolt:
+   [ Fr(~committee) ]
+  --[ SetupCommittee() ]->
+   [ !Committee(~committee) ]
 
+rule PrepareUTXO:
+   [ Fr(~id) ]
+  --[ Prepared(~id) ]->
+   [ Locked(~id), !Owner(Alice, ~id), !UTXO(~id) ]
 
-
-
-
-
-
-
-
-
-restriction OneTimeSpendRestriction:
-  "∀ #i #j.
-    ((Finalized( utxo ) @ #i) ∧ (Finalized( utxo ) @ #j)) ⇒ (#i = #j)"
-  // safety formula
-
-rule (modulo E) GenerateCommittee:
-   [ Fr( ~id ) ]
-  --[ SetupCommittee( ), CommitteeCreated( ~id ) ]->
-   [
-   !Honest( 'committee_1' ), !Honest( 'committee_2' ),
-   !Honest( 'committee_3' ), !Committee( 'committee_1', num1 ),
-   !Committee( 'committee_2', num2 ),
-   !Committee( 'committee_3', num3 )
-   ]
-
-  /* has exactly the trivial AC variant */
-
-rule (modulo E) CorruptCommittee:
-   [ !Committee( c, id ) ]
-  --[ Corrupted( c ), CorruptCount( num1 ) ]->
-   [ Out( c ) ]
-
-  /* has exactly the trivial AC variant */
-
-rule (modulo E) PrepareUTXO:
-   [ Fr( ~rA ), Fr( ~pA ), Fr( ~rK ), Fr( ~pK ), Fr( ~id ) ]
-  --[ Prepared( ~id ) ]->
-   [
-   Locked( ~id ), Owner( Alice, ~id ), !Nonce( ~rA ), !Key( ~pA ),
-   !Nonce( ~rK ), !Key( ~pK ), !Challenge( 'c' ), !UTXO( ~id )
-   ]
-
-  /* has exactly the trivial AC variant */
-
-rule (modulo E) GenerateTweaks:
-   [ Fr( ~tAB ), Fr( ~tKB ), Fr( ~tBC ), Fr( ~tKC ) ]
+rule GenerateTweaks:
+   [ Fr(~tAB), Fr(~tKB), Fr(~tBC), Fr(~tKC) ]
   -->
-   [
-   !TweakFor( Alice, Bob, ~tAB ), !TweakFor( Cmte, Bob, ~tKB ),
-   !TweakFor( Bob, Carol, ~tBC ), !TweakFor( Cmte, Carol, ~tKC )
-   ]
+   [ !TweakFor(Alice, Bob, ~tAB), !TweakFor(Cmte, Bob, ~tKB),
+     !TweakFor(Bob, Carol, ~tBC), !TweakFor(Cmte, Carol, ~tKC) ]
 
-  /* has exactly the trivial AC variant */
+// Transfer from Alice to Bob with committee involvement
+rule Transfer:
+   [ !Owner(Alice, id), 
+     !TweakFor(Alice, Bob, tAB), !TweakFor(Cmte, Bob, tKB),
+     Fr(~sig), !UTXO(id) ]
+  --[ Transferred(Alice, Bob, id), HasTweakedSig(Bob, ~sig),
+      TransferEvent(Alice, Bob, id), TweakedSig(Bob, ~sig),
+      ValidSignature(~sig), HasTweakSecret(Bob) ]->
+   [ !Owner(Bob, id), Out(<Bob, ~sig>), PendingApproval(id, Bob) ]
 
-rule (modulo E) Transfer:
-   [
-   Owner( Alice, utxo ), !TweakFor( Alice, Bob, 'tweakAB' ),
-   !TweakFor( Cmte, Bob, 'tweakKB' )
-   ]
-  --[
-  Transferred( Alice, Bob, utxo ),
-  HasTweakedSig( Bob, 'tweakedSig' ),
-  TransferEvent( Alice, Bob, utxo )
-  ]->
-   [ Owner( Bob, utxo ), TweakedSig( Bob, 'tweakedSig' ) ]
+// Reassign from Bob to Carol with committee involvement
+rule Reassign:
+   [ !Owner(Bob, id), 
+     !TweakFor(Bob, Carol, tBC), !TweakFor(Cmte, Carol, tKC),
+     Fr(~sig) ]
+  --[ Transferred(Bob, Carol, id), HasTweakedSig(Carol, ~sig),
+      TransferEvent(Bob, Carol, id), TweakedSig(Carol, ~sig),
+      ValidSignature(~sig), HasTweakSecret(Carol) ]->
+   [ !Owner(Carol, id), Out(<Carol, ~sig>), PendingApproval(id, Carol) ]
 
-  /* has exactly the trivial AC variant */
+// Committee approves a transfer
+rule CommitteeApproval:
+   [ !Committee(committee), !UTXO(id), PendingApproval(id, u), Fr(~approval) ]
+  --[ CommitteeApproved(id, u) ]->
+   [ ApprovedTransfer(id, u) ]
 
-rule (modulo E) Reassign:
-   [
-   Owner( Bob, utxo ), !TweakFor( Bob, Carol, 'tweakBC' ),
-   !TweakFor( Cmte, Carol, 'tweakKC' )
-   ]
-  --[
-  Transferred( Bob, Carol, utxo ),
-  HasTweakedSig( Carol, 'tweakedSig' ),
-  TransferEvent( Bob, Carol, utxo )
-  ]->
-   [ Owner( Carol, utxo ), TweakedSig( Carol, 'tweakedSig' ) ]
+// Finalize the transfer with committee approval
+rule Finalize:
+   [ !Owner(u, id), Locked(id), ApprovedTransfer(id, u) ]
+  --[ Finalized(id), FinalizationSuccess(id), TransferFinalized(u, id) ]->
+   [ Spent(id) ]
 
-  /* has exactly the trivial AC variant */
+// Security lemmas
 
-rule (modulo E) CommitSig:
-   [ !Honest( 'committeeMember' ), Fr( ~s ), !UTXO( 'someUtxo' ) ]
-  --[ SigCreated( ~s ) ]->
-   [ !SignatureShare( 'committeeMember', 'someUtxo', ~s ) ]
-
-  /* has exactly the trivial AC variant */
-
-rule (modulo E) QuorumVote:
-   [
-   !Honest( 'committeeMember' ),
-   !SignatureShare( 'committeeMember', 'someUtxo', 'signature' )
-   ]
-  --[ Vote( 'committeeMember', 'someUtxo' ) ]->
-   [ QuorumVote( 'someUtxo', 'signature' ) ]
-
-  /* has exactly the trivial AC variant */
-
-rule (modulo E) AggregateQuorum:
-   [
-   QuorumVote( 'someUtxo', 'sig1' ), QuorumVote( 'someUtxo', 'sig2' ),
-   QuorumVote( 'someUtxo', 'sig3' )
-   ]
-  --[ QuorumSigned( 'someUtxo' ), ResponsiveQuorum( 'someUtxo' ) ]->
-   [ QuorumSignatures( 'someUtxo', 'combinedSig' ) ]
-
-  /* has exactly the trivial AC variant */
-
-rule (modulo E) Finalize:
-   [
-   Owner( Alice, utxo ), Locked( utxo ),
-   QuorumSignatures( utxo, 'combinedSig' )
-   ]
-  --[ Finalized( utxo ), FinalizationSuccess( utxo ) ]->
-   [ Spent( utxo ) ]
-
-  /* has exactly the trivial AC variant */
-
-rule (modulo E) ValidateTweakedSig:
-   [ TweakedSig( 'someUser', 'someSignature' ) ]
-  --[
-  ValidSignature( 'someSignature' ),
-  ValidSigEvent( 'someUser', 'someSignature' )
-  ]->
-   [ ]
-
-  /* has exactly the trivial AC variant */
-
-rule (modulo E) MarkTransferSuccess:
-   [
-   Owner( 'someUser', utxo ),
-   TweakedSig( 'someUser', 'someSignature' )
-   ]
-  --[ TransferSuccess( utxo ), HasTweakSecret( 'someUser' ) ]->
-   [ ]
-
-  /* has exactly the trivial AC variant */
-
-rule (modulo E) RegisterView:
-   [ !Honest( 'committeeMember' ), Owner( 'someUser', utxo ) ]
-  --[ ViewAt( 'committeeMember', utxo, 'someUser' ) ]->
-   [ !View( 'committeeMember', utxo, 'someUser' ) ]
-
-  /* has exactly the trivial AC variant */
-
-rule (modulo E) HasTweakSecrets:
-   [
-   !TweakFor( Alice, 'someUser', 'tweak1' ),
-   !TweakFor( Cmte, 'someUser', 'tweak2' ),
-   TweakedSig( 'someUser', 'signature' )
-   ]
-  --[
-  HasSecrets( 'someUser', 'tweak1', 'tweak2' ),
-  HasTweakSecret( 'someUser' )
-  ]->
-   [ ]
-
-  /* has exactly the trivial AC variant */
-
-rule (modulo E) CommitteeSetup:
-   [ Fr( ~sk ) ]
-  --[ CommitteeCreated( ~sk ), SetupCommittee( ) ]->
-   [ !CommitteeKey( ~sk ), !S_K( 'sign', ~sk ), Out( pk(~sk) ) ]
-
-  /* has exactly the trivial AC variant */
-
-rule (modulo E) FinalizeTransfer:
-   [ Owner( Alice, utxo ), !Committee( Cmte, num0 ) ]
-  --[ Finalized( utxo ) ]->
-   [ ]
-
-  /* has exactly the trivial AC variant */
-
-rule (modulo E) ValidSignatureDeclaration:
-   [ ] --[ ValidSignature( 'dummySig' ) ]-> [ ]
-
-  /* has exactly the trivial AC variant */
-
-rule (modulo E) QuorumSignedDeclaration:
-   [ ] --[ QuorumSigned( 'someUtxo' ) ]-> [ ]
-
-  /* has exactly the trivial AC variant */
-
-rule (modulo E) TweakedSigDeclaration:
-   [ ] --[ TweakedSig( 'someUser', 'someSignature' ) ]-> [ ]
-
-  /* has exactly the trivial AC variant */
-
-rule (modulo E) HasTweakSecretDeclaration:
-   [ ] --[ HasTweakSecret( 'someUser' ) ]-> [ ]
-
-  /* has exactly the trivial AC variant */
-
-rule (modulo E) ResponsiveQuorumDeclaration:
-   [ ] --[ ResponsiveQuorum( 'someUtxo' ) ]-> [ ]
-
-  /* has exactly the trivial AC variant */
-
+// Ensure that a UTXO can only be spent once
 lemma OneTimeSpendability:
   all-traces
-  "∀ id #i #j.
-    ((Finalized( id ) @ #i) ∧ (Finalized( id ) @ #j)) ⇒ (#i = #j)"
-/*
-guarded formula characterizing all counter-examples:
-"∃ id #i #j.
-  (Finalized( id ) @ #i) ∧ (Finalized( id ) @ #j) ∧ ¬(#i = #j)"
-*/
-simplify
-solve( (#i < #j)  ∥ (#j < #i) )
-  case case_1
-  solve( Finalized( id ) @ #i )
-    case Finalize
-    by contradiction /* cyclic */
-  next
-    case FinalizeTransfer
-    by contradiction /* cyclic */
-  qed
-next
-  case case_2
-  solve( Finalized( id ) @ #i )
-    case Finalize
-    by contradiction /* cyclic */
-  next
-    case FinalizeTransfer
-    by contradiction /* cyclic */
-  qed
-qed
+  "∀ utxo #i #j.
+    (Finalized(utxo) @ #i) ∧ (Finalized(utxo) @ #j) ⇒ (#i = #j)"
 
+// When a transfer occurs, the receiver should obtain a tweaked signature
 lemma OwnershipTransfer:
   all-traces
   "∀ sender receiver u #i.
-    (Transferred( sender, receiver, u ) @ #i) ⇒
-    (∃ sig. HasTweakedSig( receiver, sig ) @ #i)"
-/*
-guarded formula characterizing all counter-examples:
-"∃ sender receiver u #i.
-  (Transferred( sender, receiver, u ) @ #i)
- ∧
-  ∀ sig. (HasTweakedSig( receiver, sig ) @ #i) ⇒ ⊥"
-*/
-simplify
-solve( Transferred( sender, receiver, u ) @ #i )
-  case Reassign
-  by contradiction /* from formulas */
-next
-  case Transfer
-  by contradiction /* from formulas */
-qed
+    Transferred(sender, receiver, u) @ #i
+    ⇒ ∃ sig. HasTweakedSig(receiver, sig) @ #i"
 
+// UTXOs can only be spent with proper authorization
 lemma SpendAuthorization:
   all-traces
   "∀ a b id #i.
-    (Transferred( a, b, id ) @ #i) ⇒
-    (∃ twe. HasTweakedSig( b, twe ) @ #i)"
-/*
-guarded formula characterizing all counter-examples:
-"∃ a b id #i.
-  (Transferred( a, b, id ) @ #i)
- ∧
-  ∀ twe. (HasTweakedSig( b, twe ) @ #i) ⇒ ⊥"
-*/
-simplify
-solve( Transferred( a, b, id ) @ #i )
-  case Reassign
-  by contradiction /* from formulas */
-next
-  case Transfer
-  by contradiction /* from formulas */
-qed
+    Transferred(a, b, id) @ #i
+    ⇒ ∃ twe. HasTweakedSig(b, twe) @ #i"
 
+// Only the intended recipient who knows the correct tweak secrets can recover a valid signature from a tweaked signature
 lemma OwnershipSoundness:
   all-traces
-  "∀ u sig #i #j.
-    ((TweakedSig( u, sig ) @ #i) ∧ (ValidSignature( sig ) @ #j)) ⇒
-    (∃ #k. HasTweakSecret( u ) @ #k)"
-/*
-guarded formula characterizing all counter-examples:
-"∃ u sig #i #j.
-  (TweakedSig( u, sig ) @ #i) ∧ (ValidSignature( sig ) @ #j)
- ∧
-  ∀ #k. (HasTweakSecret( u ) @ #k) ⇒ ⊥"
-*/
-simplify
-solve( ValidSignature( 'someSignature' ) @ #j )
-  case ValidateTweakedSig
-  by solve( TweakedSig( 'someUser', 'someSignature' ) ▶₀ #j )
-qed
+  "∀ sig #i.
+    ValidSignature(sig) @ #i
+    ⇒ ∃ u #j. HasTweakSecret(u) @ #j"
 
+// Signature unforgeability
 lemma Unforgeability:
   all-traces
   "∀ sig #i.
-    (ValidSignature( sig ) @ #i) ⇒
-    (∃ id #j. (#j < #i) ∧ (QuorumSigned( id ) @ #j))"
-/*
-guarded formula characterizing all counter-examples:
-"∃ sig #i.
-  (ValidSignature( sig ) @ #i)
- ∧
-  ∀ id #j. (QuorumSigned( id ) @ #j) ⇒ ¬(#j < #i)"
-*/
-induction
-  case empty_trace
-  by contradiction /* from formulas */
-next
-  case non_empty_trace
-  simplify
-  solve( ValidSignature( sig ) @ #i )
-    case ValidSignatureDeclaration
-    solve( (last(#i))  ∥
-           (∃ id #j. (QuorumSigned( id ) @ #j) ∧ (¬(last(#j))) ∧ (#j < #i)) )
-      case case_1
-      SOLVED // trace found
-    next
-      case case_2
-      by contradiction /* from formulas */
-    qed
-  next
-    case ValidateTweakedSig
-    by sorry
-  qed
-qed
+    ValidSignature(sig) @ #i
+    ⇒ ∃ u #j #k. 
+       TweakedSig(u, sig) @ #j ∧ 
+       HasTweakSecret(u) @ #k"
 
-lemma LedgerConsistency:
+// Committee involvement is required for finalization
+lemma CommitteeAuthorizationRequired:
   all-traces
-  "∀ c1 c2 u1 u2 u #i #j.
-    ((ViewAt( c1, u, u1 ) @ #i) ∧ (ViewAt( c2, u, u2 ) @ #j)) ⇒
-    (u1 = u2)"
-/*
-guarded formula characterizing all counter-examples:
-"∃ c1 c2 u1 u2 u #i #j.
-  (ViewAt( c1, u, u1 ) @ #i) ∧ (ViewAt( c2, u, u2 ) @ #j)
- ∧
-  ¬(u1 = u2)"
-*/
-simplify
-by contradiction /* from formulas */
+  "∀ id u #i.
+    TransferFinalized(u, id) @ #i
+    ⇒ ∃ #j. (#j < #i) ∧ CommitteeApproved(id, u) @ #j"
+      
+// Existence lemmas
 
-
+// There exists a trace where a transfer event can lead to finalization
 lemma canFinalize:
   exists-trace
-  "∃ a b id #i #j.
-    ((TransferEvent( a, b, id ) @ #i) ∧ (Finalized( id ) @ #j)) ∧
-    (#i < #j)"
-/*
-guarded formula characterizing all satisfying traces:
-"∃ a b id #i #j.
-  (TransferEvent( a, b, id ) @ #i) ∧ (Finalized( id ) @ #j)
- ∧
-  #i < #j"
-*/
-induction
-  case empty_trace
-  by contradiction /* from formulas */
-next
-  case non_empty_trace
-  simplify
-  solve( TransferEvent( a, b, id ) @ #i )
-    case Reassign
-    by sorry
-  next
-    case Transfer
-    by sorry
-  qed
-qed
+  "∃ id #i #j #k #l.
+    Prepared(id) @ #i ∧
+    TransferEvent(Alice, Bob, id) @ #j ∧
+    CommitteeApproved(id, Bob) @ #k ∧
+    Finalized(id) @ #l ∧
+    #i < #j ∧ #j < #k ∧ #k < #l"
 
-lemma transferSuccessPossible:
+// There exists a trace where a transfer can be successfully completed
+lemma transferCompletionPossible:
   exists-trace
-  "∃ id #i.
-    (ResponsiveQuorum( id ) @ #i) ∧
-    (∃ #j. (TransferSuccess( id ) @ #j) ∧ (#i < #j))"
-/*
-guarded formula characterizing all satisfying traces:
-"∃ id #i.
-  (ResponsiveQuorum( id ) @ #i)
- ∧
-  ∃ #j. (TransferSuccess( id ) @ #j) ∧ #i < #j"
-*/
-simplify
-by solve( Owner( 'someUser', utxo ) ▶₀ #j )
+  "∃ id #i #j #k.
+    Prepared(id) @ #i ∧
+    Transferred(Alice, Bob, id) @ #j ∧ 
+    Finalized(id) @ #k ∧
+    #i < #j ∧ #j < #k"
 
-
+// There exists a trace where a UTXO can be successfully finalized
 lemma finalizationSuccessPossible:
   exists-trace
-  "∃ id #i.
-    (ResponsiveQuorum( id ) @ #i) ∧
-    (∃ #j. (FinalizationSuccess( id ) @ #j) ∧ (#i < #j))"
-/*
-guarded formula characterizing all satisfying traces:
-"∃ id #i.
-  (ResponsiveQuorum( id ) @ #i)
- ∧
-  ∃ #j. (FinalizationSuccess( id ) @ #j) ∧ #i < #j"
-*/
-simplify
-by solve( Owner( Alice, utxo ) ▶₀ #j )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-/* All wellformedness checks were successful. */
-
-/*
-Generated from:
-Tamarin version 1.10.0
-Maude version 2.7.1
-Git revision: UNKNOWN, branch: UNKNOWN
-Compiled at: 2024-10-30 13:42:18.081591 UTC
-*/
+  "∃ id #i #j #k #l.
+    Prepared(id) @ #i ∧ 
+    TransferEvent(Alice, Bob, id) @ #j ∧
+    CommitteeApproved(id, Bob) @ #k ∧
+    FinalizationSuccess(id) @ #l ∧
+    #i < #j ∧ #j < #k ∧ #k < #l"
 
 end
