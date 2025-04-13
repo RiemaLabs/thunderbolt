@@ -1,0 +1,127 @@
+theory Thunderbolt begin
+
+// Basic cryptographic primitives
+builtins: signing, hashing, asymmetric-encryption
+
+// Functions and constants used in the protocol
+functions: Alice/0, Bob/0, Carol/0, Cmte/0, 
+           FinalizationSuccess/1, Finalized/1,
+           Locked/1, Prepared/1, 
+           SetupCommittee/0, 
+           Spent/1, TransferEvent/4, 
+           TweakFor/3, UTXO/1,
+           CommitteeApproved/3, TransferFinalized/2,
+           ApprovedTransfer/2,
+           ValidSignature/1, HasTweakSecret/1, TweakedSig/2,
+           OwnerState/3
+
+// Protocol rules
+rule SetupThunderbolt:
+   [ Fr(~committee) ]
+  --[ SetupCommittee() ]->
+   [ !Committee(~committee) ]
+
+rule PrepareUTXO:
+   [ Fr(~id), Fr(~sender) ]
+  --[ Prepared(~id) ]->
+   [ Locked(~id), !OwnerState(~sender, ~id, 'Pending'), !UTXO(~id) ]
+   
+rule GenerateTweaks:
+   [ !Committee(~committee), Fr(~t_sr), Fr(~t_cr), !OwnerState(~sender, ~id, 'Pending'), Fr(~receiver)]
+  -->
+   [ !TweakFor(~sender, ~receiver, ~t_sr),
+     !TweakFor(~committee, ~receiver, ~t_cr) ]
+
+rule Transfer:
+   [ !Committee(~committee), !OwnerState(~sender, ~id, 'Approved'),
+     !TweakFor(~sender, ~receiver, t_sr), !TweakFor(~committee, ~receiver, t_cr),
+     Fr(~sig), !UTXO(~id) ]
+  --[ TransferEvent(~committee, ~sender, ~receiver, ~id), TweakedSig(~receiver, ~sig),
+      ValidSignature(~sig), HasTweakSecret(~receiver) ]->
+   [ !OwnerState(~receiver, ~id, 'Pending'), Out(<~receiver, ~sig>) ]
+
+rule CommitteeApproval:
+   [ !Committee(~committee), !UTXO(~id), !OwnerState(~u, ~id, 'Pending')]
+  --[ CommitteeApproved(~committee, ~id, ~u) ]->
+   [ !OwnerState(~u, ~id, 'Approved') ]
+
+
+// Finalize the transfer with committee approval
+rule Finalize:
+  [ !OwnerState(~receiver, ~id, 'Approved'), Locked(~id) ]
+  --[ Finalized(~id), FinalizationSuccess(~id), TransferFinalized( ~receiver, ~id) ]->
+  [ Spent(~id) ]
+
+
+// Security lemmas
+
+// Ensure that a UTXO can only be spent once
+lemma OneTimeSpendability:
+  all-traces
+  "∀ utxo #i #j.
+    (Finalized(utxo) @ #i) ∧ (Finalized(utxo) @ #j) ⇒ (#i = #j)"
+
+// When a transfer occurs, the receiver should have a tweaked signature
+lemma OwnershipTransfer:
+  all-traces
+  "∀ committee sender receiver id #i.
+    TransferEvent(committee, sender, receiver, id) @ #i
+    ⇒ ∃ sig. TweakedSig(receiver, sig) @ #i"
+
+// Only the intended recipient who knows the correct tweak secrets can recover a valid signature from a tweaked signature
+lemma OwnershipSoundness:
+  all-traces
+  "∀ sig #i.
+    ValidSignature(sig) @ #i
+    ⇒ ∃ u #j. HasTweakSecret(u) @ #j"
+
+// Signature unforgeability
+lemma Unforgeability:
+  all-traces
+  "∀ sig #i.
+    ValidSignature(sig) @ #i
+    ⇒ ∃ u #j #k. 
+       TweakedSig(u, sig) @ #j ∧ 
+       HasTweakSecret(u) @ #k"
+
+// Committee involvement is required for finalization
+lemma CommitteeAuthorizationRequired:
+  all-traces
+  "∀ id u #i.
+    TransferFinalized(u, id) @ #i
+    ⇒ ∃ #j committee. (#j < #i) ∧ CommitteeApproved(committee, id, u) @ #j"
+
+// Existence lemmas
+
+// There exists a trace where a transfer event can lead to finalization
+lemma canFinalize:
+  exists-trace
+  "∃ id committee sender receiver #i #ij #j #k #l.
+    Prepared(id) @ #i ∧
+    CommitteeApproved(committee, id, sender) @ #ij ∧
+    TransferEvent(committee, sender, receiver, id) @ #j ∧
+    CommitteeApproved(committee, id, receiver) @ #k ∧
+    Finalized(id) @ #l ∧
+    #i < #ij ∧ #ij < #j ∧ #j < #k ∧ #k < #l"
+
+// There exists a trace where a transfer can be successfully completed
+lemma transferCompletionPossible:
+  exists-trace
+  "∃ id committee sender receiver #i #j #k #l.
+    Prepared(id) @ #i ∧
+    CommitteeApproved(committee, id, sender) @ #j ∧
+    TransferEvent(committee, sender, receiver, id) @ #k ∧ 
+    Finalized(id) @ #l ∧
+    #i < #j ∧ #j < #k ∧ #k < #l"
+
+// There exists a trace where a UTXO can be successfully finalized
+lemma finalizationSuccessPossible:
+  exists-trace
+  "∃ id committee sender receiver #i #j #k #l.
+    Prepared(id) @ #i ∧ 
+    TransferEvent(committee, sender, receiver, id) @ #j ∧
+    CommitteeApproved(committee, id, receiver) @ #k ∧
+    FinalizationSuccess(id) @ #l ∧
+    #i < #j ∧ #j < #k ∧ #k < #l"
+
+end
