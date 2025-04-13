@@ -1,101 +1,22 @@
 theory Thunderbolt begin
 
-// Function signature and definition of the equational theory E
+Message theory
 
-functions: Alice/0, ApprovedTransfer/2, Bob/0, Carol/0, Cmte/0,
-           CommitteeApproved/2, FinalizationSuccess/1, Finalized/1,
-           HasTweakSecret/1, Locked/1, OwnerState/3, Prepared/1,
-           SetupCommittee/0, Spent/1, TransferEvent/3, TransferFinalized/2,
-           TweakFor/3, TweakedSig/2, UTXO/1, ValidSignature/1, adec/2, aenc/2,
-           fst/1, h/1, pair/2, pk/1, sign/2, snd/1, true/0, verify/3
-equations:
-    adec(aenc(x.1, pk(x.2)), x.2) = x.1,
-    fst(<x.1, x.2>) = x.1,
-    snd(<x.1, x.2>) = x.2,
-    verify(sign(x.1, x.2), x.1, pk(x.2)) = true
+Multiset rewriting rules (8)
 
+Tactic(s)
 
+Raw sources (30 cases, deconstructions complete)
 
-
-
-
-
-
-
-
-
-rule (modulo E) SetupThunderbolt:
-   [ Fr( ~committee ) ]
-  --[ SetupCommittee( ) ]->
-   [ !Committee( ~committee ) ]
-
-  /* has exactly the trivial AC variant */
-
-rule (modulo E) PrepareUTXO:
-   [ Fr( ~id ) ]
-  --[ Prepared( ~id ) ]->
-   [ Locked( ~id ), !OwnerState( Alice, ~id, 'Pending' ), !UTXO( ~id )
-   ]
-
-  /* has exactly the trivial AC variant */
-
-rule (modulo E) GenerateTweaks:
-   [ Fr( ~tAB ), Fr( ~tKB ), Fr( ~tBC ), Fr( ~tKC ) ]
-  -->
-   [
-   !TweakFor( Alice, Bob, ~tAB ), !TweakFor( Cmte, Bob, ~tKB ),
-   !TweakFor( Bob, Carol, ~tBC ), !TweakFor( Cmte, Carol, ~tKC )
-   ]
-
-  /* has exactly the trivial AC variant */
-
-rule (modulo E) Transfer:
-   [
-   !OwnerState( sender, id, 'Approved' ),
-   !TweakFor( sender, receiver, t_sr ),
-   !TweakFor( Cmte, receiver, t_cr ), Fr( ~sig ), !UTXO( id )
-   ]
-  --[
-  TransferEvent( sender, receiver, id ),
-  TweakedSig( receiver, ~sig ), ValidSignature( ~sig ),
-  HasTweakSecret( receiver )
-  ]->
-   [ !OwnerState( receiver, id, 'Pending' ), Out( <receiver, ~sig> ) ]
-
-  // loop breaker: [0]
-  /* has exactly the trivial AC variant */
-
-rule (modulo E) CommitteeApproval:
-   [
-   !Committee( committee ), !UTXO( id ),
-   !OwnerState( u, id, 'Pending' ), Fr( ~approval )
-   ]
-  --[ CommitteeApproved( id, u ) ]->
-   [ !OwnerState( u, id, 'Approved' ) ]
-
-  /* has exactly the trivial AC variant */
-
-rule (modulo E) Finalize:
-   [ !OwnerState( u, id, 'Approved' ), Locked( id ) ]
-  --[
-  Finalized( id ), FinalizationSuccess( id ),
-  TransferFinalized( u, id )
-  ]->
-   [ Spent( id ) ]
-
-  /* has exactly the trivial AC variant */
+Refined sources (30 cases, deconstructions complete)
 
 lemma OneTimeSpendability:
   all-traces
   "∀ utxo #i #j.
-    ((Finalized( utxo ) @ #i) ∧ (Finalized( utxo ) @ #j)) ⇒ (#i = #j)"
-/*
-guarded formula characterizing all counter-examples:
-"∃ utxo #i #j.
-  (Finalized( utxo ) @ #i) ∧ (Finalized( utxo ) @ #j) ∧ ¬(#i = #j)"
-*/
+         ((Finalized( utxo ) @ #i) ∧ (Finalized( utxo ) @ #j)) ⇒
+         (#i = #j)"
 simplify
-solve( (#i < #j)  ∥ (#j < #i) )
+solve( (#i < #j) ∥ (#j < #i) )
   case case_1
   solve( !OwnerState( u, utxo, 'Approved' ) ▶₀ #i )
     case CommitteeApproval_case_1
@@ -346,61 +267,33 @@ qed
 lemma OwnershipTransfer:
   all-traces
   "∀ sender receiver id #i.
-    (TransferEvent( sender, receiver, id ) @ #i) ⇒
-    (∃ sig. TweakedSig( receiver, sig ) @ #i)"
-/*
-guarded formula characterizing all counter-examples:
-"∃ sender receiver id #i.
-  (TransferEvent( sender, receiver, id ) @ #i)
- ∧
-  ∀ sig. (TweakedSig( receiver, sig ) @ #i) ⇒ ⊥"
-*/
+         (TransferEvent( sender, receiver, id ) @ #i) ⇒
+         (∃ sig. TweakedSig( receiver, sig ) @ #i)"
 simplify
 by contradiction /* from formulas */
 
 lemma OwnershipSoundness:
   all-traces
   "∀ sig #i.
-    (ValidSignature( sig ) @ #i) ⇒ (∃ u #j. HasTweakSecret( u ) @ #j)"
-/*
-guarded formula characterizing all counter-examples:
-"∃ sig #i.
-  (ValidSignature( sig ) @ #i)
- ∧
-  ∀ u #j. (HasTweakSecret( u ) @ #j) ⇒ ⊥"
-*/
+         (ValidSignature( sig ) @ #i) ⇒
+         (∃ u #j. HasTweakSecret( u ) @ #j)"
 simplify
 by contradiction /* from formulas */
 
 lemma Unforgeability:
   all-traces
   "∀ sig #i.
-    (ValidSignature( sig ) @ #i) ⇒
-    (∃ u #j #k.
-      (TweakedSig( u, sig ) @ #j) ∧ (HasTweakSecret( u ) @ #k))"
-/*
-guarded formula characterizing all counter-examples:
-"∃ sig #i.
-  (ValidSignature( sig ) @ #i)
- ∧
-  ∀ u #j #k.
-   (TweakedSig( u, sig ) @ #j) ∧ (HasTweakSecret( u ) @ #k) ⇒ ⊥"
-*/
+         (ValidSignature( sig ) @ #i) ⇒
+         (∃ u #j #k.
+           (TweakedSig( u, sig ) @ #j) ∧ (HasTweakSecret( u ) @ #k))"
 simplify
 by contradiction /* from formulas */
 
 lemma CommitteeAuthorizationRequired:
   all-traces
   "∀ id u #i.
-    (TransferFinalized( u, id ) @ #i) ⇒
-    (∃ #j. (#j < #i) ∧ (CommitteeApproved( id, u ) @ #j))"
-/*
-guarded formula characterizing all counter-examples:
-"∃ id u #i.
-  (TransferFinalized( u, id ) @ #i)
- ∧
-  ∀ #j. (CommitteeApproved( id, u ) @ #j) ⇒ ¬(#j < #i)"
-*/
+         (TransferFinalized( u, id ) @ #i) ⇒
+         (∃ #j. (#j < #i) ∧ (CommitteeApproved( id, u ) @ #j))"
 simplify
 solve( !OwnerState( u, id, 'Approved' ) ▶₀ #i )
   case CommitteeApproval_case_1
@@ -422,23 +315,13 @@ qed
 lemma canFinalize:
   exists-trace
   "∃ id #i #j #k #l.
-    ((((((Prepared( id ) @ #i) ∧
-         (TransferEvent( Alice, Bob, id ) @ #j)) ∧
-        (CommitteeApproved( id, Bob ) @ #k)) ∧
-       (Finalized( id ) @ #l)) ∧
-      (#i < #j)) ∧
-     (#j < #k)) ∧
-    (#k < #l)"
-/*
-guarded formula characterizing all satisfying traces:
-"∃ id #i #j #k #l.
-  (Prepared( id ) @ #i) ∧
-  (TransferEvent( Alice, Bob, id ) @ #j) ∧
-  (CommitteeApproved( id, Bob ) @ #k) ∧
-  (Finalized( id ) @ #l)
- ∧
-  (#i < #j) ∧ (#j < #k) ∧ (#k < #l)"
-*/
+         ((((((Prepared( id ) @ #i) ∧
+              (TransferEvent( Alice, Bob, id ) @ #j)) ∧
+             (CommitteeApproved( id, Bob ) @ #k)) ∧
+            (Finalized( id ) @ #l)) ∧
+           (#i < #j)) ∧
+          (#j < #k)) ∧
+         (#k < #l)"
 simplify
 solve( !TweakFor( Alice, Bob, t_sr ) ▶₁ #j )
   case GenerateTweaks
@@ -464,114 +347,6 @@ solve( !TweakFor( Alice, Bob, t_sr ) ▶₁ #j )
                   qed
                 qed
               qed
-            next
-              case CommitteeApproval_case_2
-              solve( Locked( ~id ) ▶₁ #l )
-                case PrepareUTXO
-                solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #j )
-                  case CommitteeApproval
-                  solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #vr.3 )
-                    case CommitteeApproval
-                    solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #vr.8 )
-                      case CommitteeApproval
-                      SOLVED // trace found
-                    qed
-                  qed
-                qed
-              qed
-            next
-              case CommitteeApproval_case_3
-              solve( Locked( ~id ) ▶₁ #l )
-                case PrepareUTXO
-                solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #j )
-                  case CommitteeApproval
-                  solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #vr.3 )
-                    case CommitteeApproval
-                    by solve( !OwnerState( Cmte, ~id, 'Approved' ) ▶₀ #vr.8 )
-                  qed
-                qed
-              qed
-            next
-              case CommitteeApproval_case_4
-              solve( Locked( ~id ) ▶₁ #l )
-                case PrepareUTXO
-                solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #j )
-                  case CommitteeApproval
-                  solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #vr.3 )
-                    case CommitteeApproval
-                    solve( !OwnerState( Bob, ~id, 'Approved' ) ▶₀ #vr.8 )
-                      case CommitteeApproval_case_1
-                      solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #vr.17 )
-                        case CommitteeApproval
-                        SOLVED // trace found
-                      qed
-                    next
-                      case CommitteeApproval_case_2
-                      by solve( !OwnerState( Cmte, ~id, 'Approved' ) ▶₀ #vr.17 )
-                    qed
-                  qed
-                qed
-              qed
-            next
-              case CommitteeApproval_case_5
-              solve( Locked( ~id ) ▶₁ #l )
-                case PrepareUTXO
-                solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #j )
-                  case CommitteeApproval
-                  solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #vr.3 )
-                    case CommitteeApproval
-                    by solve( !OwnerState( Cmte, ~id, 'Approved' ) ▶₀ #vr.8 )
-                  qed
-                qed
-              qed
-            qed
-          next
-            case Transfer_case_2
-            solve( !OwnerState( u, ~id, 'Approved' ) ▶₀ #l )
-              case CommitteeApproval_case_1
-              solve( Locked( ~id ) ▶₁ #l )
-                case PrepareUTXO
-                solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #j )
-                  case CommitteeApproval
-                  by solve( !OwnerState( Cmte, ~id, 'Approved' ) ▶₀ #vr.3 )
-                qed
-              qed
-            next
-              case CommitteeApproval_case_2
-              solve( Locked( ~id ) ▶₁ #l )
-                case PrepareUTXO
-                solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #j )
-                  case CommitteeApproval
-                  by solve( !OwnerState( Cmte, ~id, 'Approved' ) ▶₀ #vr.3 )
-                qed
-              qed
-            next
-              case CommitteeApproval_case_3
-              solve( Locked( ~id ) ▶₁ #l )
-                case PrepareUTXO
-                solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #j )
-                  case CommitteeApproval
-                  by solve( !OwnerState( Cmte, ~id, 'Approved' ) ▶₀ #vr.3 )
-                qed
-              qed
-            next
-              case CommitteeApproval_case_4
-              solve( Locked( ~id ) ▶₁ #l )
-                case PrepareUTXO
-                solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #j )
-                  case CommitteeApproval
-                  by solve( !OwnerState( Cmte, ~id, 'Approved' ) ▶₀ #vr.3 )
-                qed
-              qed
-            next
-              case CommitteeApproval_case_5
-              solve( Locked( ~id ) ▶₁ #l )
-                case PrepareUTXO
-                solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #j )
-                  case CommitteeApproval
-                  by solve( !OwnerState( Cmte, ~id, 'Approved' ) ▶₀ #vr.3 )
-                qed
-              qed
             qed
           qed
         qed
@@ -583,23 +358,13 @@ qed
 lemma transferCompletionPossible:
   exists-trace
   "∃ id #i #j #k #l.
-    ((((((Prepared( id ) @ #i) ∧
-         (CommitteeApproved( id, Alice ) @ #j)) ∧
-        (TransferEvent( Alice, Bob, id ) @ #k)) ∧
-       (Finalized( id ) @ #l)) ∧
-      (#i < #j)) ∧
-     (#j < #k)) ∧
-    (#k < #l)"
-/*
-guarded formula characterizing all satisfying traces:
-"∃ id #i #j #k #l.
-  (Prepared( id ) @ #i) ∧
-  (CommitteeApproved( id, Alice ) @ #j) ∧
-  (TransferEvent( Alice, Bob, id ) @ #k) ∧
-  (Finalized( id ) @ #l)
- ∧
-  (#i < #j) ∧ (#j < #k) ∧ (#k < #l)"
-*/
+         ((((((Prepared( id ) @ #i) ∧
+              (CommitteeApproved( id, Alice ) @ #j)) ∧
+             (TransferEvent( Alice, Bob, id ) @ #k)) ∧
+            (Finalized( id ) @ #l)) ∧
+           (#i < #j)) ∧
+          (#j < #k)) ∧
+         (#k < #l)"
 simplify
 solve( !Committee( committee ) ▶₀ #j )
   case SetupThunderbolt
@@ -622,54 +387,6 @@ solve( !Committee( committee ) ▶₀ #j )
                   SOLVED // trace found
                 qed
               qed
-            next
-              case CommitteeApproval_case_2
-              solve( Locked( ~id ) ▶₁ #l )
-                case PrepareUTXO
-                solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #k )
-                  case CommitteeApproval
-                  solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #vr.5 )
-                    case CommitteeApproval
-                    SOLVED // trace found
-                  qed
-                qed
-              qed
-            next
-              case CommitteeApproval_case_3
-              solve( Locked( ~id ) ▶₁ #l )
-                case PrepareUTXO
-                solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #k )
-                  case CommitteeApproval
-                  by solve( !OwnerState( Cmte, ~id, 'Approved' ) ▶₀ #vr.5 )
-                qed
-              qed
-            next
-              case CommitteeApproval_case_4
-              solve( Locked( ~id ) ▶₁ #l )
-                case PrepareUTXO
-                solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #k )
-                  case CommitteeApproval
-                  solve( !OwnerState( Bob, ~id, 'Approved' ) ▶₀ #vr.5 )
-                    case CommitteeApproval_case_1
-                    solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #vr.12 )
-                      case CommitteeApproval
-                      SOLVED // trace found
-                    qed
-                  next
-                    case CommitteeApproval_case_2
-                    by solve( !OwnerState( Cmte, ~id, 'Approved' ) ▶₀ #vr.12 )
-                  qed
-                qed
-              qed
-            next
-              case CommitteeApproval_case_5
-              solve( Locked( ~id ) ▶₁ #l )
-                case PrepareUTXO
-                solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #k )
-                  case CommitteeApproval
-                  by solve( !OwnerState( Cmte, ~id, 'Approved' ) ▶₀ #vr.5 )
-                qed
-              qed
             qed
           qed
         qed
@@ -681,23 +398,13 @@ qed
 lemma finalizationSuccessPossible:
   exists-trace
   "∃ id #i #j #k #l.
-    ((((((Prepared( id ) @ #i) ∧
-         (TransferEvent( Alice, Bob, id ) @ #j)) ∧
-        (CommitteeApproved( id, Bob ) @ #k)) ∧
-       (FinalizationSuccess( id ) @ #l)) ∧
-      (#i < #j)) ∧
-     (#j < #k)) ∧
-    (#k < #l)"
-/*
-guarded formula characterizing all satisfying traces:
-"∃ id #i #j #k #l.
-  (Prepared( id ) @ #i) ∧
-  (TransferEvent( Alice, Bob, id ) @ #j) ∧
-  (CommitteeApproved( id, Bob ) @ #k) ∧
-  (FinalizationSuccess( id ) @ #l)
- ∧
-  (#i < #j) ∧ (#j < #k) ∧ (#k < #l)"
-*/
+         ((((((Prepared( id ) @ #i) ∧
+              (TransferEvent( Alice, Bob, id ) @ #j)) ∧
+             (CommitteeApproved( id, Bob ) @ #k)) ∧
+            (FinalizationSuccess( id ) @ #l)) ∧
+           (#i < #j)) ∧
+          (#j < #k)) ∧
+         (#k < #l)"
 simplify
 solve( !TweakFor( Alice, Bob, t_sr ) ▶₁ #j )
   case GenerateTweaks
@@ -723,114 +430,6 @@ solve( !TweakFor( Alice, Bob, t_sr ) ▶₁ #j )
                   qed
                 qed
               qed
-            next
-              case CommitteeApproval_case_2
-              solve( Locked( ~id ) ▶₁ #l )
-                case PrepareUTXO
-                solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #j )
-                  case CommitteeApproval
-                  solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #vr.3 )
-                    case CommitteeApproval
-                    solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #vr.8 )
-                      case CommitteeApproval
-                      SOLVED // trace found
-                    qed
-                  qed
-                qed
-              qed
-            next
-              case CommitteeApproval_case_3
-              solve( Locked( ~id ) ▶₁ #l )
-                case PrepareUTXO
-                solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #j )
-                  case CommitteeApproval
-                  solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #vr.3 )
-                    case CommitteeApproval
-                    by solve( !OwnerState( Cmte, ~id, 'Approved' ) ▶₀ #vr.8 )
-                  qed
-                qed
-              qed
-            next
-              case CommitteeApproval_case_4
-              solve( Locked( ~id ) ▶₁ #l )
-                case PrepareUTXO
-                solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #j )
-                  case CommitteeApproval
-                  solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #vr.3 )
-                    case CommitteeApproval
-                    solve( !OwnerState( Bob, ~id, 'Approved' ) ▶₀ #vr.8 )
-                      case CommitteeApproval_case_1
-                      solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #vr.17 )
-                        case CommitteeApproval
-                        SOLVED // trace found
-                      qed
-                    next
-                      case CommitteeApproval_case_2
-                      by solve( !OwnerState( Cmte, ~id, 'Approved' ) ▶₀ #vr.17 )
-                    qed
-                  qed
-                qed
-              qed
-            next
-              case CommitteeApproval_case_5
-              solve( Locked( ~id ) ▶₁ #l )
-                case PrepareUTXO
-                solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #j )
-                  case CommitteeApproval
-                  solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #vr.3 )
-                    case CommitteeApproval
-                    by solve( !OwnerState( Cmte, ~id, 'Approved' ) ▶₀ #vr.8 )
-                  qed
-                qed
-              qed
-            qed
-          next
-            case Transfer_case_2
-            solve( !OwnerState( u, ~id, 'Approved' ) ▶₀ #l )
-              case CommitteeApproval_case_1
-              solve( Locked( ~id ) ▶₁ #l )
-                case PrepareUTXO
-                solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #j )
-                  case CommitteeApproval
-                  by solve( !OwnerState( Cmte, ~id, 'Approved' ) ▶₀ #vr.3 )
-                qed
-              qed
-            next
-              case CommitteeApproval_case_2
-              solve( Locked( ~id ) ▶₁ #l )
-                case PrepareUTXO
-                solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #j )
-                  case CommitteeApproval
-                  by solve( !OwnerState( Cmte, ~id, 'Approved' ) ▶₀ #vr.3 )
-                qed
-              qed
-            next
-              case CommitteeApproval_case_3
-              solve( Locked( ~id ) ▶₁ #l )
-                case PrepareUTXO
-                solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #j )
-                  case CommitteeApproval
-                  by solve( !OwnerState( Cmte, ~id, 'Approved' ) ▶₀ #vr.3 )
-                qed
-              qed
-            next
-              case CommitteeApproval_case_4
-              solve( Locked( ~id ) ▶₁ #l )
-                case PrepareUTXO
-                solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #j )
-                  case CommitteeApproval
-                  by solve( !OwnerState( Cmte, ~id, 'Approved' ) ▶₀ #vr.3 )
-                qed
-              qed
-            next
-              case CommitteeApproval_case_5
-              solve( Locked( ~id ) ▶₁ #l )
-                case PrepareUTXO
-                solve( !OwnerState( Alice, ~id, 'Approved' ) ▶₀ #j )
-                  case CommitteeApproval
-                  by solve( !OwnerState( Cmte, ~id, 'Approved' ) ▶₀ #vr.3 )
-                qed
-              qed
             qed
           qed
         qed
@@ -838,75 +437,5 @@ solve( !TweakFor( Alice, Bob, t_sr ) ▶₁ #j )
     qed
   qed
 qed
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-/* All wellformedness checks were successful. */
-
-/*
-Generated from:
-Tamarin version 1.10.0
-Maude version 2.7.1
-Git revision: UNKNOWN, branch: UNKNOWN
-Compiled at: 2024-10-30 13:42:18.081591 UTC
-*/
 
 end
