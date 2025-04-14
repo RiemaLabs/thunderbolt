@@ -5,7 +5,7 @@ builtins: signing, hashing, asymmetric-encryption
 
 // Functions and constants used in the protocol
 functions: Alice/0, Bob/0, Carol/0, Cmte/0, 
-           FinalizationSuccess/1, Finalized/1,
+           Finalized/1,
            Locked/1, Prepared/1, 
            SetupCommittee/0, 
            Spent/1, TransferEvent/4, 
@@ -49,7 +49,7 @@ rule CommitteeApproval:
 // Finalize the transfer with committee approval
 rule Finalize:
   [ !OwnerState(~receiver, ~id, 'Approved'), Locked(~id) ]
-  --[ Finalized(~id), FinalizationSuccess(~id), TransferFinalized( ~receiver, ~id) ]->
+  --[ Finalized(~id), TransferFinalized( ~receiver, ~id) ]->
   [ Spent(~id) ]
 
 
