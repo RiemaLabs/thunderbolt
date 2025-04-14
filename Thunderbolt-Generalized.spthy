@@ -257,7 +257,7 @@ lemma finalizationSuccessPossible:
          ((((((Prepared( id ) @ #i) ∧
               (TransferEvent( committee, sender, receiver, id ) @ #j)) ∧
              (CommitteeApproved( committee, id, receiver ) @ #k)) ∧
-            (FinalizationSuccess( id ) @ #l)) ∧
+            (Finalized( id ) @ #l)) ∧
            (#i < #j)) ∧
           (#j < #k)) ∧
          (#k < #l)"
