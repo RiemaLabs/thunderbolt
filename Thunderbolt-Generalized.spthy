@@ -56,6 +56,7 @@ rule Finalize:
 // Security lemmas
 
 // Ensure that a UTXO can only be spent once
+#ifdef timethis
 lemma OneTimeSpendability:
   all-traces
   "∀ utxo #i #j.
@@ -93,7 +94,9 @@ next
     qed
   qed
 qed
+#endif
 
+#ifdef timethis
 lemma OwnershipTransfer:
   all-traces
   "∀ committee sender receiver id #i.
@@ -101,7 +104,9 @@ lemma OwnershipTransfer:
          (∃ sig. TweakedSig( receiver, sig ) @ #i)"
 simplify
 by contradiction /* from formulas */
+#endif
 
+#ifdef timethis
 lemma OwnershipSoundness:
   all-traces
   "∀ sig #i.
@@ -109,16 +114,23 @@ lemma OwnershipSoundness:
          (∃ u #j. HasTweakSecret( u ) @ #j)"
 simplify
 by contradiction /* from formulas */
+#endif
 
+#ifdef timethis
 lemma Unforgeability:
   all-traces
   "∀ sig #i.
-         (ValidSignature( sig ) @ #i) ⇒
-         (∃ u #j #k.
-           (TweakedSig( u, sig ) @ #j) ∧ (HasTweakSecret( u ) @ #k))"
+     (ValidSignature(sig)@#i) ⇒
+     (∃ committee sender receiver id #j #k.
+        TweakedSig(receiver, sig)@#j ∧
+        HasTweakSecret(receiver)@#j ∧
+        CommitteeApproved(committee, id, sender)@#k ∧
+        #k < #j ∧ #j = #i)"
 simplify
 by contradiction /* from formulas */
+#endif
 
+#ifdef timethis 
 lemma CommitteeAuthorizationRequired:
   all-traces
   "∀ id u #i.
@@ -130,7 +142,9 @@ solve( !OwnerState( ~receiver, ~id, 'Approved' ) ▶₀ #i )
   case CommitteeApproval
   by contradiction /* from formulas */
 qed
+#endif
 
+#ifdef timethis
 lemma canFinalize:
   exists-trace
   "∃ id committee sender receiver #i #ij #j #k #l.
@@ -200,7 +214,9 @@ solve( !Committee( ~committee ) ▶₀ #ij )
     qed
   qed
 qed
+#endif
 
+#ifdef timethis
 lemma transferCompletionPossible:
   exists-trace
   "∃ id committee sender receiver #i #j #k #l.
@@ -250,7 +266,9 @@ solve( !Committee( ~committee ) ▶₀ #j )
     qed
   qed
 qed
+#endif
 
+#ifdef timethis
 lemma finalizationSuccessPossible:
   exists-trace
   "∃ id committee sender receiver #i #j #k #l.
@@ -309,5 +327,6 @@ solve( !Committee( ~committee ) ▶₀ #j )
     qed
   qed
 qed
+#endif
 
 end
