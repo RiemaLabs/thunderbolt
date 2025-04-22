@@ -1,0 +1,28 @@
+[package]
+name = "thunderbolt"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rand = "0.8"
+anyhow = "*"
+sha2 = "0.10"
+poseidon-rs = "0.0.10"
+halo2_gadgets = "0.3.1"
+halo2_proofs = { git = "https://github.com/zcash/halo2.git", rev = "a898d65ae3ad3d41987666f6a03cfc15edae01c4"}
+secp256k1 = { version = "0.28", features = ["rand-std", "serde"] }
+secp256kfun = "0.11"
+num-bigint = "0.4"
+num-traits = "0.2"
+rand_core = "0.6"
+
+[dependencies.snark-verifier]
+git = "https://github.com/axiom-crypto/snark-verifier.git"
+features = ["revm"]
+
+[dependencies.snark-verifier-sdk]
+git = "https://github.com/axiom-crypto/snark-verifier.git"
+features = ["revm"]
+
+[dependencies.pse-poseidon]
+git = "https://github.com/axiom-crypto/pse-poseidon.git"
