@@ -1,5 +1,5 @@
 [workspace]
 members = [
     "thunderbolt-core",
-    "bitcoin_utils",
+    "bitcoin-utils",
 ]

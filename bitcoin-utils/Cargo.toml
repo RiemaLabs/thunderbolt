@@ -1,5 +1,5 @@
 [package]
-name = "bitcoin_utils"
+name = "bitcoin-utils"
 version = "0.1.0"
 edition = "2021"
 description = "Utility functions and helpers for Bitcoin operations"
