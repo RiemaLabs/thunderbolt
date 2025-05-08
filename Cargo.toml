@@ -1,28 +1,18 @@
 [package]
-name = "thunderbolt"
+name = "thunderbolt-demo"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+
+[lib]
+name = "bitcoin_utils"
+path = "src/bitcoin_utils/lib.rs"
 
 [dependencies]
-rand = "0.8"
-anyhow = "*"
-sha2 = "0.10"
-poseidon-rs = "0.0.10"
-halo2_gadgets = "0.3.1"
-halo2_proofs = { git = "https://github.com/zcash/halo2.git", rev = "a898d65ae3ad3d41987666f6a03cfc15edae01c4"}
-secp256k1 = { version = "0.28", features = ["rand-std", "serde"] }
-secp256kfun = "0.11"
-num-bigint = "0.4"
-num-traits = "0.2"
-rand_core = "0.6"
-
-[dependencies.snark-verifier]
-git = "https://github.com/axiom-crypto/snark-verifier.git"
-features = ["revm"]
-
-[dependencies.snark-verifier-sdk]
-git = "https://github.com/axiom-crypto/snark-verifier.git"
-features = ["revm"]
-
-[dependencies.pse-poseidon]
-git = "https://github.com/axiom-crypto/pse-poseidon.git"
+bitcoin = { version = "0.32.5", features = ["serde"] }
+# Keep the same with bitcoin dependencies.
+secp256k1 = { version = "^0.29.0", features = ["rand-std", "serde"] }
+secp = { version = "^0.5.0" }
+frost-secp256k1 = { version = "2.1.0"}
+serde = { version = "^1.0.0" }
+sha2 = { version = "^0.10.0" }
+thiserror = "2.0.12"
