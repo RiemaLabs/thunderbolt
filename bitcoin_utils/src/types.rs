@@ -1,5 +1,5 @@
+use bitcoin::secp256k1::rand::{self, Rng};
 use bitcoin::{hashes::Hash, Amount, BlockHash, Txid};
-use secp256k1::rand::{self, Rng};
 use serde::Deserialize;
 
 #[derive(Deserialize, Clone, Debug, PartialEq, Eq)]

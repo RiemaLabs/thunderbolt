@@ -117,6 +117,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitcoin_utils"
+version = "0.1.0"
+dependencies = [
+ "bitcoin",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.12",
+]
+
+[[package]]
 name = "bitvec"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1284,10 +1294,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "thunderbolt-demo"
+name = "thunderbolt_core"
 version = "0.1.0"
 dependencies = [
  "bitcoin",
+ "bitcoin_utils",
  "frost-secp256k1",
  "halo2-base",
  "halo2-ecc",
