@@ -1,5 +1,7 @@
 [workspace]
-members = [
-    "thunderbolt-core",
-    "bitcoin-utils",
-]
+default-members = ["crates/*"]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+license = "Apache-2.0"

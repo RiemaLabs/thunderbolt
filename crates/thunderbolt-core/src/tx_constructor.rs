@@ -23,7 +23,7 @@ use bitcoin_utils::utils::{
 use secp::{MaybePoint, MaybeScalar, Point, Scalar};
 use sha2::{Digest, Sha256};
 
-struct BitcoinTxConstructor {
+pub struct BitcoinTxConstructor {
     // P_a.x
     x_pubkey_user: XOnlyPublicKey,
 

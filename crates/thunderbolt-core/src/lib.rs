@@ -1,4 +1,4 @@
 mod circuit;
 mod tweak;
-mod tx_constructor;
+pub mod tx_constructor;
 mod utils;
