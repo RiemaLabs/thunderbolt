@@ -1,7 +1,9 @@
 use frost_secp256k1::rand_core::OsRng;
+use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
 use halo2_base::halo2_proofs::halo2curves::group::Curve;
 
 use halo2_base::halo2_proofs::halo2curves::serde::SerdeObject;
+use halo2_base::utils::testing::{check_proof_with_instances, gen_proof_with_instances};
 use halo2_base::{
     gates::{
         circuit::{builder::RangeCircuitBuilder, CircuitBuilderStage},
@@ -13,11 +15,7 @@ use halo2_base::{
         plonk::{keygen_pk, keygen_vk},
     },
     poseidon::hasher::spec::OptimizedPoseidonSpec,
-    utils::{
-        fs::gen_srs,
-        testing::{check_proof, gen_proof},
-        BigPrimeField,
-    },
+    utils::{fs::gen_srs, BigPrimeField},
     AssignedValue, Context,
 };
 use halo2_ecc::{
@@ -146,19 +144,23 @@ pub fn prove_pk_share(params: SharePKCircuitParams) {
     let range = RangeChip::new(params.lookup_bits, builder.lookup_manager().clone());
 
     let outputs = generate_share_pk(builder.main(0), &range, params.data);
-    for val in outputs {
+    for val in outputs.clone() {
         builder.assigned_instances[0].push(val);
     }
     println!(">> generate_share_pk (prover) done in {:?}", t3.elapsed());
 
     // === Phase 3: Proof generation ===
     let t4 = Instant::now();
-    let proof = gen_proof(&params_kzg, &pk, builder);
+
+    let instances_vec: Vec<Fr> = outputs.iter().map(|v| *v.value()).collect(); // 不是 &Fr，是 Fr
+    let instance_slices: Vec<&[Fr]> = vec![instances_vec.as_slice()];
+    let instances: &[&[Fr]] = &instance_slices;
+    let proof = gen_proof_with_instances(&params_kzg, &pk, builder, &instances);
     println!(">> gen_proof done in {:?}", t4.elapsed());
 
     // === Phase 4: Verification ===
     let t5 = Instant::now();
-    check_proof(&params_kzg, pk.get_vk(), &proof, true);
+    check_proof_with_instances(&params_kzg, pk.get_vk(), &proof, &instances, true);
     println!(">> check_proof done in {:?}", t5.elapsed());
 
     println!(">> TOTAL prove_pk_share done in {:?}", t_start.elapsed());
