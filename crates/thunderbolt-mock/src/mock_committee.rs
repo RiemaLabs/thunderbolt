@@ -4,7 +4,7 @@ use bitcoin_utils::account::AccountInfo;
 use lazy_static::lazy_static;
 use secp::{Point, Scalar};
 
-const COMMITTEE_SECRET: &str = "a6f1b630d3a9cefdd2f5f81a5e647dd9e8ed89330c65186adfa455388a8a1bc5";
+const COMMITTEE_SECRET: &str = "6148c7cec662b4161a960321c1a92e706bddd70dc05f3b46bde0031f9bc2b046";
 
 lazy_static! {
     pub static ref COMMITTEE: AccountInfo = AccountInfo::new(Network::Testnet, COMMITTEE_SECRET);
@@ -26,7 +26,7 @@ impl MockCommittee {
 
     pub fn gen_nonce(&mut self, user_pubkey: XOnlyPublicKey, user_nonce_index: usize) -> (usize, Point) {
         // TODO: A deterministic nonce generation.
-        let nonce = Scalar::random(&mut thread_rng());
+        let nonce = Scalar::one();
         self.nonces.push(nonce);
         (self.nonces.len() - 1, Point::generator() * nonce)
     }
@@ -43,3 +43,15 @@ impl MockCommittee {
         XOnlyPublicKey::from_keypair(&self.account.keypair).0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_print_committee_p2tr_address() {
+        let committee = MockCommittee::new(COMMITTEE.clone());
+        println!("committee p2tr address: {}", committee.account.p2tr_address(Network::Testnet));
+    }
+}
+

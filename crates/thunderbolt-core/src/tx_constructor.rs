@@ -7,8 +7,8 @@ use bitcoin::sighash::{Prevouts, SighashCache};
 use bitcoin::{
     absolute,
     secp256k1::{All, Message, Secp256k1},
-    transaction, Address, Amount, Network, OutPoint, Psbt, PublicKey, ScriptBuf, Sequence,
-    Transaction, TxIn, TxOut, Witness, XOnlyPublicKey,
+    transaction, Address, Amount, Network, OutPoint, Psbt, PublicKey, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
+    Witness, XOnlyPublicKey,
 };
 use bitcoin::{TapSighash, Txid};
 use bitcoin_utils::constants::{DUST_SATS, OVERHEAD, SAFETY_INPUT_VBYTES, TAPROOT_OUTPUT_VBYTES};
@@ -17,8 +17,7 @@ use bitcoin_utils::errors::ConstructionError;
 use bitcoin_utils::types::Utxo;
 use bitcoin_utils::utils::{
     generate_bip32_derivation, generate_p2pkh_script_sig_script, generate_p2sh_script_sig_script,
-    generate_p2tr_address, generate_p2tr_tweaked_address, generate_redeem_script,
-    generate_tap_key_origins,
+    generate_p2tr_address, generate_p2tr_tweaked_address, generate_redeem_script, generate_tap_key_origins,
 };
 use secp::{MaybePoint, MaybeScalar, Point, Scalar};
 use sha2::{Digest, Sha256};
@@ -48,6 +47,7 @@ pub struct BitcoinTxConstructor {
     p_pub_nonce_user: Point,
     p_pub_nonce_comm: Point,
     p_pub_nonce: Point,
+    x_pub_nonce: XOnlyPublicKey,
 
     network: Network,
 }
@@ -77,9 +77,7 @@ impl BitcoinTxConstructor {
             MaybePoint::Valid(p_pubkey) => {
                 let x_pubkey_bytes = p_pubkey.serialize_xonly();
                 (
-                    TweakedPublicKey::dangerous_assume_tweaked(
-                        XOnlyPublicKey::from_slice(&x_pubkey_bytes).unwrap(),
-                    ),
+                    TweakedPublicKey::dangerous_assume_tweaked(XOnlyPublicKey::from_slice(&x_pubkey_bytes).unwrap()),
                     p_pubkey,
                 )
             }
@@ -89,13 +87,10 @@ impl BitcoinTxConstructor {
         };
 
         let maybe_p_pub_nonce = p_pub_nonce_user.add(p_pub_nonce_comm);
-        let (_, p_pub_nonce) = match maybe_p_pub_nonce {
+        let (x_pub_nonce, p_pub_nonce) = match maybe_p_pub_nonce {
             MaybePoint::Valid(p_pub_nonce) => {
                 let x_pub_nonce_bytes = p_pub_nonce.serialize_xonly();
-                (
-                    XOnlyPublicKey::from_slice(&x_pub_nonce_bytes).unwrap(),
-                    p_pub_nonce,
-                )
+                (XOnlyPublicKey::from_slice(&x_pub_nonce_bytes).unwrap(), p_pub_nonce)
             }
             MaybePoint::Infinity => {
                 panic!("Failed to verify p_pub_nonce");
@@ -116,18 +111,14 @@ impl BitcoinTxConstructor {
             p_pub_nonce_user,
             p_pub_nonce_comm,
             p_pub_nonce,
+            x_pub_nonce,
             multi_sig_address,
             committee_address,
             network,
         }
     }
 
-    pub fn estimate_fee(
-        &self,
-        inputs_count: usize,
-        fixed_amount: u64,
-        sats_per_vbytes: u64,
-    ) -> Result<u64, ConstructionError> {
+    pub fn estimate_input_amount(&self, inputs_count: usize, fixed_amount: u64, sats_per_vbytes: u64) -> u64 {
         let input_vb = (inputs_count as u64) * SAFETY_INPUT_VBYTES;
         let overhead = OVERHEAD;
         let out0_vb = TAPROOT_OUTPUT_VBYTES;
@@ -139,7 +130,17 @@ impl BitcoinTxConstructor {
         let out1_sats = DUST_SATS;
         // The output to collect the remaining fee.
         let out2_sats = 0;
-        Ok(fee + out0_sats + out1_sats + out2_sats)
+        fee + out0_sats + out1_sats + out2_sats
+    }
+
+    pub fn estimate_output_amount(&self, outputs_count: usize, fixed_amount: u64, sats_per_vbytes: u64) -> u64 {
+        let inputs_count = 2;
+        let input_vb = (inputs_count as u64) * SAFETY_INPUT_VBYTES;
+        let overhead = OVERHEAD;
+        let output_vb = (outputs_count as u64) * TAPROOT_OUTPUT_VBYTES;
+        let total_vb = input_vb + overhead + output_vb;
+        let fee = total_vb * sats_per_vbytes;
+        fixed_amount - fee
     }
 
     pub fn first_prepare_output(&self, fixed_amount: u64) -> TxOut {
@@ -166,19 +167,11 @@ impl BitcoinTxConstructor {
         sats_per_vbytes: u64,
         fixed_amount: u64,
     ) -> Result<Psbt, ConstructionError> {
-        let input_fee = prev_outputs
-            .iter()
-            .map(|u| u.value)
-            .sum::<Amount>()
-            .to_sat();
-        let required_fee = self.estimate_fee(prev_outputs.len(), fixed_amount, sats_per_vbytes)?;
+        let input_fee = prev_outputs.iter().map(|u| u.value).sum::<Amount>().to_sat();
+        let required_fee = self.estimate_input_amount(prev_outputs.len(), fixed_amount, sats_per_vbytes);
 
         if input_fee < required_fee {
-            return Err(ConstructionError::InsufficientFunds(
-                None,
-                required_fee,
-                input_fee,
-            ));
+            return Err(ConstructionError::InsufficientFunds(None, required_fee, input_fee));
         }
 
         let mut input = Vec::new();
@@ -255,28 +248,24 @@ impl BitcoinTxConstructor {
                 Some(addr_type) => match addr_type {
                     bitcoin::AddressType::P2pkh => {
                         input.sighash_type = Some(PsbtSighashType::from_u32(1));
-                        input.bip32_derivation =
-                            generate_bip32_derivation(secp, xpriv, prev_pubkey);
+                        input.bip32_derivation = generate_bip32_derivation(secp, xpriv, prev_pubkey);
                     }
                     bitcoin::AddressType::P2sh => {
                         input.sighash_type = Some(PsbtSighashType::from_u32(1));
-                        input.bip32_derivation =
-                            generate_bip32_derivation(secp, xpriv, prev_pubkey);
+                        input.bip32_derivation = generate_bip32_derivation(secp, xpriv, prev_pubkey);
                         let network = self.network;
                         let redeem_script = generate_redeem_script(network, prev_pubkey)?;
                         input.redeem_script = Some(redeem_script);
                     }
                     bitcoin::AddressType::P2wpkh => {
                         input.sighash_type = Some(PsbtSighashType::from_u32(1));
-                        input.bip32_derivation =
-                            generate_bip32_derivation(secp, xpriv, prev_pubkey);
+                        input.bip32_derivation = generate_bip32_derivation(secp, xpriv, prev_pubkey);
                     }
                     bitcoin::AddressType::P2wsh => todo!(),
                     bitcoin::AddressType::P2tr => {
                         input.sighash_type = Some(PsbtSighashType::from_u32(0));
                         let x_pubkey = XOnlyPublicKey::from(prev_pubkey.clone());
-                        input.tap_key_origins =
-                            generate_tap_key_origins(secp, xpriv, &x_pubkey, Vec::new());
+                        input.tap_key_origins = generate_tap_key_origins(secp, xpriv, &x_pubkey, Vec::new());
                         input.tap_internal_key = Some(x_pubkey);
                     }
                     _ => Err(ConstructionError::ParseError(
@@ -284,22 +273,19 @@ impl BitcoinTxConstructor {
                         format!("invalid address {:}", prev_address),
                     ))?,
                 },
-                None => Err(ConstructionError::ParseError(
-                    None,
-                    "empty address".to_string(),
-                ))?,
+                None => Err(ConstructionError::ParseError(None, "empty address".to_string()))?,
             }
         }
 
         _ = psbt.sign(xpriv, &secp).unwrap();
-        let mut signed_inscribe = psbt.clone().extract_tx().unwrap();
+        let mut signed_prepare = psbt.clone().extract_tx().unwrap();
 
         for (i, input) in psbt.inputs.iter().enumerate() {
             match prev_address.address_type().unwrap() {
                 bitcoin::AddressType::P2pkh => {
                     if let Some(sig) = input.partial_sigs.get(&prev_pubkey) {
                         let script_sig = generate_p2pkh_script_sig_script(sig, prev_pubkey);
-                        signed_inscribe.input[i].script_sig = script_sig;
+                        signed_prepare.input[i].script_sig = script_sig;
                     } else {
                         return Err(ConstructionError::ParseError(
                             None,
@@ -312,10 +298,9 @@ impl BitcoinTxConstructor {
                         let mut witness = Witness::new();
                         witness.push(sig.to_vec());
                         witness.push(prev_pubkey.to_bytes().to_vec());
-                        signed_inscribe.input[i].witness = witness;
-                        let script_sig =
-                            generate_p2sh_script_sig_script(self.network, prev_pubkey)?;
-                        signed_inscribe.input[i].script_sig = script_sig;
+                        signed_prepare.input[i].witness = witness;
+                        let script_sig = generate_p2sh_script_sig_script(self.network, prev_pubkey)?;
+                        signed_prepare.input[i].script_sig = script_sig;
                     } else {
                         return Err(ConstructionError::ParseError(
                             None,
@@ -328,7 +313,7 @@ impl BitcoinTxConstructor {
                         let mut witness = Witness::new();
                         witness.push(sig.to_vec());
                         witness.push(prev_pubkey.to_bytes().to_vec());
-                        signed_inscribe.input[i].witness = witness;
+                        signed_prepare.input[i].witness = witness;
                     } else {
                         return Err(ConstructionError::ParseError(
                             None,
@@ -346,7 +331,7 @@ impl BitcoinTxConstructor {
                     }
                     let mut witness = Witness::new();
                     witness.push(input.tap_key_sig.unwrap().to_vec());
-                    signed_inscribe.input[i].witness = witness;
+                    signed_prepare.input[i].witness = witness;
                 }
                 _ => Err(ConstructionError::ParseError(
                     None,
@@ -354,7 +339,7 @@ impl BitcoinTxConstructor {
                 ))?,
             }
         }
-        Ok(signed_inscribe)
+        Ok(signed_prepare)
     }
 
     pub fn construct_unsigned_redeem(
@@ -410,10 +395,7 @@ impl BitcoinTxConstructor {
         Ok(psbt)
     }
 
-    pub fn extract_message(
-        &self,
-        redeem_psbt: &Psbt,
-    ) -> Result<(Message, TapSighash), ConstructionError> {
+    pub fn extract_message(&self, redeem_psbt: &Psbt) -> Result<(Message, TapSighash), ConstructionError> {
         // TODO: Add the verification part.
 
         let tx = redeem_psbt.clone().extract_tx().unwrap();
@@ -442,34 +424,72 @@ impl BitcoinTxConstructor {
         let res = MaybeScalar::reduce_from(&hash);
         match res {
             MaybeScalar::Valid(scalar) => Ok(scalar),
-            MaybeScalar::Zero => Err(ConstructionError::ParseError(
-                None,
-                "invalid scalar".to_string(),
-            )),
+            MaybeScalar::Zero => Err(ConstructionError::ParseError(None, "invalid scalar".to_string())),
         }
     }
 
-    pub fn sign(
-        &self,
-        redeem_psbt: &mut Psbt,
-        nonce: Scalar,
-        secret_key: Scalar,
-    ) -> Result<Scalar, ConstructionError> {
-        let (msg, _) = self.extract_message(redeem_psbt)?;
+    pub fn sign(&self, psbt: &Psbt, nonce: Scalar, secret_key: Scalar) -> Result<Scalar, ConstructionError> {
+        let (msg, _) = self.extract_message(psbt)?;
         let challenge = self.compute_challenge(&msg)?;
         let signature = nonce + secret_key * challenge;
         match signature {
             MaybeScalar::Valid(signature) => Ok(signature),
-            MaybeScalar::Zero => Err(ConstructionError::ParseError(
-                None,
-                "invalid signature".to_string(),
-            )),
+            MaybeScalar::Zero => Err(ConstructionError::ParseError(None, "invalid signature".to_string())),
         }
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-}
+    pub fn committee_sign_redeem(
+        &self,
+        psbt: &mut Psbt,
+        x_pubkey: XOnlyPublicKey,
+        secp: &Secp256k1<All>,
+        xpriv: &Xpriv,
+    ) -> Result<Transaction, ConstructionError> {
+        // TODO: Add the verification part.
+        // The dummy UTXO in the whitepaper shall be signed by the committee.
+        {
+            let input = &mut psbt.inputs[1];
+            input.sighash_type = Some(PsbtSighashType::from_u32(0));
+            input.tap_key_origins = generate_tap_key_origins(secp, xpriv, &x_pubkey, Vec::new());
+            input.tap_internal_key = Some(x_pubkey);
+        }
 
+        _ = psbt.sign(xpriv, &secp).unwrap();
+
+        // Get the signature before accessing input again
+        let tap_key_sig = psbt.inputs[1].tap_key_sig.clone();
+        let mut signed_redeem = psbt.clone().extract_tx().unwrap();
+
+        if tap_key_sig.is_none() {
+            return Err(ConstructionError::ParseError(
+                None,
+                "missing tap_key_sig in input".to_string(),
+            ));
+        }
+        let mut witness = Witness::new();
+        witness.push(psbt.inputs[1].tap_key_sig.unwrap().to_vec());
+        signed_redeem.input[1].witness = witness;
+        Ok(signed_redeem)
+    }
+
+    pub fn user_combine_redeem(
+        &self,
+        mut signed_redeem: Transaction,
+        signature: Scalar,
+    ) -> Result<Transaction, ConstructionError> {
+        let r = self.x_pub_nonce.serialize();
+        let s = signature.serialize();
+        let sig = [r, s].concat();
+        let mut witness = Witness::new();
+        witness.push(sig);
+        signed_redeem.input[0].witness = witness;
+        Ok(signed_redeem)
+    }
+
+    pub fn default_outputs(&self, fixed_amount: u64, recipient: Address, sats_per_vbytes: u64) -> Vec<TxOut> {
+        vec![TxOut {
+            value: Amount::from_sat(self.estimate_output_amount(1, fixed_amount, sats_per_vbytes)),
+            script_pubkey: recipient.script_pubkey(),
+        }]
+    }
+}

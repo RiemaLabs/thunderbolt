@@ -18,6 +18,16 @@ pub async fn init_nubit_client() -> BitcoinClientElectrs {
     client
 }
 
+pub async fn prepare_utxo(client: &dyn BitcoinClient, receiver_address: &Address, amount: Amount) -> Option<UtxoInfo> {
+    let existing_utxos = client.get_address_utxos(receiver_address).await.unwrap();
+    for u in existing_utxos.iter() {
+        if u.value == amount.to_sat() && u.status.confirmed {
+            return Some(u.clone());
+        }
+    }
+    send_funding(client, receiver_address, amount).await
+}
+
 pub async fn send_funding(client: &dyn BitcoinClient, receiver_address: &Address, amount: Amount) -> Option<UtxoInfo> {
     let http_client = reqwest::Client::new();
     let url = NUBIT_FAUCET_URL;

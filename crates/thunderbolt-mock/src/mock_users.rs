@@ -29,7 +29,7 @@ impl MockUser {
     }
 
     pub fn gen_nonce(&mut self) -> (usize, Point) {
-        let nonce = Scalar::random(&mut thread_rng());
+        let nonce = Scalar::one();
         self.nonces.push(nonce);
         (self.nonces.len() - 1, Point::generator() * nonce)
     }

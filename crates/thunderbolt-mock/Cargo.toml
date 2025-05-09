@@ -12,3 +12,6 @@ secp = { version = "0.5.0", features = ["rand", "secp256k1"] }
 bitcoin-utils = { path = "../bitcoin-utils" }
 bitcoin-clients = { path = "../bitcoin-clients" }
 thunderbolt-core = { path = "../thunderbolt-core" }
+
+[dev-dependencies]
+tokio = { version = "1.42.0", features = ["macros"] }
