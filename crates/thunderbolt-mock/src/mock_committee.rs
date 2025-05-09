@@ -1,3 +1,4 @@
+use bitcoin::bip32::Xpriv;
 use bitcoin::key::rand::thread_rng;
 use bitcoin::{Network, XOnlyPublicKey};
 use bitcoin_utils::account::AccountInfo;
@@ -11,7 +12,7 @@ lazy_static! {
 }
 
 pub struct MockCommittee {
-    pub account: AccountInfo,
+    account: AccountInfo,
 
     nonces: Vec<Scalar>,
 }
@@ -26,7 +27,7 @@ impl MockCommittee {
 
     pub fn gen_nonce(&mut self, user_pubkey: XOnlyPublicKey, user_nonce_index: usize) -> (usize, Point) {
         // TODO: A deterministic nonce generation.
-        let nonce = Scalar::one();
+        let nonce = Scalar::two();
         self.nonces.push(nonce);
         (self.nonces.len() - 1, Point::generator() * nonce)
     }
@@ -39,8 +40,12 @@ impl MockCommittee {
         Scalar::from_slice(&self.account.keypair.secret_key().secret_bytes()).unwrap()
     }
 
-    pub fn get_pubkey(&self) -> XOnlyPublicKey {
+    pub fn get_x_pubkey(&self) -> XOnlyPublicKey {
         XOnlyPublicKey::from_keypair(&self.account.keypair).0
+    }
+
+    pub fn get_xpriv(&self) -> Xpriv {
+        self.account.xpriv
     }
 }
 

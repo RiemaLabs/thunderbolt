@@ -1,5 +1,6 @@
+use bitcoin::bip32::Xpriv;
 use bitcoin::key::rand::thread_rng;
-use bitcoin::{Network, XOnlyPublicKey};
+use bitcoin::{Address, Network, PublicKey, XOnlyPublicKey};
 use bitcoin_utils::account::AccountInfo;
 use lazy_static::lazy_static;
 use secp::{Point, Scalar};
@@ -15,7 +16,7 @@ lazy_static! {
 }
 
 pub struct MockUser {
-    pub account: AccountInfo,
+    account: AccountInfo,
 
     nonces: Vec<Scalar>,
 }
@@ -38,11 +39,23 @@ impl MockUser {
         self.nonces[index]
     }
 
-    pub fn get_secret(&self) -> Scalar {
-        Scalar::from_slice(&self.account.p2tr_tweaked_keypair.secret_key().secret_bytes()).unwrap()
+    pub fn get_tweaked_secret(&self) -> Scalar {
+        Scalar::from_slice(&self.account.p2tr_tweaked_keypair.secret_bytes()).unwrap()
     }
 
-    pub fn get_pubkey(&self) -> XOnlyPublicKey {
+    pub fn get_pubkey(&self) -> PublicKey {
+        self.account.public_key
+    }
+
+    pub fn get_tweaked_x_pubkey(&self) -> XOnlyPublicKey {
         XOnlyPublicKey::from_keypair(&self.account.p2tr_tweaked_keypair).0
+    }
+
+    pub fn get_xpriv(&self) -> Xpriv {
+        self.account.xpriv
+    }
+
+    pub fn get_p2tr_address(&self, network: Network) -> Address {
+        self.account.p2tr_address(network)
     }
 }

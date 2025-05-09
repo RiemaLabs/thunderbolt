@@ -20,33 +20,34 @@ use bitcoin_utils::utils::{
     generate_p2tr_address, generate_p2tr_tweaked_address, generate_redeem_script, generate_tap_key_origins,
 };
 use secp::{MaybePoint, MaybeScalar, Point, Scalar};
-use sha2::{Digest, Sha256};
+
+use crate::utils::{compute_challenge, schnorr_sign};
 
 pub struct BitcoinTxConstructor {
     // P_a.x
     x_pubkey_user: XOnlyPublicKey,
 
     // P_a
-    p_pubkey_user: Point,
+    pub p_pubkey_user: Point,
 
     // P_c.x
     x_pubkey_comm: XOnlyPublicKey,
 
     // P_c
-    p_pubkey_comm: Point,
+    pub p_pubkey_comm: Point,
 
     // P_a.x + P_c.x
     x_pubkey: TweakedPublicKey,
 
     // P_a + P_c
-    p_pubkey: Point,
+    pub p_pubkey: Point,
 
     multi_sig_address: Address,
     committee_address: Address,
 
-    p_pub_nonce_user: Point,
-    p_pub_nonce_comm: Point,
-    p_pub_nonce: Point,
+    pub p_pub_nonce_user: Point,
+    pub p_pub_nonce_comm: Point,
+    pub p_pub_nonce: Point,
     x_pub_nonce: XOnlyPublicKey,
 
     network: Network,
@@ -60,27 +61,22 @@ impl BitcoinTxConstructor {
         x_pub_nonce_comm: XOnlyPublicKey,
         network: Network,
     ) -> Self {
-        let x_pubkey_bytes = x_pubkey_user.serialize();
-        let p_pubkey_user = Point::lift_x(&x_pubkey_bytes).unwrap();
+        let p_pubkey_user = Point::lift_x(&x_pubkey_user.serialize()).unwrap();
 
-        let x_pubkey_bytes = x_pubkey_comm.serialize();
-        let p_pubkey_comm = Point::lift_x(&x_pubkey_bytes).unwrap();
+        let p_pubkey_comm = Point::lift_x(&x_pubkey_comm.serialize()).unwrap();
 
-        let x_pubkey_bytes = x_pub_nonce_user.serialize();
-        let p_pub_nonce_user = Point::lift_x(&x_pubkey_bytes).unwrap();
+        let p_pub_nonce_user = Point::lift_x(&x_pub_nonce_user.serialize()).unwrap();
 
-        let x_pubkey_bytes = x_pub_nonce_comm.serialize();
-        let p_pub_nonce_comm = Point::lift_x(&x_pubkey_bytes).unwrap();
+        let p_pub_nonce_comm = Point::lift_x(&x_pub_nonce_comm.serialize()).unwrap();
 
         let maybe_p_pubkey = p_pubkey_user.add(p_pubkey_comm);
         let (x_pubkey, p_pubkey) = match maybe_p_pubkey {
-            MaybePoint::Valid(p_pubkey) => {
-                let x_pubkey_bytes = p_pubkey.serialize_xonly();
-                (
-                    TweakedPublicKey::dangerous_assume_tweaked(XOnlyPublicKey::from_slice(&x_pubkey_bytes).unwrap()),
-                    p_pubkey,
-                )
-            }
+            MaybePoint::Valid(p_pubkey) => (
+                TweakedPublicKey::dangerous_assume_tweaked(
+                    XOnlyPublicKey::from_slice(&p_pubkey.serialize_xonly()).unwrap(),
+                ),
+                p_pubkey,
+            ),
             MaybePoint::Infinity => {
                 panic!("Failed to verify p_pubkey");
             }
@@ -88,10 +84,10 @@ impl BitcoinTxConstructor {
 
         let maybe_p_pub_nonce = p_pub_nonce_user.add(p_pub_nonce_comm);
         let (x_pub_nonce, p_pub_nonce) = match maybe_p_pub_nonce {
-            MaybePoint::Valid(p_pub_nonce) => {
-                let x_pub_nonce_bytes = p_pub_nonce.serialize_xonly();
-                (XOnlyPublicKey::from_slice(&x_pub_nonce_bytes).unwrap(), p_pub_nonce)
-            }
+            MaybePoint::Valid(p_pub_nonce) => (
+                XOnlyPublicKey::from_slice(&p_pub_nonce.serialize_xonly()).unwrap(),
+                p_pub_nonce,
+            ),
             MaybePoint::Infinity => {
                 panic!("Failed to verify p_pub_nonce");
             }
@@ -415,13 +411,7 @@ impl BitcoinTxConstructor {
     }
 
     pub fn compute_challenge(&self, message: &Message) -> Result<Scalar, ConstructionError> {
-        let hash: [u8; 32] = Sha256::new()
-            .chain_update(&self.p_pub_nonce.serialize())
-            .chain_update(&self.p_pubkey.serialize())
-            .chain_update(message.as_ref())
-            .finalize()
-            .into();
-        let res = MaybeScalar::reduce_from(&hash);
+        let res = compute_challenge(&self.p_pub_nonce, &self.p_pubkey, message.as_ref());
         match res {
             MaybeScalar::Valid(scalar) => Ok(scalar),
             MaybeScalar::Zero => Err(ConstructionError::ParseError(None, "invalid scalar".to_string())),
@@ -430,8 +420,7 @@ impl BitcoinTxConstructor {
 
     pub fn sign(&self, psbt: &Psbt, nonce: Scalar, secret_key: Scalar) -> Result<Scalar, ConstructionError> {
         let (msg, _) = self.extract_message(psbt)?;
-        let challenge = self.compute_challenge(&msg)?;
-        let signature = nonce + secret_key * challenge;
+        let (_, signature) = schnorr_sign(nonce, secret_key, msg.as_ref());
         match signature {
             MaybeScalar::Valid(signature) => Ok(signature),
             MaybeScalar::Zero => Err(ConstructionError::ParseError(None, "invalid signature".to_string())),

@@ -16,7 +16,7 @@ async fn test_prepare_redeem() {
     let client = BitcoinClientEnum::Electrs(init_nubit_client().await);
     let fixed_amount = 1000000;
     let funding_amount = Amount::from_sat(fixed_amount + 1000);
-    let receiver_address = alice.account.p2tr_address(Network::Testnet);
+    let receiver_address = alice.get_p2tr_address(Network::Testnet);
     let utxo_info = prepare_utxo(&client, &receiver_address, funding_amount).await.unwrap();
 
     let utxo = Utxo {
@@ -40,11 +40,13 @@ async fn test_prepare_redeem() {
     let prepare_txid = prepare_tx.compute_txid();
 
     println!("prepare_txid: {}", prepare_txid);
-    _ = client.broadcast_transaction(&prepare_tx).await.unwrap();
-
     println!("redeem_tx: {:?}", redeem_tx);
-    println!("redeem_tx_hex: {}", consensus::serialize(&redeem_tx).to_lower_hex_string());
+    println!(
+        "redeem_tx_hex: {}",
+        consensus::serialize(&redeem_tx).to_lower_hex_string()
+    );
 
+    _ = client.broadcast_transaction(&prepare_tx).await.unwrap();
     let mut prepare_confirmed = false;
 
     while !prepare_confirmed {

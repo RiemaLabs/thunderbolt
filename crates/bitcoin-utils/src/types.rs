@@ -1,5 +1,5 @@
-use bitcoin::secp256k1::rand::{self, Rng};
 use bitcoin::{hashes::Hash, Amount, BlockHash, Txid};
+use rand::Rng;
 use serde::Deserialize;
 
 #[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -30,8 +30,8 @@ impl TxidExt for Txid {
     }
 
     fn random() -> Self {
-        let mut rng = rand::thread_rng();
-        let random_bytes: [u8; 32] = rng.gen();
+        let mut rng = rand::rng();
+        let random_bytes: [u8; 32] = rng.random();
         let result = Txid::from_slice(&random_bytes).unwrap();
         result
     }
@@ -58,8 +58,8 @@ impl BlockHashExt for BlockHash {
     }
 
     fn random() -> Self {
-        let mut rng = rand::thread_rng();
-        let random_bytes: [u8; 32] = rng.gen();
+        let mut rng = rand::rng();
+        let random_bytes: [u8; 32] = rng.random();
         let result = BlockHash::from_slice(&random_bytes).unwrap();
         result
     }
