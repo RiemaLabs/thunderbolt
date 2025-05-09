@@ -2,7 +2,6 @@ use frost_secp256k1::rand_core::OsRng;
 use halo2_base::halo2_proofs::halo2curves::group::Curve;
 
 use halo2_base::halo2_proofs::halo2curves::serde::SerdeObject;
-use halo2_base::utils::biguint_to_fe;
 use halo2_base::{
     gates::{
         circuit::{builder::RangeCircuitBuilder, CircuitBuilderStage},
@@ -27,13 +26,18 @@ use halo2_ecc::{
     fields::FieldChip,
     secp256k1::{FpChip, FqChip},
 };
-use num_bigint::BigUint;
+use pse_poseidon::Poseidon;
+use std::time::Instant;
 
 use crate::circuit::{gate::ForeignGate, hasher::PoseidonForeignHasher};
 
 pub const LIMB_BITS: usize = 88;
 pub const NUM_LIMBS: usize = 3;
 pub const WINDOW_BITS: usize = 4;
+pub const T: usize = 3;
+pub const RATE: usize = 2;
+pub const R_F: usize = 8;
+pub const R_P: usize = 57;
 
 #[derive(Debug, Clone, Default)]
 /// Represents all inputs and outputs for the shared secret derivation and commitment flow.
@@ -67,13 +71,13 @@ impl SharedSecretProofData {
         let x_bytes = shared_point.x.to_raw_bytes();
         let y_bytes = shared_point.y.to_raw_bytes();
         //  TODO: Need hash.
-        todo!()
-        // Interpret the hash output as a scalar `secret ∈ Fq`
-        // let hash_bigint = BigUint::from_bytes_be(&hash_bytes);
-        // let secret = biguint_to_fe::<Fq>(&hash_bigint);
+        let mut native_sponge = Poseidon::<Fq, T, RATE>::new(R_F, R_P);
+        // native_sponge.update(&[x_bytes, y_bytes]);
+        let secret = native_sponge.squeeze();
+        todo!();
 
         // Compute the final public key: `pk_c = secret ⋅ G`
-        // let pk_c = (Secp256k1Affine::generator() * secret).to_affine();
+        let pk_c = (Secp256k1Affine::generator() * secret).to_affine();
 
         // Self { sk, pk_b, secret, pk_c }
     }
@@ -90,7 +94,7 @@ pub struct SharePKCircuitParams {
 impl Default for SharePKCircuitParams {
     fn default() -> Self {
         Self {
-            k: 18,
+            k: 17,
             lookup_bits: 9,
             unusable_rows: 9,
             data: SharedSecretProofData::default(),
@@ -99,15 +103,23 @@ impl Default for SharePKCircuitParams {
 }
 
 pub fn prove_pk_share(params: SharePKCircuitParams) {
+    let t_start = Instant::now();
+
+    // === Phase 1: Setup (Keygen builder) ===
     let mut builder = RangeCircuitBuilder::from_stage(CircuitBuilderStage::Keygen).use_k(params.k);
     builder.set_lookup_bits(params.lookup_bits);
     builder.set_instance_columns(1);
 
     let range = RangeChip::new(params.lookup_bits, builder.lookup_manager().clone());
+    let t0 = Instant::now();
 
-    generate_share_pk(builder.main(0), &range, SharedSecretProofData::default());
+    let outputs = generate_share_pk(builder.main(0), &range, SharedSecretProofData::default());
+    for val in outputs {
+        builder.assigned_instances[0].push(val);
+    }
+    println!(">> generate_share_pk (keygen) done in {:?}", t0.elapsed());
 
-    // helper check: if your function didn't use lookups, turn lookup table "off"
+    let t1 = Instant::now();
     let t_cells_lookup = builder.lookup_manager().iter().map(|lm| lm.total_rows()).sum::<usize>();
     let lookup_bits = if t_cells_lookup == 0 {
         None
@@ -116,17 +128,20 @@ pub fn prove_pk_share(params: SharePKCircuitParams) {
     };
     builder.config_params.lookup_bits = lookup_bits;
 
-    // configure the circuit shape, 9 blinding rows seems enough
     let config_params = builder.calculate_params(Some(params.unusable_rows));
-    let params_kzg = gen_srs(params.k as u32);
+    println!(">> calculate_params done in {:?}", t1.elapsed());
 
+    let t2 = Instant::now();
+    let params_kzg = gen_srs(params.k as u32);
     let vk = keygen_vk(&params_kzg, &builder).unwrap();
     let pk = keygen_pk(&params_kzg, vk, &builder).unwrap();
+    println!(">> keygen_vk + keygen_pk done in {:?}", t2.elapsed());
 
     let break_points = builder.break_points();
     drop(builder);
 
-    // create real proof
+    // === Phase 2: Prover ===
+    let t3 = Instant::now();
     let mut builder = RangeCircuitBuilder::prover(config_params.clone(), break_points);
     let range = RangeChip::new(params.lookup_bits, builder.lookup_manager().clone());
 
@@ -134,11 +149,19 @@ pub fn prove_pk_share(params: SharePKCircuitParams) {
     for val in outputs {
         builder.assigned_instances[0].push(val);
     }
-    // prove
-    let proof = gen_proof(&params_kzg, &pk, builder);
+    println!(">> generate_share_pk (prover) done in {:?}", t3.elapsed());
 
-    // verify
+    // === Phase 3: Proof generation ===
+    let t4 = Instant::now();
+    let proof = gen_proof(&params_kzg, &pk, builder);
+    println!(">> gen_proof done in {:?}", t4.elapsed());
+
+    // === Phase 4: Verification ===
+    let t5 = Instant::now();
     check_proof(&params_kzg, pk.get_vk(), &proof, true);
+    println!(">> check_proof done in {:?}", t5.elapsed());
+
+    println!(">> TOTAL prove_pk_share done in {:?}", t_start.elapsed());
 }
 
 fn generate_share_pk<F: BigPrimeField>(
@@ -167,11 +190,8 @@ fn hash_shared_secret<F: BigPrimeField>(
     range: &RangeChip<F>,
     point: &EcPoint<F, ProperCrtUint<F>>,
 ) -> ProperCrtUint<F> {
-    const T: usize = 3;
-    const RATE: usize = 2;
-
     let fq_chip = FqChip::<F>::new(range, LIMB_BITS, NUM_LIMBS);
-    let spec = OptimizedPoseidonSpec::<Fq, 3, 2>::new::<8, 57, 0>();
+    let spec = OptimizedPoseidonSpec::<Fq, T, RATE>::new::<R_F, R_P, 0>();
     let limbs = vec![point.x().clone(), point.y().clone()];
     let mut hasher = PoseidonForeignHasher::<F, T, RATE>::new(spec);
     let gate = ForeignGate::new(fq_chip.clone());
@@ -204,13 +224,12 @@ fn scalar_multiply<F: BigPrimeField>(
 
 #[cfg(test)]
 mod test {
+    use super::*;
     use super::{prove_pk_share, SharePKCircuitParams, SharedSecretProofData};
 
     #[test]
-    fn test_prove_pk_share() {
+    fn test_prove_pk_share_soundness() {
         let mut params = SharePKCircuitParams::default();
-
-        let sk = Scalar::random(OsRng);
 
         params.data = SharedSecretProofData {
             sk: todo!(),
@@ -218,6 +237,31 @@ mod test {
             secret: todo!(),
             pk_c: todo!(),
         };
+        prove_pk_share(params);
+    }
+
+    fn random_shared_secret_proof_data() -> SharedSecretProofData {
+        let sk = loop {
+            let val = Fq::random(OsRng);
+            if !bool::from(val.is_zero()) {
+                break val;
+            }
+        };
+
+        let b = Fq::random(OsRng);
+        let pk_b = (Secp256k1Affine::generator() * b).to_affine();
+
+        SharedSecretProofData {
+            sk,
+            pk_b,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_prove_pk_share_consistency() {
+        let mut params = SharePKCircuitParams::default();
+        params.data = random_shared_secret_proof_data();
         prove_pk_share(params);
     }
 }

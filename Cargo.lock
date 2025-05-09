@@ -1548,6 +1548,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pse-poseidon"
+version = "0.2.0"
+source = "git+https://github.com/axiom-crypto/pse-poseidon.git#19d3b09481bda0e95e7c005906365d070fceb752"
+dependencies = [
+ "halo2curves-axiom",
+ "subtle",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2233,6 +2242,7 @@ dependencies = [
  "halo2-ecc",
  "itertools 0.12.1",
  "num-bigint",
+ "pse-poseidon",
  "secp",
  "serde",
  "sha2",

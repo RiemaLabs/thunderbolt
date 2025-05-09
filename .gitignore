@@ -105,3 +105,6 @@ flake.lock
 .cursorrules
 .vscode
 .idea
+
+# setup params.
+*.srs
