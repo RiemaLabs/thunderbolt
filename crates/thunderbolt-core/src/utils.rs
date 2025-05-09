@@ -1,14 +1,8 @@
+use musig2::compute_challenge_hash_tweak;
 use secp::{MaybeScalar, Point, Scalar};
-use sha2::{Digest, Sha256};
 
 pub fn compute_challenge(nonce_point: &Point, pubkey: &Point, msg: &[u8]) -> MaybeScalar {
-    let hash: [u8; 32] = Sha256::new()
-        .chain_update(&nonce_point.serialize())
-        .chain_update(&pubkey.serialize())
-        .chain_update(msg)
-        .finalize()
-        .into();
-    MaybeScalar::reduce_from(&hash)
+    compute_challenge_hash_tweak(&nonce_point.serialize_xonly(), pubkey, msg)
 }
 
 pub fn schnorr_sign(nonce: Scalar, secret_key: Scalar, message: &[u8]) -> (Point, MaybeScalar) {

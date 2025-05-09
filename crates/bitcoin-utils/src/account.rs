@@ -1,4 +1,4 @@
-use bitcoin::key::TapTweak;
+use bitcoin::key::{Parity, TapTweak};
 use bitcoin::{
     bip32::Xpriv,
     hex::FromHex,
@@ -6,6 +6,7 @@ use bitcoin::{
     secp256k1::All,
     Address, Network, PrivateKey, PublicKey, XOnlyPublicKey,
 };
+use secp::{Point, Scalar};
 
 use crate::utils::{generate_p2sh_address, generate_p2tr_address, generate_p2wpkh_address, generate_p2wsh_address};
 
@@ -13,11 +14,12 @@ use crate::utils::{generate_p2sh_address, generate_p2tr_address, generate_p2wpkh
 pub struct AccountInfo {
     pub secp: Secp256k1<All>,
     pub xpriv: Xpriv,
+
     pub keypair: Keypair,
-    pub private_key: PrivateKey,
-    pub public_key: PublicKey,
-    pub x_pubkey: XOnlyPublicKey,
-    pub p2tr_tweaked_keypair: Keypair,
+    pub tweaked_keypair: Keypair,
+
+    public_key: PublicKey,
+    x_pubkey: XOnlyPublicKey,
 }
 
 impl AccountInfo {
@@ -41,26 +43,35 @@ impl AccountInfo {
         let secp = Secp256k1::new();
         let xpriv = Xpriv::new_master(network, &Vec::from_hex(secret).unwrap()).unwrap();
         let keypair = xpriv.to_keypair(&secp);
+        let tweaked_keypair = keypair.tap_tweak(&secp, None).to_inner();
         let private_key = PrivateKey::new(keypair.secret_key(), network);
         let public_key = PublicKey::from_private_key(&secp, &private_key);
         let (x_pubkey, _) = XOnlyPublicKey::from_keypair(&keypair);
-        let p2tr_tweaked_keypair = keypair.tap_tweak(&secp, None).to_inner();
         AccountInfo {
             secp,
             xpriv,
             keypair,
-            private_key,
+            tweaked_keypair,
             public_key,
             x_pubkey,
-            p2tr_tweaked_keypair,
         }
+    }
+
+    pub fn get_tweaked_secret(&self) -> Scalar {
+        Scalar::from_slice(&self.tweaked_keypair.secret_bytes()).unwrap()
+    }
+
+    pub fn get_tweaked_public(&self) -> Point {
+        Point::from_slice(&self.tweaked_keypair.public_key().serialize()).unwrap()
+    }
+
+    pub fn get_tweaked_x_pubkey(&self) -> (XOnlyPublicKey, Parity) {
+        self.tweaked_keypair.x_only_public_key()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use secp::{Point, Scalar};
-
     use super::*;
 
     const SECRET: &str = "df207ca59c80138f6eba206c3dd7ef2307687ab5493620c95c671008945b63a1";
@@ -68,36 +79,34 @@ mod tests {
     #[test]
     fn test_p2tr_tweaked_keypair_mainnet() {
         let account = AccountInfo::new(Network::Bitcoin, SECRET);
-        let p2tr_tweaked_keypair = account.p2tr_tweaked_keypair;
         let p2tr_address = account.p2tr_address(Network::Bitcoin);
-        let x_pubkey = XOnlyPublicKey::from_keypair(&p2tr_tweaked_keypair).0;
+        let (tweaked_x_pubkey, _) = account.get_tweaked_x_pubkey();
         assert_eq!(
-            x_pubkey.serialize(),
+            tweaked_x_pubkey.serialize(),
             // Remove the first two bytes of the script pubkey as opcodes.
             p2tr_address.script_pubkey().as_bytes()[2..]
         );
 
-        let tweaked_secret = Scalar::from_slice(&p2tr_tweaked_keypair.secret_bytes()).unwrap();
-        let tweaked_public = Point::from_slice(&p2tr_tweaked_keypair.public_key().serialize()).unwrap();
+        let tweaked_secret = account.get_tweaked_secret();
+        let tweaked_public = account.get_tweaked_public();
         assert_eq!(tweaked_secret.base_point_mul(), tweaked_public);
-
-        assert_eq!(tweaked_public.serialize_xonly(), x_pubkey.serialize());
+        assert_eq!(tweaked_public.serialize_xonly(), tweaked_x_pubkey.serialize());
     }
 
     #[test]
     fn test_p2tr_tweaked_keypair_testnet() {
         let account = AccountInfo::new(Network::Testnet, SECRET);
-        let p2tr_tweaked_keypair = account.p2tr_tweaked_keypair;
         let p2tr_address = account.p2tr_address(Network::Testnet);
-        let x_pubkey = XOnlyPublicKey::from_keypair(&p2tr_tweaked_keypair).0;
+        let (tweaked_x_pubkey, _) = account.get_tweaked_x_pubkey();
         assert_eq!(
-            x_pubkey.serialize(),
+            tweaked_x_pubkey.serialize(),
             // Remove the first two bytes of the script pubkey as opcodes.
             p2tr_address.script_pubkey().as_bytes()[2..]
         );
 
-        let tweaked_secret = Scalar::from_slice(&p2tr_tweaked_keypair.secret_bytes()).unwrap();
-        let tweaked_public = Point::from_slice(&p2tr_tweaked_keypair.public_key().serialize()).unwrap();
+        let tweaked_secret = account.get_tweaked_secret();
+        let tweaked_public = account.get_tweaked_public();
         assert_eq!(tweaked_secret.base_point_mul(), tweaked_public);
+        assert_eq!(tweaked_public.serialize_xonly(), tweaked_x_pubkey.serialize());
     }
 }

@@ -19,7 +19,7 @@ pub fn prepare_redeem(
     let (user_nonce_index, user_p_pub_nonce) = user.gen_nonce();
 
     let (committee_nonce_index, committee_p_pub_nonce) =
-        committee.gen_nonce(user.get_tweaked_x_pubkey(), user_nonce_index);
+        committee.gen_nonce(user.get_tweaked_x_pubkey().0, user_p_pub_nonce, user_nonce_index);
 
     let user_p_pub_nonce = XOnlyPublicKey::from_slice(&user_p_pub_nonce.serialize_xonly()).unwrap();
     let committee_p_pub_nonce = XOnlyPublicKey::from_slice(&committee_p_pub_nonce.serialize_xonly()).unwrap();

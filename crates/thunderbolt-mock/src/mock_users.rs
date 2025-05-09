@@ -1,5 +1,5 @@
 use bitcoin::bip32::Xpriv;
-use bitcoin::key::rand::thread_rng;
+use bitcoin::key::{rand, Parity};
 use bitcoin::{Address, Network, PublicKey, XOnlyPublicKey};
 use bitcoin_utils::account::AccountInfo;
 use lazy_static::lazy_static;
@@ -30,9 +30,10 @@ impl MockUser {
     }
 
     pub fn gen_nonce(&mut self) -> (usize, Point) {
-        let nonce = Scalar::one();
+        let mut rng = rand::thread_rng();
+        let nonce = Scalar::random(&mut rng);
         self.nonces.push(nonce);
-        (self.nonces.len() - 1, Point::generator() * nonce)
+        (self.nonces.len() - 1, nonce.base_point_mul())
     }
 
     pub fn get_nonce(&self, index: usize) -> Scalar {
@@ -40,15 +41,15 @@ impl MockUser {
     }
 
     pub fn get_tweaked_secret(&self) -> Scalar {
-        Scalar::from_slice(&self.account.p2tr_tweaked_keypair.secret_bytes()).unwrap()
+        self.account.get_tweaked_secret()
+    }
+
+    pub fn get_tweaked_x_pubkey(&self) -> (XOnlyPublicKey, Parity) {
+        self.account.get_tweaked_x_pubkey()
     }
 
     pub fn get_pubkey(&self) -> PublicKey {
-        self.account.public_key
-    }
-
-    pub fn get_tweaked_x_pubkey(&self) -> XOnlyPublicKey {
-        XOnlyPublicKey::from_keypair(&self.account.p2tr_tweaked_keypair).0
+        self.account.keypair.public_key().into()
     }
 
     pub fn get_xpriv(&self) -> Xpriv {

@@ -22,3 +22,4 @@ secp = { version = "0.5.0", features = ["rand", "secp256k1"] }
 frost-secp256k1 = { version = "2.1.0"}
 
 bitcoin-utils = { path = "../bitcoin-utils" }
+musig2 = "0.2.4"
