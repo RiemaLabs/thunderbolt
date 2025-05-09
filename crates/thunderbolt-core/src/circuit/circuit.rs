@@ -2,8 +2,8 @@ use frost_secp256k1::rand_core::OsRng;
 use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
 use halo2_base::halo2_proofs::halo2curves::group::Curve;
 
-use halo2_base::halo2_proofs::halo2curves::serde::SerdeObject;
 use halo2_base::utils::testing::{check_proof_with_instances, gen_proof_with_instances};
+use halo2_base::utils::ScalarField;
 use halo2_base::{
     gates::{
         circuit::{builder::RangeCircuitBuilder, CircuitBuilderStage},
@@ -11,7 +11,7 @@ use halo2_base::{
     },
     halo2_proofs::{
         arithmetic::Field,
-        halo2curves::secp256k1::{Fq, Secp256k1Affine},
+        halo2curves::secp256k1::{Fp, Fq, Secp256k1Affine},
         plonk::{keygen_pk, keygen_vk},
     },
     poseidon::hasher::spec::OptimizedPoseidonSpec,
@@ -27,6 +27,7 @@ use halo2_ecc::{
 use pse_poseidon::Poseidon;
 use std::time::Instant;
 
+use crate::circuit::utils::fq_mod_from_bytes_le;
 use crate::circuit::{gate::ForeignGate, hasher::PoseidonForeignHasher};
 
 pub const LIMB_BITS: usize = 88;
@@ -57,27 +58,26 @@ impl SharedSecretProofData {
     pub fn generate() -> Self {
         // Sample the secret key `sk ∈ Fq`
         let sk = Fq::random(OsRng);
-
         // Sample the counterparty's secret `b ∈ Fq`, and compute `pk_b = b ⋅ G`
         let b = Fq::random(OsRng);
         let pk_b = (Secp256k1Affine::generator() * b).to_affine();
 
         // Derive the shared point: `P = sk ⋅ pk_b`
         let shared_point = (pk_b * sk).to_affine();
-
         // Hash the affine coordinates of the shared point using SHA-256
-        let x_bytes = shared_point.x.to_raw_bytes();
-        let y_bytes = shared_point.y.to_raw_bytes();
+        let x_bytes = shared_point.x.to_bytes();
+        let y_bytes = shared_point.y.to_bytes();
         //  TODO: Need hash.
+        let x = fq_mod_from_bytes_le(&x_bytes);
+        let y = fq_mod_from_bytes_le(&y_bytes);
         let mut native_sponge = Poseidon::<Fq, T, RATE>::new(R_F, R_P);
-        // native_sponge.update(&[x_bytes, y_bytes]);
+        native_sponge.update(&[x, y]);
         let secret = native_sponge.squeeze();
-        todo!();
 
         // Compute the final public key: `pk_c = secret ⋅ G`
         let pk_c = (Secp256k1Affine::generator() * secret).to_affine();
 
-        // Self { sk, pk_b, secret, pk_c }
+        Self { sk, pk_b, secret, pk_c }
     }
 }
 
@@ -112,6 +112,7 @@ pub fn prove_pk_share(params: SharePKCircuitParams) {
     let t0 = Instant::now();
 
     let outputs = generate_share_pk(builder.main(0), &range, SharedSecretProofData::default());
+
     for val in outputs {
         builder.assigned_instances[0].push(val);
     }
@@ -152,7 +153,8 @@ pub fn prove_pk_share(params: SharePKCircuitParams) {
     // === Phase 3: Proof generation ===
     let t4 = Instant::now();
 
-    let instances_vec: Vec<Fr> = outputs.iter().map(|v| *v.value()).collect(); // 不是 &Fr，是 Fr
+    // TODO: replace to input.
+    let instances_vec: Vec<Fr> = outputs.iter().map(|v| *v.value()).collect();
     let instance_slices: Vec<&[Fr]> = vec![instances_vec.as_slice()];
     let instances: &[&[Fr]] = &instance_slices;
     let proof = gen_proof_with_instances(&params_kzg, &pk, builder, &instances);
@@ -179,6 +181,18 @@ fn generate_share_pk<F: BigPrimeField>(
     let generator = Secp256k1Affine::generator();
     let (_, pk_c) = scalar_multiply(ctx, range, generator, true, secret);
 
+    // TODO: add to sansity_check feature
+    if shared_data.sk != Fq::zero() {
+        assert_eq!(
+            shared_data.pk_c.x,
+            Fp::from_bytes_le(pk_c.x().value().to_bytes_le().as_slice())
+        );
+        assert_eq!(
+            shared_data.pk_c.y,
+            Fp::from_bytes_le(pk_c.y().value().to_bytes_le().as_slice())
+        );
+    }
+
     let mut public_inputs = vec![];
     public_inputs.extend(pk_b.x().limbs());
     public_inputs.extend(pk_b.y().limbs());
@@ -198,7 +212,6 @@ fn hash_shared_secret<F: BigPrimeField>(
     let mut hasher = PoseidonForeignHasher::<F, T, RATE>::new(spec);
     let gate = ForeignGate::new(fq_chip.clone());
     hasher.initialize_consts(ctx, &fq_chip, &gate);
-
     hasher.hash_fix_len_array(ctx, &gate, &limbs)
 }
 
@@ -232,13 +245,7 @@ mod test {
     #[test]
     fn test_prove_pk_share_soundness() {
         let mut params = SharePKCircuitParams::default();
-
-        params.data = SharedSecretProofData {
-            sk: todo!(),
-            pk_b: todo!(),
-            secret: todo!(),
-            pk_c: todo!(),
-        };
+        params.data = SharedSecretProofData::generate();
         prove_pk_share(params);
     }
 

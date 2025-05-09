@@ -4,3 +4,4 @@ pub mod hasher;
 pub mod state;
 
 pub(super) mod gate;
+pub(super) mod utils;

@@ -49,9 +49,6 @@ impl<F: BigPrimeField, const T: usize, const RATE: usize> PoseidonForeignHasher<
         fix_len_array_squeeze(ctx, gate, inputs, &mut state, &self.spec)
     }
 
-    fn empty_hash(&self) -> &ProperCrtUint<F> {
-        self.consts.get().unwrap().empty_hash()
-    }
     fn init_state(&self) -> &PoseidonForeignState<F, T, RATE> {
         self.consts.get().unwrap().init_state()
     }
@@ -61,9 +58,6 @@ impl<F: BigPrimeField, const T: usize, const RATE: usize> PoseidonForeignHasher<
 struct PoseidonForeignHasherConsts<F: BigPrimeField, const T: usize, const RATE: usize> {
     #[getset(get = "pub")]
     init_state: PoseidonForeignState<F, T, RATE>,
-    // hash of an empty input("").
-    #[getset(get = "pub")]
-    empty_hash: ProperCrtUint<F>,
 }
 
 impl<F: BigPrimeField, const T: usize, const RATE: usize> PoseidonForeignHasherConsts<F, T, RATE> {
@@ -74,9 +68,7 @@ impl<F: BigPrimeField, const T: usize, const RATE: usize> PoseidonForeignHasherC
         spec: &OptimizedPoseidonSpec<Fq, T, RATE>,
     ) -> Self {
         let init_state = PoseidonForeignState::default(ctx, fq_chip);
-        let mut state = init_state.clone();
-        let empty_hash = fix_len_array_squeeze(ctx, gate, &[], &mut state, spec);
-        Self { init_state, empty_hash }
+        Self { init_state }
     }
 }
 

@@ -2242,6 +2242,7 @@ dependencies = [
  "halo2-ecc",
  "itertools 0.12.1",
  "num-bigint",
+ "num-traits",
  "pse-poseidon",
  "secp",
  "serde",

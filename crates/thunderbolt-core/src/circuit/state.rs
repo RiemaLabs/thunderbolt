@@ -48,7 +48,6 @@ impl<F: BigPrimeField, const T: usize, const RATE: usize> PoseidonForeignState<F
 
         // Only apply for fixed-len array.
         self.absorb_with_pre_constants(ctx, gate, inputs, &constants[0]);
-
         for constants in constants.iter().skip(1).take(r_f - 1) {
             self.sbox_full(ctx, gate, constants);
             self.apply_mds(ctx, gate, mds);
@@ -112,10 +111,8 @@ impl<F: BigPrimeField, const T: usize, const RATE: usize> PoseidonForeignState<F
         // - The inputs are added to all elements starting from el1 (so, not to the capacity),
         //   to as many elements as inputs are available.
         // - To the first element for which no input is left (if any), an extra 1 is added.
-
         // adding preconstant to the distinguished capacity element (only one)
         self.s[0] = gate.add_const(ctx, &self.s[0], pre_constants[0]);
-
         // adding pre-constants and inputs to the elements for which both are available
         for ((x, constant), input) in self.s.iter_mut().zip(pre_constants.iter()).skip(1).zip(inputs.iter()) {
             let val = gate.add(ctx, x, input);
