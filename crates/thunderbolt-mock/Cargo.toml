@@ -8,6 +8,7 @@ description = "The mock implementation of Thunderbolt, including integration tes
 lazy_static = "1.5.0"
 bitcoin = { version = "0.32.5", features = ["serde"] }
 secp = { version = "0.5.0", features = ["rand", "secp256k1"] }
+musig2 = { version = "0.2.4", features = ["secp256k1"] }
 
 bitcoin-utils = { path = "../bitcoin-utils" }
 bitcoin-clients = { path = "../bitcoin-clients" }

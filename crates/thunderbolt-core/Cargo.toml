@@ -20,6 +20,6 @@ halo2-ecc = { git = "https://github.com/axiom-crypto/halo2-lib", tag = "v0.5.0" 
 bitcoin = { version = "0.32.5", features = ["rand-std", "serde"] }
 secp = { version = "0.5.0", features = ["rand", "secp256k1"] }
 frost-secp256k1 = { version = "2.1.0"}
+musig2 = { version = "0.2.4", features = ["secp256k1"] }
 
 bitcoin-utils = { path = "../bitcoin-utils" }
-musig2 = "0.2.4"

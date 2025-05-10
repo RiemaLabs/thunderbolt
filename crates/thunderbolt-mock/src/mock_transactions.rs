@@ -1,7 +1,7 @@
 use bitcoin::key::Secp256k1;
-use bitcoin::{Address, Network, Psbt, Transaction, XOnlyPublicKey};
+use bitcoin::{Address, Network, Transaction, XOnlyPublicKey};
 use bitcoin_utils::types::Utxo;
-use thunderbolt_core::tx_constructor::BitcoinTxConstructor;
+use thunderbolt_core::protocol::{SigningContext, TxContext};
 use thunderbolt_core::utils::schnorr_verify;
 
 use crate::mock_committee::MockCommittee;
@@ -16,25 +16,28 @@ pub fn prepare_redeem(
     sats_per_vbytes: u64,
     fixed_amount: u64,
 ) -> (Transaction, Transaction) {
-    let (user_nonce_index, user_p_pub_nonce) = user.gen_nonce();
+    let secp = Secp256k1::new();
 
-    let (committee_nonce_index, committee_p_pub_nonce) =
-        committee.gen_nonce(user.get_tweaked_x_pubkey().0, user_p_pub_nonce, user_nonce_index);
+    // [Off-chain] Step 1: Pubkey Generation
 
-    let user_p_pub_nonce = XOnlyPublicKey::from_slice(&user_p_pub_nonce.serialize_xonly()).unwrap();
-    let committee_p_pub_nonce = XOnlyPublicKey::from_slice(&committee_p_pub_nonce.serialize_xonly()).unwrap();
-
-    let tx_constructor = BitcoinTxConstructor::new(
-        user.get_tweaked_x_pubkey(),
-        committee.get_x_pubkey(),
-        user_p_pub_nonce,
-        committee_p_pub_nonce,
+    let tx_ctx = TxContext::new(
+        user.account.get_tweaked_x_pubkey().0,
+        committee.account.get_tweaked_x_pubkey().0,
         Network::Testnet,
     );
 
-    println!("user tweaked x pubkey: {}", user.get_tweaked_x_pubkey());
+    // [On-chain] Step 2: Nonce Generation
 
-    let mut prepare_tx = tx_constructor
+    let (user_nonce_index, user_p_pub_nonce) = user.gen_nonce();
+
+    let (c_nonce_index, c_p_pub_nonce) = committee.gen_nonce(user.account.get_tweaked_x_pubkey().0, user_nonce_index);
+
+    let user_p_pub_nonce = XOnlyPublicKey::from_slice(&user_p_pub_nonce.serialize_xonly()).unwrap();
+    let committee_p_pub_nonce = XOnlyPublicKey::from_slice(&c_p_pub_nonce.serialize_xonly()).unwrap();
+
+    let sign_ctx = SigningContext::new(user_p_pub_nonce, committee_p_pub_nonce, tx_ctx.p_pubkey);
+
+    let mut prepare_tx = tx_ctx
         .construct_unsigned_prepare(
             &prev_address,
             prev_outputs,
@@ -44,85 +47,60 @@ pub fn prepare_redeem(
         )
         .unwrap();
 
-    let secp = Secp256k1::new();
-
-    let signed_prepare_tx = tx_constructor
+    let signed_prepare_tx = tx_ctx
         .sign_prepare(
-            &user.get_pubkey(),
+            &user.account.get_pubkey(),
             &prev_address,
             &mut prepare_tx,
             &secp,
-            &user.get_xpriv(),
+            &user.account.xpriv,
         )
         .unwrap();
 
-    let redeem_psbt = tx_constructor
+    let redeem_psbt = tx_ctx
         .construct_unsigned_redeem(signed_prepare_tx.compute_txid(), fixed_amount, vec![])
         .unwrap();
 
-    let (redeem_message, _) = tx_constructor.extract_message(&redeem_psbt).unwrap();
+    let (redeem_message, _) = tx_ctx.extract_message(&redeem_psbt).unwrap();
 
-    let committee_signature = tx_constructor
-        .sign(
-            &redeem_psbt,
-            committee.get_nonce(committee_nonce_index),
-            committee.get_secret(),
-        )
-        .unwrap();
+    let c_signature = sign_ctx.sign(
+        committee.account.get_tweaked_secret(),
+        committee.get_nonce(c_nonce_index),
+        &redeem_message,
+    );
 
-    let user_signature = tx_constructor
-        .sign(
-            &redeem_psbt,
-            user.get_nonce(user_nonce_index),
-            user.get_tweaked_secret(),
-        )
-        .unwrap();
+    let user_signature = sign_ctx.sign(
+        user.account.get_tweaked_secret(),
+        user.get_nonce(user_nonce_index),
+        &redeem_message,
+    );
 
-    let outputs = tx_constructor.default_outputs(fixed_amount, prev_address, sats_per_vbytes);
+    let outputs = tx_ctx.default_outputs(fixed_amount, prev_address, sats_per_vbytes);
 
-    let mut unsigned_redeem_tx = tx_constructor
+    let mut unsigned_redeem_tx = tx_ctx
         .construct_unsigned_redeem(signed_prepare_tx.compute_txid(), fixed_amount, outputs)
         .unwrap();
 
-    let committee_signed_redeem_tx = tx_constructor
+    let c_signed_redeem_tx = tx_ctx
         .committee_sign_redeem(
             &mut unsigned_redeem_tx,
-            committee.get_x_pubkey(),
+            committee.account.get_tweaked_x_pubkey().0,
             &secp,
-            &committee.get_xpriv(),
+            &committee.account.xpriv,
         )
         .unwrap();
 
-    let match_result = tx_constructor.p_pubkey_user == user.get_tweaked_secret().base_point_mul();
+    let final_signature = user_signature.1 + c_signature.1;
 
-    assert!(match_result);
-
-    let veri_result_0 = schnorr_verify(
-        tx_constructor.p_pubkey_comm,
-        (
-            tx_constructor.p_pub_nonce_comm,
-            secp::MaybeScalar::Valid(committee_signature),
-        ),
+    let veri_result = schnorr_verify(
+        tx_ctx.x_pubkey.serialize(),
         redeem_message.as_ref(),
+        (sign_ctx.x_pubnonce.serialize(), final_signature),
     );
+    assert!(veri_result);
 
-    assert!(veri_result_0);
-
-    let veri_result_1 = schnorr_verify(
-        tx_constructor.p_pubkey_user,
-        (
-            tx_constructor.p_pub_nonce_user,
-            secp::MaybeScalar::Valid(user_signature),
-        ),
-        redeem_message.as_ref(),
-    );
-
-    assert!(veri_result_1);
-
-    let final_signature = user_signature + committee_signature;
-
-    let final_redeem_tx = tx_constructor
-        .user_combine_redeem(committee_signed_redeem_tx, final_signature.unwrap())
+    let final_redeem_tx = sign_ctx
+        .user_combine_redeem(c_signed_redeem_tx, final_signature.unwrap())
         .unwrap();
 
     (signed_prepare_tx, final_redeem_tx)

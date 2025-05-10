@@ -16,7 +16,7 @@ lazy_static! {
 }
 
 pub struct MockUser {
-    account: AccountInfo,
+    pub account: AccountInfo,
 
     nonces: Vec<Scalar>,
 }
@@ -30,33 +30,14 @@ impl MockUser {
     }
 
     pub fn gen_nonce(&mut self) -> (usize, Point) {
-        let mut rng = rand::thread_rng();
-        let nonce = Scalar::random(&mut rng);
+        // let mut rng = rand::thread_rng();
+        // let nonce = Scalar::random(&mut rng);
+        let nonce = Scalar::one();
         self.nonces.push(nonce);
         (self.nonces.len() - 1, nonce.base_point_mul())
     }
 
     pub fn get_nonce(&self, index: usize) -> Scalar {
         self.nonces[index]
-    }
-
-    pub fn get_tweaked_secret(&self) -> Scalar {
-        self.account.get_tweaked_secret()
-    }
-
-    pub fn get_tweaked_x_pubkey(&self) -> (XOnlyPublicKey, Parity) {
-        self.account.get_tweaked_x_pubkey()
-    }
-
-    pub fn get_pubkey(&self) -> PublicKey {
-        self.account.keypair.public_key().into()
-    }
-
-    pub fn get_xpriv(&self) -> Xpriv {
-        self.account.xpriv
-    }
-
-    pub fn get_p2tr_address(&self, network: Network) -> Address {
-        self.account.p2tr_address(network)
     }
 }

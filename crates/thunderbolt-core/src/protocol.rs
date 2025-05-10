@@ -1,7 +1,5 @@
-use std::ops::Add;
-
 use bitcoin::bip32::Xpriv;
-use bitcoin::key::TweakedPublicKey;
+use bitcoin::key::{Parity, TweakedPublicKey};
 use bitcoin::psbt::PsbtSighashType;
 use bitcoin::sighash::{Prevouts, SighashCache};
 use bitcoin::{
@@ -21,96 +19,120 @@ use bitcoin_utils::utils::{
 };
 use secp::{MaybePoint, MaybeScalar, Point, Scalar};
 
-use crate::utils::{compute_challenge, schnorr_sign};
+use crate::utils::{schnorr_compute_challenge, schnorr_sign, Signature};
 
-pub struct BitcoinTxConstructor {
-    // P_a.x
-    x_pubkey_user: XOnlyPublicKey,
+pub struct SigningContext {
+    // R_a + R_c
+    p_pubnonce: Point,
+
+    // P
+    p_pubkey: Point,
+    // R_a.x + R_c.x
+    pub x_pubnonce: XOnlyPublicKey,
+}
+
+impl SigningContext {
+    pub fn new(p_pubnonce_user: XOnlyPublicKey, p_pubnonce_comm: XOnlyPublicKey, p_pubkey: Point) -> Self {
+        let p_pubnonce_user = Point::lift_x(&p_pubnonce_user.serialize()).unwrap();
+        let p_pubnonce_comm = Point::lift_x(&p_pubnonce_comm.serialize()).unwrap();
+        let p_pubnonce = p_pubnonce_user + p_pubnonce_comm;
+
+        if p_pubnonce.is_infinity() {
+            panic!("Failed to verify p_pubnonce");
+        }
+
+        let p_pubnonce = p_pubnonce.unwrap();
+
+        let x_pubnonce = XOnlyPublicKey::from_slice(&p_pubnonce.serialize_xonly()).unwrap();
+
+        Self {
+            p_pubnonce,
+            x_pubnonce,
+            p_pubkey,
+        }
+    }
+
+    fn compute_challenge(&self, message: &Message) -> MaybeScalar {
+        schnorr_compute_challenge(&self.p_pubkey, message.as_ref(), &self.x_pubnonce.serialize())
+    }
+
+    pub fn sign(&self, sec: Scalar, nonce: Scalar, message: &Message) -> Signature {
+        let sec = if self.p_pubkey.has_even_y() { sec } else { -sec };
+        let (r, s) = schnorr_sign(sec, nonce, self.compute_challenge(message));
+        if self.p_pubnonce.has_even_y() {
+            (r, s)
+        } else {
+            (r, -s)
+        }
+    }
+
+    pub fn user_combine_redeem(
+        &self,
+        mut signed_redeem: Transaction,
+        signature: Scalar,
+    ) -> Result<Transaction, ConstructionError> {
+        let r = self.x_pubnonce.serialize();
+        let s = signature.serialize();
+        let sig = [r, s].concat();
+        let mut witness = Witness::new();
+        witness.push(sig);
+        signed_redeem.input[0].witness = witness;
+        Ok(signed_redeem)
+    }
+}
+
+pub struct TxContext {
+    // P_a + P_c
+    pub p_pubkey: Point,
+
+    // P_a.x + P_c.x
+    pub x_pubkey: TweakedPublicKey,
 
     // P_a
     pub p_pubkey_user: Point,
-
-    // P_c.x
-    x_pubkey_comm: XOnlyPublicKey,
-
     // P_c
     pub p_pubkey_comm: Point,
-
-    // P_a.x + P_c.x
-    x_pubkey: TweakedPublicKey,
-
-    // P_a + P_c
-    pub p_pubkey: Point,
 
     multi_sig_address: Address,
     committee_address: Address,
 
-    pub p_pub_nonce_user: Point,
-    pub p_pub_nonce_comm: Point,
-    pub p_pub_nonce: Point,
-    x_pub_nonce: XOnlyPublicKey,
-
     network: Network,
+
+    funding_utxo_idx: usize,
+    dummy_utxo_idx: usize,
 }
 
-impl BitcoinTxConstructor {
-    pub fn new(
-        x_pubkey_user: XOnlyPublicKey,
-        x_pubkey_comm: XOnlyPublicKey,
-        x_pub_nonce_user: XOnlyPublicKey,
-        x_pub_nonce_comm: XOnlyPublicKey,
-        network: Network,
-    ) -> Self {
+impl TxContext {
+    pub fn new(x_pubkey_user: XOnlyPublicKey, x_pubkey_comm: XOnlyPublicKey, network: Network) -> Self {
         let p_pubkey_user = Point::lift_x(&x_pubkey_user.serialize()).unwrap();
-
         let p_pubkey_comm = Point::lift_x(&x_pubkey_comm.serialize()).unwrap();
 
-        let p_pub_nonce_user = Point::lift_x(&x_pub_nonce_user.serialize()).unwrap();
+        let p_pubkey: MaybePoint = p_pubkey_user + p_pubkey_comm;
 
-        let p_pub_nonce_comm = Point::lift_x(&x_pub_nonce_comm.serialize()).unwrap();
+        if p_pubkey.is_infinity() {
+            panic!("Failed to verify p_pubkey");
+        }
 
-        let maybe_p_pubkey = p_pubkey_user.add(p_pubkey_comm);
-        let (x_pubkey, p_pubkey) = match maybe_p_pubkey {
-            MaybePoint::Valid(p_pubkey) => (
-                TweakedPublicKey::dangerous_assume_tweaked(
-                    XOnlyPublicKey::from_slice(&p_pubkey.serialize_xonly()).unwrap(),
-                ),
-                p_pubkey,
-            ),
-            MaybePoint::Infinity => {
-                panic!("Failed to verify p_pubkey");
-            }
-        };
+        let p_pubkey = p_pubkey.unwrap();
 
-        let maybe_p_pub_nonce = p_pub_nonce_user.add(p_pub_nonce_comm);
-        let (x_pub_nonce, p_pub_nonce) = match maybe_p_pub_nonce {
-            MaybePoint::Valid(p_pub_nonce) => (
-                XOnlyPublicKey::from_slice(&p_pub_nonce.serialize_xonly()).unwrap(),
-                p_pub_nonce,
-            ),
-            MaybePoint::Infinity => {
-                panic!("Failed to verify p_pub_nonce");
-            }
-        };
+        let x_pubkey = TweakedPublicKey::dangerous_assume_tweaked(
+            XOnlyPublicKey::from_slice(&p_pubkey.serialize_xonly()).unwrap(),
+        );
 
         let multi_sig_address = generate_p2tr_tweaked_address(network, x_pubkey);
 
         let committee_address = generate_p2tr_address(network, &x_pubkey_comm);
 
         Self {
-            x_pubkey_user,
+            p_pubkey,
             p_pubkey_user,
-            x_pubkey_comm,
             p_pubkey_comm,
             x_pubkey,
-            p_pubkey,
-            p_pub_nonce_user,
-            p_pub_nonce_comm,
-            p_pub_nonce,
-            x_pub_nonce,
             multi_sig_address,
             committee_address,
             network,
+            funding_utxo_idx: 0,
+            dummy_utxo_idx: 1,
         }
     }
 
@@ -397,34 +419,17 @@ impl BitcoinTxConstructor {
         let tx = redeem_psbt.clone().extract_tx().unwrap();
         let mut cache = SighashCache::new(&tx);
 
-        let sighash_type = bitcoin::TapSighashType::None;
         let prevouts = &[
-            redeem_psbt.inputs[0].witness_utxo.as_ref().unwrap(),
-            redeem_psbt.inputs[1].witness_utxo.as_ref().unwrap(),
+            redeem_psbt.inputs[self.funding_utxo_idx].witness_utxo.as_ref().unwrap(),
+            redeem_psbt.inputs[self.dummy_utxo_idx].witness_utxo.as_ref().unwrap(),
         ];
 
         let prevouts = Prevouts::All(prevouts);
+        let sighash_type = bitcoin::TapSighashType::None;
 
-        let tap_sighash = cache.taproot_key_spend_signature_hash(0, &prevouts, sighash_type)?;
+        let tap_sighash = cache.taproot_key_spend_signature_hash(self.funding_utxo_idx, &prevouts, sighash_type)?;
         let msg = Message::from(tap_sighash);
         Ok((msg, tap_sighash))
-    }
-
-    pub fn compute_challenge(&self, message: &Message) -> Result<Scalar, ConstructionError> {
-        let res = compute_challenge(&self.p_pub_nonce, &self.p_pubkey, message.as_ref());
-        match res {
-            MaybeScalar::Valid(scalar) => Ok(scalar),
-            MaybeScalar::Zero => Err(ConstructionError::ParseError(None, "invalid scalar".to_string())),
-        }
-    }
-
-    pub fn sign(&self, psbt: &Psbt, nonce: Scalar, secret_key: Scalar) -> Result<Scalar, ConstructionError> {
-        let (msg, _) = self.extract_message(psbt)?;
-        let (_, signature) = schnorr_sign(nonce, secret_key, msg.as_ref());
-        match signature {
-            MaybeScalar::Valid(signature) => Ok(signature),
-            MaybeScalar::Zero => Err(ConstructionError::ParseError(None, "invalid signature".to_string())),
-        }
     }
 
     pub fn committee_sign_redeem(
@@ -434,10 +439,10 @@ impl BitcoinTxConstructor {
         secp: &Secp256k1<All>,
         xpriv: &Xpriv,
     ) -> Result<Transaction, ConstructionError> {
-        // TODO: Add the verification part.
+        // TODO: Add the verification part. The committee shall verify the outputs provided by the user.
         // The dummy UTXO in the whitepaper shall be signed by the committee.
         {
-            let input = &mut psbt.inputs[1];
+            let input = &mut psbt.inputs[self.dummy_utxo_idx];
             input.sighash_type = Some(PsbtSighashType::from_u32(0));
             input.tap_key_origins = generate_tap_key_origins(secp, xpriv, &x_pubkey, Vec::new());
             input.tap_internal_key = Some(x_pubkey);
@@ -446,7 +451,7 @@ impl BitcoinTxConstructor {
         _ = psbt.sign(xpriv, &secp).unwrap();
 
         // Get the signature before accessing input again
-        let tap_key_sig = psbt.inputs[1].tap_key_sig.clone();
+        let tap_key_sig = psbt.inputs[self.dummy_utxo_idx].tap_key_sig.clone();
         let mut signed_redeem = psbt.clone().extract_tx().unwrap();
 
         if tap_key_sig.is_none() {
@@ -456,22 +461,8 @@ impl BitcoinTxConstructor {
             ));
         }
         let mut witness = Witness::new();
-        witness.push(psbt.inputs[1].tap_key_sig.unwrap().to_vec());
-        signed_redeem.input[1].witness = witness;
-        Ok(signed_redeem)
-    }
-
-    pub fn user_combine_redeem(
-        &self,
-        mut signed_redeem: Transaction,
-        signature: Scalar,
-    ) -> Result<Transaction, ConstructionError> {
-        let r = self.x_pub_nonce.serialize();
-        let s = signature.serialize();
-        let sig = [r, s].concat();
-        let mut witness = Witness::new();
-        witness.push(sig);
-        signed_redeem.input[0].witness = witness;
+        witness.push(psbt.inputs[self.dummy_utxo_idx].tap_key_sig.unwrap().to_vec());
+        signed_redeem.input[self.dummy_utxo_idx].witness = witness;
         Ok(signed_redeem)
     }
 
