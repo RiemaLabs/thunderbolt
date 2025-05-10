@@ -283,6 +283,11 @@ mod test {
         let config = SharePKCircuitConfig::default();
         let (params, pk, _) = setup(&config);
         let data = random_shared_secret_proof_data();
+
+        let start = Instant::now();
         let _ = prove(&params, &pk, data.clone());
+        let duration = start.elapsed();
+
+        println!("Prove time: {:.2?}", duration);
     }
 }

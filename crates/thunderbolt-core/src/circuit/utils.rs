@@ -15,10 +15,6 @@ pub fn fq_mod_from_bytes_le(bytes: &[u8]) -> Fq {
     biguint_to_fe::<Fq>(&reduced)
 }
 
-pub fn dump_fe<F: BigPrimeField>(f: &F) -> String {
-    format!("{}", BigUint::from_bytes_le(&f.to_bytes_le()))
-}
-
 pub fn generate_instances_from_data(data: &SharedSecretProofData) -> Vec<Fr> {
     let mut instances = Vec::new();
 
