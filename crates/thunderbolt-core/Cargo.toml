@@ -23,3 +23,6 @@ frost-secp256k1 = { version = "2.1.0"}
 musig2 = { version = "0.2.4", features = ["secp256k1"] }
 
 bitcoin-utils = { path = "../bitcoin-utils" }
+
+[feature]
+sansity-check = []

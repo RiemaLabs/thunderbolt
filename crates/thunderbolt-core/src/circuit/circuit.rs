@@ -3,7 +3,6 @@ use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
 use halo2_base::halo2_proofs::halo2curves::group::Curve;
 
 use halo2_base::utils::testing::{check_proof_with_instances, gen_proof_with_instances};
-use halo2_base::utils::ScalarField;
 use halo2_base::{
     gates::{
         circuit::{builder::RangeCircuitBuilder, CircuitBuilderStage},
@@ -11,7 +10,7 @@ use halo2_base::{
     },
     halo2_proofs::{
         arithmetic::Field,
-        halo2curves::secp256k1::{Fp, Fq, Secp256k1Affine},
+        halo2curves::secp256k1::{Fq, Secp256k1Affine},
         plonk::{keygen_pk, keygen_vk},
     },
     poseidon::hasher::spec::OptimizedPoseidonSpec,
@@ -30,13 +29,9 @@ use std::time::Instant;
 use crate::circuit::utils::fq_mod_from_bytes_le;
 use crate::circuit::{gate::ForeignGate, hasher::PoseidonForeignHasher};
 
-pub const LIMB_BITS: usize = 88;
-pub const NUM_LIMBS: usize = 3;
+use super::{LIMB_BITS, NUM_LIMBS, RATE, R_F, R_P, T};
+
 pub const WINDOW_BITS: usize = 4;
-pub const T: usize = 3;
-pub const RATE: usize = 2;
-pub const R_F: usize = 8;
-pub const R_P: usize = 57;
 
 #[derive(Debug, Clone, Default)]
 /// Represents all inputs and outputs for the shared secret derivation and commitment flow.
@@ -55,7 +50,7 @@ pub struct SharedSecretProofData {
 }
 
 impl SharedSecretProofData {
-    pub fn generate() -> Self {
+    fn generate() -> Self {
         // Sample the secret key `sk ∈ Fq`
         let sk = Fq::random(OsRng);
         // Sample the counterparty's secret `b ∈ Fq`, and compute `pk_b = b ⋅ G`
@@ -64,10 +59,9 @@ impl SharedSecretProofData {
 
         // Derive the shared point: `P = sk ⋅ pk_b`
         let shared_point = (pk_b * sk).to_affine();
-        // Hash the affine coordinates of the shared point using SHA-256
+        // Hash the affine coordinates of the shared point using Poseidon
         let x_bytes = shared_point.x.to_bytes();
         let y_bytes = shared_point.y.to_bytes();
-        //  TODO: Need hash.
         let x = fq_mod_from_bytes_le(&x_bytes);
         let y = fq_mod_from_bytes_le(&y_bytes);
         let mut native_sponge = Poseidon::<Fq, T, RATE>::new(R_F, R_P);
@@ -181,7 +175,7 @@ fn generate_share_pk<F: BigPrimeField>(
     let generator = Secp256k1Affine::generator();
     let (_, pk_c) = scalar_multiply(ctx, range, generator, true, secret);
 
-    // TODO: add to sansity_check feature
+    #[cfg(feature = "sanity-check")]
     if shared_data.sk != Fq::zero() {
         assert_eq!(
             shared_data.pk_c.x,
