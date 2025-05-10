@@ -1,7 +1,10 @@
 use frost_secp256k1::rand_core::OsRng;
-use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
+use halo2_base::gates::circuit::BaseCircuitParams;
+use halo2_base::halo2_proofs::halo2curves::bn256::{Bn256, Fr, G1Affine};
 use halo2_base::halo2_proofs::halo2curves::group::Curve;
 
+use halo2_base::halo2_proofs::plonk::{ProvingKey, VerifyingKey};
+use halo2_base::halo2_proofs::poly::kzg::commitment::ParamsKZG;
 use halo2_base::utils::testing::{check_proof_with_instances, gen_proof_with_instances};
 use halo2_base::{
     gates::{
@@ -29,10 +32,13 @@ use std::time::Instant;
 use crate::circuit::utils::fq_mod_from_bytes_le;
 use crate::circuit::{gate::ForeignGate, hasher::PoseidonForeignHasher};
 
+use super::utils::generate_instances_from_data;
 use super::{LIMB_BITS, NUM_LIMBS, RATE, R_F, R_P, T};
 
-pub const WINDOW_BITS: usize = 4;
+pub(crate) const WINDOW_BITS: usize = 4;
 
+pub type ProofBytes = Vec<u8>;
+pub type BreakPoint = Vec<Vec<usize>>;
 #[derive(Debug, Clone, Default)]
 /// Represents all inputs and outputs for the shared secret derivation and commitment flow.
 pub struct SharedSecretProofData {
@@ -76,90 +82,99 @@ impl SharedSecretProofData {
 }
 
 #[derive(Debug, Clone)]
-pub struct SharePKCircuitParams {
+pub struct SharePKCircuitConfig {
     pub(crate) k: usize,
     pub(crate) lookup_bits: usize,
     pub(crate) unusable_rows: usize,
-    pub(crate) data: SharedSecretProofData,
 }
 
-impl Default for SharePKCircuitParams {
+#[derive(Debug, Clone)]
+pub struct SharePKCircuitParams {
+    pub(crate) params_kzg: ParamsKZG<Bn256>,
+    pub(crate) breakpoint: BreakPoint,
+    pub(crate) circuit_params: BaseCircuitParams,
+}
+
+impl Default for SharePKCircuitConfig {
     fn default() -> Self {
         Self {
             k: 17,
             lookup_bits: 9,
             unusable_rows: 9,
-            data: SharedSecretProofData::default(),
         }
     }
 }
 
-pub fn prove_pk_share(params: SharePKCircuitParams) {
-    let t_start = Instant::now();
-
-    // === Phase 1: Setup (Keygen builder) ===
+pub fn setup(params: &SharePKCircuitConfig) -> (SharePKCircuitParams, ProvingKey<G1Affine>, VerifyingKey<G1Affine>) {
     let mut builder = RangeCircuitBuilder::from_stage(CircuitBuilderStage::Keygen).use_k(params.k);
     builder.set_lookup_bits(params.lookup_bits);
     builder.set_instance_columns(1);
 
     let range = RangeChip::new(params.lookup_bits, builder.lookup_manager().clone());
-    let t0 = Instant::now();
-
     let outputs = generate_share_pk(builder.main(0), &range, SharedSecretProofData::default());
 
     for val in outputs {
         builder.assigned_instances[0].push(val);
     }
-    println!(">> generate_share_pk (keygen) done in {:?}", t0.elapsed());
 
-    let t1 = Instant::now();
     let t_cells_lookup = builder.lookup_manager().iter().map(|lm| lm.total_rows()).sum::<usize>();
-    let lookup_bits = if t_cells_lookup == 0 {
+    builder.config_params.lookup_bits = if t_cells_lookup == 0 {
         None
     } else {
         Some(params.lookup_bits)
     };
-    builder.config_params.lookup_bits = lookup_bits;
 
-    let config_params = builder.calculate_params(Some(params.unusable_rows));
-    println!(">> calculate_params done in {:?}", t1.elapsed());
+    let circuit_params = builder.calculate_params(Some(params.unusable_rows));
 
-    let t2 = Instant::now();
     let params_kzg = gen_srs(params.k as u32);
+
     let vk = keygen_vk(&params_kzg, &builder).unwrap();
-    let pk = keygen_pk(&params_kzg, vk, &builder).unwrap();
-    println!(">> keygen_vk + keygen_pk done in {:?}", t2.elapsed());
-
-    let break_points = builder.break_points();
+    let pk = keygen_pk(&params_kzg, vk.clone(), &builder).unwrap();
+    let breakpoint = builder.break_points();
     drop(builder);
+    (
+        SharePKCircuitParams {
+            params_kzg,
+            circuit_params,
+            breakpoint,
+        },
+        pk,
+        vk,
+    )
+}
 
-    // === Phase 2: Prover ===
-    let t3 = Instant::now();
-    let mut builder = RangeCircuitBuilder::prover(config_params.clone(), break_points);
-    let range = RangeChip::new(params.lookup_bits, builder.lookup_manager().clone());
+pub fn prove(params: &SharePKCircuitParams, pk: &ProvingKey<G1Affine>, data: SharedSecretProofData) -> ProofBytes {
+    let circuit_params = &params.circuit_params;
+    let breakpoint = &params.breakpoint;
+    let params_kzg = &params.params_kzg;
 
-    let outputs = generate_share_pk(builder.main(0), &range, params.data);
+    let mut builder = RangeCircuitBuilder::prover(circuit_params.clone(), breakpoint.clone());
+    let range = RangeChip::new(
+        circuit_params.lookup_bits.unwrap_or_default(),
+        builder.lookup_manager().clone(),
+    );
+
+    let outputs = generate_share_pk(builder.main(0), &range, data);
     for val in outputs.clone() {
         builder.assigned_instances[0].push(val);
     }
-    println!(">> generate_share_pk (prover) done in {:?}", t3.elapsed());
 
-    // === Phase 3: Proof generation ===
-    let t4 = Instant::now();
-
-    // TODO: replace to input.
     let instances_vec: Vec<Fr> = outputs.iter().map(|v| *v.value()).collect();
     let instance_slices: Vec<&[Fr]> = vec![instances_vec.as_slice()];
-    let instances: &[&[Fr]] = &instance_slices;
-    let proof = gen_proof_with_instances(&params_kzg, &pk, builder, &instances);
-    println!(">> gen_proof done in {:?}", t4.elapsed());
+    gen_proof_with_instances(&params_kzg, pk, builder, &instance_slices)
+}
 
-    // === Phase 4: Verification ===
-    let t5 = Instant::now();
-    check_proof_with_instances(&params_kzg, pk.get_vk(), &proof, &instances, true);
-    println!(">> check_proof done in {:?}", t5.elapsed());
+pub fn verify(
+    params: &SharePKCircuitParams,
+    vk: &VerifyingKey<G1Affine>,
+    data: SharedSecretProofData,
+    proof: &ProofBytes,
+) {
+    let params_kzg = params.params_kzg.clone();
 
-    println!(">> TOTAL prove_pk_share done in {:?}", t_start.elapsed());
+    let instances = generate_instances_from_data(&data);
+    let instances_slice = [instances.as_slice()];
+    check_proof_with_instances(&params_kzg, vk, proof, &instances_slice, true)
 }
 
 fn generate_share_pk<F: BigPrimeField>(
@@ -204,8 +219,8 @@ fn hash_shared_secret<F: BigPrimeField>(
     let spec = OptimizedPoseidonSpec::<Fq, T, RATE>::new::<R_F, R_P, 0>();
     let limbs = vec![point.x().clone(), point.y().clone()];
     let mut hasher = PoseidonForeignHasher::<F, T, RATE>::new(spec);
-    let gate = ForeignGate::new(fq_chip.clone());
-    hasher.initialize_consts(ctx, &fq_chip, &gate);
+    hasher.initialize_consts(ctx, &fq_chip);
+    let gate = ForeignGate::new(fq_chip);
     hasher.hash_fix_len_array(ctx, &gate, &limbs)
 }
 
@@ -234,13 +249,15 @@ fn scalar_multiply<F: BigPrimeField>(
 #[cfg(test)]
 mod test {
     use super::*;
-    use super::{prove_pk_share, SharePKCircuitParams, SharedSecretProofData};
+    use super::{prove, SharePKCircuitConfig, SharedSecretProofData};
 
     #[test]
-    fn test_prove_pk_share_soundness() {
-        let mut params = SharePKCircuitParams::default();
-        params.data = SharedSecretProofData::generate();
-        prove_pk_share(params);
+    fn test_prove_soundness() {
+        let config = SharePKCircuitConfig::default();
+        let (params, pk, vk) = setup(&config);
+        let data = SharedSecretProofData::generate();
+        let proof = prove(&params, &pk, data.clone());
+        verify(&params, &vk, data, &proof);
     }
 
     fn random_shared_secret_proof_data() -> SharedSecretProofData {
@@ -262,9 +279,10 @@ mod test {
     }
 
     #[test]
-    fn test_prove_pk_share_consistency() {
-        let mut params = SharePKCircuitParams::default();
-        params.data = random_shared_secret_proof_data();
-        prove_pk_share(params);
+    fn test_prove_consistency() {
+        let config = SharePKCircuitConfig::default();
+        let (params, pk, _) = setup(&config);
+        let data = random_shared_secret_proof_data();
+        let _ = prove(&params, &pk, data.clone());
     }
 }

@@ -26,14 +26,9 @@ impl<F: BigPrimeField, const T: usize, const RATE: usize> PoseidonForeignHasher<
         }
     }
     /// Initialize necessary consts of hasher. Must be called before any computation.
-    pub fn initialize_consts(&mut self, ctx: &mut Context<F>, fq_chip: &FqChip<F>, gate: &ForeignGate<F>) {
+    pub fn initialize_consts(&mut self, ctx: &mut Context<F>, fq_chip: &FqChip<F>) {
         self.consts
-            .get_or_init(|| PoseidonForeignHasherConsts::<F, T, RATE>::new(ctx, fq_chip, gate, &self.spec));
-    }
-
-    /// Clear all consts.
-    pub fn clear(&mut self) {
-        self.consts.take();
+            .get_or_init(|| PoseidonForeignHasherConsts::<F, T, RATE>::new(ctx, fq_chip));
     }
 
     pub fn hash_fix_len_array(
@@ -61,12 +56,7 @@ struct PoseidonForeignHasherConsts<F: BigPrimeField, const T: usize, const RATE:
 }
 
 impl<F: BigPrimeField, const T: usize, const RATE: usize> PoseidonForeignHasherConsts<F, T, RATE> {
-    pub fn new(
-        ctx: &mut Context<F>,
-        fq_chip: &FqChip<F>,
-        gate: &ForeignGate<F>,
-        spec: &OptimizedPoseidonSpec<Fq, T, RATE>,
-    ) -> Self {
+    pub fn new(ctx: &mut Context<F>, fq_chip: &FqChip<F>) -> Self {
         let init_state = PoseidonForeignState::default(ctx, fq_chip);
         Self { init_state }
     }
