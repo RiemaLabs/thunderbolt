@@ -16,7 +16,7 @@ use bitcoin_utils::errors::ConstructionError;
 use bitcoin_utils::types::Utxo;
 use bitcoin_utils::utils::{
     generate_bip32_derivation, generate_p2pkh_script_sig_script, generate_p2sh_script_sig_script,
-    generate_p2tr_address, generate_p2tr_tweaked_address, generate_redeem_script, generate_tap_key_origins,
+    generate_p2tr_tweaked_address, generate_redeem_script, generate_tap_key_origins,
 };
 use secp::{MaybePoint, MaybeScalar, Point, Scalar};
 
