@@ -57,6 +57,10 @@ impl AccountInfo {
         }
     }
 
+    pub fn get_tweaked_keypair(&self) -> Keypair {
+        self.tweaked_keypair
+    }
+
     pub fn get_tweaked_secret(&self) -> Scalar {
         let secret = Scalar::from_slice(&self.tweaked_keypair.secret_bytes()).unwrap();
         let actual_pubkey = secret.base_point_mul();
@@ -77,6 +81,10 @@ impl AccountInfo {
 
     pub fn get_tweaked_x_pubkey(&self) -> (XOnlyPublicKey, Parity) {
         self.tweaked_keypair.x_only_public_key()
+    }
+
+    pub fn get_keypair(&self) -> Keypair {
+        self.keypair
     }
 
     pub fn get_secret(&self) -> Scalar {

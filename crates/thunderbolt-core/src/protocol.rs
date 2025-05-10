@@ -1,5 +1,6 @@
 use bitcoin::bip32::Xpriv;
-use bitcoin::key::{Parity, TweakedPublicKey};
+use bitcoin::key::constants::SCHNORR_SIGNATURE_SIZE;
+use bitcoin::key::{Keypair, TweakedPublicKey};
 use bitcoin::psbt::PsbtSighashType;
 use bitcoin::sighash::{Prevouts, SighashCache};
 use bitcoin::{
@@ -73,7 +74,10 @@ impl SigningContext {
     ) -> Result<Transaction, ConstructionError> {
         let r = self.x_pubnonce.serialize();
         let s = signature.serialize();
-        let sig = [r, s].concat();
+        let mut sig = Vec::<u8>::with_capacity(SCHNORR_SIGNATURE_SIZE + 1);
+        sig.extend_from_slice(&r);
+        sig.extend_from_slice(&s);
+        sig.push(bitcoin::TapSighashType::None as u8);
         let mut witness = Witness::new();
         witness.push(sig);
         signed_redeem.input[0].witness = witness;
@@ -121,7 +125,8 @@ impl TxContext {
 
         let multi_sig_address = generate_p2tr_tweaked_address(network, x_pubkey);
 
-        let committee_address = generate_p2tr_address(network, &x_pubkey_comm);
+        let committee_address =
+            generate_p2tr_tweaked_address(network, TweakedPublicKey::dangerous_assume_tweaked(x_pubkey_comm));
 
         Self {
             p_pubkey,
@@ -434,36 +439,30 @@ impl TxContext {
 
     pub fn committee_sign_redeem(
         &self,
-        psbt: &mut Psbt,
-        x_pubkey: XOnlyPublicKey,
+        redeem_psbt: &mut Psbt,
         secp: &Secp256k1<All>,
-        xpriv: &Xpriv,
+        keypair: &Keypair,
     ) -> Result<Transaction, ConstructionError> {
         // TODO: Add the verification part. The committee shall verify the outputs provided by the user.
         // The dummy UTXO in the whitepaper shall be signed by the committee.
-        {
-            let input = &mut psbt.inputs[self.dummy_utxo_idx];
-            input.sighash_type = Some(PsbtSighashType::from_u32(0));
-            input.tap_key_origins = generate_tap_key_origins(secp, xpriv, &x_pubkey, Vec::new());
-            input.tap_internal_key = Some(x_pubkey);
-        }
+        let mut tx = redeem_psbt.clone().extract_tx().unwrap();
+        let mut cache = SighashCache::new(&tx);
 
-        _ = psbt.sign(xpriv, &secp).unwrap();
+        let prevouts = &[
+            redeem_psbt.inputs[self.funding_utxo_idx].witness_utxo.as_ref().unwrap(),
+            redeem_psbt.inputs[self.dummy_utxo_idx].witness_utxo.as_ref().unwrap(),
+        ];
 
-        // Get the signature before accessing input again
-        let tap_key_sig = psbt.inputs[self.dummy_utxo_idx].tap_key_sig.clone();
-        let mut signed_redeem = psbt.clone().extract_tx().unwrap();
+        let prevouts = Prevouts::All(prevouts);
+        let sighash_type = bitcoin::TapSighashType::Default;
 
-        if tap_key_sig.is_none() {
-            return Err(ConstructionError::ParseError(
-                None,
-                "missing tap_key_sig in input".to_string(),
-            ));
-        }
+        let tap_sighash = cache.taproot_key_spend_signature_hash(self.dummy_utxo_idx, &prevouts, sighash_type)?;
+        let msg = Message::from(tap_sighash);
+        let sig = secp.sign_schnorr(&msg, keypair);
         let mut witness = Witness::new();
-        witness.push(psbt.inputs[self.dummy_utxo_idx].tap_key_sig.unwrap().to_vec());
-        signed_redeem.input[self.dummy_utxo_idx].witness = witness;
-        Ok(signed_redeem)
+        witness.push(sig.serialize());
+        tx.input[self.dummy_utxo_idx].witness = witness;
+        Ok(tx)
     }
 
     pub fn default_outputs(&self, fixed_amount: u64, recipient: Address, sats_per_vbytes: u64) -> Vec<TxOut> {

@@ -14,6 +14,7 @@ pub fn prepare_redeem(
     prev_outputs: Vec<Utxo>,
     prev_outputs_tx: Option<Transaction>,
     sats_per_vbytes: u64,
+    receipient_address: Address,
     fixed_amount: u64,
 ) -> (Transaction, Transaction) {
     let secp = Secp256k1::new();
@@ -75,7 +76,7 @@ pub fn prepare_redeem(
         &redeem_message,
     );
 
-    let outputs = tx_ctx.default_outputs(fixed_amount, prev_address, sats_per_vbytes);
+    let outputs = tx_ctx.default_outputs(fixed_amount, receipient_address, sats_per_vbytes);
 
     let mut unsigned_redeem_tx = tx_ctx
         .construct_unsigned_redeem(signed_prepare_tx.compute_txid(), fixed_amount, outputs)
@@ -84,9 +85,8 @@ pub fn prepare_redeem(
     let c_signed_redeem_tx = tx_ctx
         .committee_sign_redeem(
             &mut unsigned_redeem_tx,
-            committee.account.get_tweaked_x_pubkey().0,
             &secp,
-            &committee.account.xpriv,
+            &committee.account.get_tweaked_keypair(),
         )
         .unwrap();
 
