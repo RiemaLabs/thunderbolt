@@ -38,45 +38,107 @@ pub(crate) const WINDOW_BITS: usize = 4;
 
 pub type ProofBytes = Vec<u8>;
 pub type BreakPoint = Vec<Vec<usize>>;
+
 #[derive(Debug, Clone, Default)]
-/// Represents all inputs and outputs for the shared secret derivation and commitment flow.
+/// Represents all inputs and outputs involved in the shared secret derivation and commitment flow
+/// between Alice and Bob using elliptic curve and Poseidon-based operations.
 pub struct SharedSecretProofData {
-    /// The secret scalar (private key).
+    /// The secret scalar component `s` of Alice's original Schnorr signature. Known only to Alice.
+    pub signature_sk: Fq,
+
+    /// The public commitment to the secret scalar, computed as `s * G`.
+    pub signature_pk: Secp256k1Affine,
+
+    /// Alice's private tweak scalar `sk`, used in the Diffie-Hellman key exchange.
     pub sk: Fq,
 
-    /// The counterparty's public key.
-    pub pk_b: Secp256k1Affine,
+    /// Bob's public tweak key `tweak_pk`, used as the base for computing the shared secret.
+    pub tweak_pk: Secp256k1Affine,
 
-    /// The Poseidon hash output derived from the shared secret point.
+    /// The Poseidon hash of the Diffie-Hellman shared secret `sk * tweak_pk`, yielding a scalar.
     pub secret: Fq,
 
-    /// The output public key = secret * G.
-    pub pk_c: Secp256k1Affine,
+    /// The elliptic curve point `secret * G`, serving as the public representation of the shared secret.
+    pub secret_pub: Secp256k1Affine,
+
+    /// The final tweaked signature public key, computed as `signature_pk + secret_pub`.
+    pub tweaked_signature_pk: Secp256k1Affine,
 }
 
 impl SharedSecretProofData {
-    fn generate() -> Self {
-        // Sample the secret key `sk ∈ Fq`
-        let sk = Fq::random(OsRng);
-        // Sample the counterparty's secret `b ∈ Fq`, and compute `pk_b = b ⋅ G`
-        let b = Fq::random(OsRng);
-        let pk_b = (Secp256k1Affine::generator() * b).to_affine();
+    pub fn new(signature_sk: Fq, sk: Fq, tweak_pk: Secp256k1Affine) -> Self {
+        // signature_pk = signature_sk * G
+        let signature_pk = (Secp256k1Affine::generator() * signature_sk).to_affine();
 
-        // Derive the shared point: `P = sk ⋅ pk_b`
-        let shared_point = (pk_b * sk).to_affine();
-        // Hash the affine coordinates of the shared point using Poseidon
+        // shared_point = sk * tweak_pk
+        let shared_point = (tweak_pk * sk).to_affine();
+
+        // Poseidon hash on (x, y) coordinates of the shared_point
         let x_bytes = shared_point.x.to_bytes();
         let y_bytes = shared_point.y.to_bytes();
         let x = fq_mod_from_bytes_le(&x_bytes);
         let y = fq_mod_from_bytes_le(&y_bytes);
-        let mut native_sponge = Poseidon::<Fq, T, RATE>::new(R_F, R_P);
-        native_sponge.update(&[x, y]);
-        let secret = native_sponge.squeeze();
 
-        // Compute the final public key: `pk_c = secret ⋅ G`
-        let pk_c = (Secp256k1Affine::generator() * secret).to_affine();
+        let mut sponge = Poseidon::<Fq, T, RATE>::new(R_F, R_P);
+        sponge.update(&[x, y]);
+        let secret = sponge.squeeze();
 
-        Self { sk, pk_b, secret, pk_c }
+        // secret_pub = secret * G
+        let secret_pub = (Secp256k1Affine::generator() * secret).to_affine();
+
+        // tweaked_signature_pk = signature_pk + secret_pub
+        let tweaked_signature_pk = (signature_pk + secret_pub).to_affine();
+
+        SharedSecretProofData {
+            signature_sk,
+            signature_pk,
+            sk,
+            tweak_pk,
+            secret,
+            secret_pub,
+            tweaked_signature_pk,
+        }
+    }
+}
+
+impl SharedSecretProofData {
+    pub fn generate() -> Self {
+        // Alice samples the secret scalar part of the Schnorr signature
+        let signature_sk = Fq::random(OsRng);
+        let signature_pk = (Secp256k1Affine::generator() * signature_sk).to_affine();
+
+        // Bob's private tweak (sk) and Alice's tweak public key (tweak_pk = b * G)
+        let sk = Fq::random(OsRng);
+        let tweak_scalar = Fq::random(OsRng);
+        let tweak_pk = (Secp256k1Affine::generator() * tweak_scalar).to_affine();
+
+        // Compute the shared secret point: sk * tweak_pk
+        let shared_point = (tweak_pk * sk).to_affine();
+
+        // Convert coordinates to Poseidon input field elements
+        let x = fq_mod_from_bytes_le(&shared_point.x.to_bytes());
+        let y = fq_mod_from_bytes_le(&shared_point.y.to_bytes());
+
+        // Hash with Poseidon to get a scalar in the base field
+        let mut sponge = Poseidon::<Fq, T, RATE>::new(R_F, R_P);
+        sponge.update(&[x, y]);
+        let secret = sponge.squeeze();
+
+        // Convert the scalar to a public key: secret * G
+        let secret_pub = (Secp256k1Affine::generator() * secret).to_affine();
+
+        // Compute the tweaked signature public key: signature_pk + secret_pub
+        let tweaked_signature_pk = (signature_pk + secret_pub).to_affine();
+
+        SharedSecretProofData {
+            signature_sk,
+            signature_pk,
+            sk,
+            tweak_pk,
+            secret,
+            secret_pub,
+            tweaked_signature_pk,
+        }
     }
 }
 
@@ -97,7 +159,7 @@ pub struct SharePKCircuitParams {
 impl Default for SharePKCircuitConfig {
     fn default() -> Self {
         Self {
-            k: 17,
+            k: 16,
             lookup_bits: 9,
             unusable_rows: 9,
         }
@@ -175,37 +237,66 @@ pub fn verify(
     let instances_slice = [instances.as_slice()];
     check_proof_with_instances(&params_kzg, vk, proof, &instances_slice, true)
 }
-
 fn generate_share_pk<F: BigPrimeField>(
     ctx: &mut Context<F>,
     range: &RangeChip<F>,
     shared_data: SharedSecretProofData,
 ) -> Vec<AssignedValue<F>> {
     let fq_chip = FqChip::<F>::new(range, LIMB_BITS, NUM_LIMBS);
-    let sk = fq_chip.load_private(ctx, shared_data.sk);
-    let (pk_b, shared_secret) = scalar_multiply(ctx, range, shared_data.pk_b, false, sk);
 
-    let secret = hash_shared_secret(ctx, range, &shared_secret);
-    let generator = Secp256k1Affine::generator();
-    let (_, pk_c) = scalar_multiply(ctx, range, generator, true, secret);
+    // Load sk and signature_sk
+    let sk = fq_chip.load_private(ctx, shared_data.sk);
+    let signature_sk = fq_chip.load_private(ctx, shared_data.signature_sk);
+
+    // signature_pk = signature_sk * G
+    let signature_pk = scalar_multiply(ctx, range, Secp256k1Affine::generator(), true, signature_sk).1;
+    let signature_pk_x = signature_pk.x();
+    let signature_pk_y = signature_pk.y();
+
+    // tweak_pk = pk_b, compute sk * tweak_pk
+    let (tweak_pk, shared_secret_point) = scalar_multiply(ctx, range, shared_data.tweak_pk, false, sk);
+    let tweak_pk_x = tweak_pk.x();
+    let tweak_pk_y = tweak_pk.y();
+
+    // Poseidon hash over shared_secret_point (x, y)
+    let secret = hash_shared_secret(ctx, range, &shared_secret_point);
+
+    // secret_pub = secret * G
+    let (_, secret_pub) = scalar_multiply(ctx, range, Secp256k1Affine::generator(), true, secret);
+    let secret_pub_x = secret_pub.x();
+    let secret_pub_y = secret_pub.y();
+
+    // tweaked_signature_pk = signature_pk + secret_pub
+    let tweaked_signature_pk = ecc_add_points(ctx, range, signature_pk.clone(), secret_pub.clone());
+    let tweaked_x = tweaked_signature_pk.x();
+    let tweaked_y = tweaked_signature_pk.y();
 
     #[cfg(feature = "sanity-check")]
-    if shared_data.sk != Fq::zero() {
+    {
         assert_eq!(
-            shared_data.pk_c.x,
-            Fp::from_bytes_le(pk_c.x().value().to_bytes_le().as_slice())
+            shared_data.signature_pk,
+            (Secp256k1Affine::generator() * shared_data.signature_sk).to_affine()
         );
-        assert_eq!(
-            shared_data.pk_c.y,
-            Fp::from_bytes_le(pk_c.y().value().to_bytes_le().as_slice())
-        );
+        assert_eq!(shared_data.secret_pub.x, secret_pub_x.value().unwrap());
+        assert_eq!(shared_data.secret_pub.y, secret_pub_y.value().unwrap());
+        assert_eq!(shared_data.tweaked_signature_pk.x, tweaked_x.value().unwrap());
+        assert_eq!(shared_data.tweaked_signature_pk.y, tweaked_y.value().unwrap());
     }
 
+    // Assemble public inputs
     let mut public_inputs = vec![];
-    public_inputs.extend(pk_b.x().limbs());
-    public_inputs.extend(pk_b.y().limbs());
-    public_inputs.extend(pk_c.x().limbs());
-    public_inputs.extend(pk_c.y().limbs());
+    public_inputs.extend(signature_pk_x.limbs());
+    public_inputs.extend(signature_pk_y.limbs());
+
+    public_inputs.extend(tweak_pk_x.limbs());
+    public_inputs.extend(tweak_pk_y.limbs());
+
+    public_inputs.extend(secret_pub_x.limbs());
+    public_inputs.extend(secret_pub_y.limbs());
+
+    public_inputs.extend(tweaked_x.limbs());
+    public_inputs.extend(tweaked_y.limbs());
+
     public_inputs
 }
 
@@ -245,6 +336,18 @@ fn scalar_multiply<F: BigPrimeField>(
     (p, sm)
 }
 
+fn ecc_add_points<F: BigPrimeField>(
+    ctx: &mut Context<F>,
+    range: &RangeChip<F>,
+    p1: EcPoint<F, ProperCrtUint<F>>,
+    p2: EcPoint<F, ProperCrtUint<F>>,
+) -> EcPoint<F, ProperCrtUint<F>> {
+    let fp_chip = FpChip::<F>::new(range, LIMB_BITS, NUM_LIMBS);
+    let ecc_chip = EccChip::<F, FpChip<F>>::new(&fp_chip);
+
+    ecc_chip.add_unequal(ctx, &p1, &p2, true)
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -256,38 +359,12 @@ mod test {
         let config = SharePKCircuitConfig::default();
         let (params, pk, vk) = setup(&config);
         let data = SharedSecretProofData::generate();
-        let proof = prove(&params, &pk, data.clone());
-        verify(&params, &vk, data, &proof);
-    }
-
-    fn random_shared_secret_proof_data() -> SharedSecretProofData {
-        let sk = loop {
-            let val = Fq::random(OsRng);
-            if !bool::from(val.is_zero()) {
-                break val;
-            }
-        };
-
-        let b = Fq::random(OsRng);
-        let pk_b = (Secp256k1Affine::generator() * b).to_affine();
-
-        SharedSecretProofData {
-            sk,
-            pk_b,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn test_prove_consistency() {
-        let config = SharePKCircuitConfig::default();
-        let (params, pk, _) = setup(&config);
-        let data = random_shared_secret_proof_data();
 
         let start = Instant::now();
-        let _ = prove(&params, &pk, data.clone());
+        let proof = prove(&params, &pk, data.clone());
         let duration = start.elapsed();
 
         println!("Prove time: {:.2?}", duration);
+        verify(&params, &vk, data, &proof);
     }
 }

@@ -22,10 +22,22 @@ pub fn generate_instances_from_data(data: &SharedSecretProofData) -> Vec<Fr> {
         let bigint = BigUint::from_bytes_le(fq.to_bytes_le().as_slice());
         decompose_biguint::<Fr>(&bigint, NUM_LIMBS, LIMB_BITS)
     };
-    instances.extend(limbs_from_fq(&data.pk_b.x));
-    instances.extend(limbs_from_fq(&data.pk_b.y));
-    instances.extend(limbs_from_fq(&data.pk_c.x));
-    instances.extend(limbs_from_fq(&data.pk_c.y));
+
+    // signature_pk
+    instances.extend(limbs_from_fq(&data.signature_pk.x));
+    instances.extend(limbs_from_fq(&data.signature_pk.y));
+
+    // tweak_pk (pk_b)
+    instances.extend(limbs_from_fq(&data.tweak_pk.x));
+    instances.extend(limbs_from_fq(&data.tweak_pk.y));
+
+    // secret_pub (pk_c)
+    instances.extend(limbs_from_fq(&data.secret_pub.x));
+    instances.extend(limbs_from_fq(&data.secret_pub.y));
+
+    // tweaked_signature_pk
+    instances.extend(limbs_from_fq(&data.tweaked_signature_pk.x));
+    instances.extend(limbs_from_fq(&data.tweaked_signature_pk.y));
 
     instances
 }
