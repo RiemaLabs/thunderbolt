@@ -27,7 +27,6 @@ use halo2_ecc::{
     secp256k1::{FpChip, FqChip},
 };
 use pse_poseidon::Poseidon;
-use std::time::Instant;
 
 use crate::circuit::utils::fq_mod_from_bytes_le;
 use crate::circuit::{gate::ForeignGate, hasher::PoseidonForeignHasher};
@@ -250,6 +249,7 @@ fn scalar_multiply<F: BigPrimeField>(
 mod test {
     use super::*;
     use super::{prove, SharePKCircuitConfig, SharedSecretProofData};
+    use std::time::Instant;
 
     #[test]
     fn test_prove_soundness() {
