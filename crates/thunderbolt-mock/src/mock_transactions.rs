@@ -1,6 +1,7 @@
 use bitcoin::key::Secp256k1;
 use bitcoin::{Address, Network, Transaction, XOnlyPublicKey};
 use bitcoin_utils::types::Utxo;
+use thunderbolt_core::circuit::circuit::{setup, SharePKCircuitConfig};
 use thunderbolt_core::protocol::{SigningContext, TxContext};
 use thunderbolt_core::tweak::Tweaker;
 use thunderbolt_core::utils::schnorr_verify;
@@ -120,6 +121,10 @@ pub fn prepare_transfer_reassign_redeem(
     fixed_amount: u64,
 ) -> (Transaction, Transaction) {
     let secp = Secp256k1::new();
+
+    // [Off-chain NIZK] Setup
+    let config = SharePKCircuitConfig::default();
+    let (params, pk, vk) = setup(&config);
 
     // [Off-chain] Step 1: Pubkey Generation
 
