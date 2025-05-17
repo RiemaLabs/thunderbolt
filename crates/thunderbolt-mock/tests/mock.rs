@@ -1,11 +1,13 @@
 use std::str::FromStr;
 
-use bitcoin::{Amount, Network, Txid};
+use bitcoin::hex::DisplayHex;
+use bitcoin::{consensus, Amount, Network, Txid};
 use bitcoin_clients::client::{BitcoinClient, BitcoinClientEnum};
 use bitcoin_clients::faucet::{init_nubit_client, prepare_utxo};
 use bitcoin_utils::types::Utxo;
 use thunderbolt_mock::mock_committee::{MockCommittee, COMMITTEE};
-use thunderbolt_mock::mock_transactions::{prepare_redeem, prepare_transfer_reassign_redeem};
+use thunderbolt_mock::mock_transactions::prepare_redeem;
+use thunderbolt_mock::mock_transactions::prepare_transfer_reassign_redeem;
 use thunderbolt_mock::mock_users::{MockUser, ALICE, BOB, ZETA};
 
 #[tokio::test]
@@ -45,6 +47,11 @@ async fn test_prepare_redeem() {
     println!("prepare_txid: {}", prepare_txid);
     println!("redeem_txid: {}", redeem_txid);
 
+    println!(
+        "redeem_tx_hex: {}",
+        consensus::serialize(&redeem_tx).to_lower_hex_string()
+    );
+
     _ = client.broadcast_transaction(&prepare_tx).await.unwrap();
     let mut prepare_confirmed = false;
 
@@ -78,7 +85,7 @@ async fn test_prepare_transfer_reassign_redeem() {
     };
 
     let sats_per_vbytes = 1;
-    
+
     let (prepare_tx, redeem_tx) = prepare_transfer_reassign_redeem(
         alice,
         bob,

@@ -1,15 +1,19 @@
+use std::collections::BTreeMap;
+
 use bitcoin::bip32::Xpriv;
 use bitcoin::key::constants::SCHNORR_SIGNATURE_SIZE;
 use bitcoin::key::{Keypair, TweakedPublicKey};
 use bitcoin::psbt::PsbtSighashType;
+use bitcoin::secp256k1::schnorr::Signature;
 use bitcoin::sighash::{Prevouts, SighashCache};
+use bitcoin::taproot::{ControlBlock, LeafVersion, TaprootSpendInfo};
 use bitcoin::{
     absolute,
     secp256k1::{All, Message, Secp256k1},
     transaction, Address, Amount, Network, OutPoint, Psbt, PublicKey, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
     Witness, XOnlyPublicKey,
 };
-use bitcoin::{TapSighash, Txid};
+use bitcoin::{TapLeafHash, Txid};
 use bitcoin_utils::constants::{DUST_SATS, OVERHEAD, SAFETY_INPUT_VBYTES, TAPROOT_OUTPUT_VBYTES};
 
 use bitcoin_utils::errors::ConstructionError;
@@ -18,125 +22,47 @@ use bitcoin_utils::utils::{
     generate_bip32_derivation, generate_p2pkh_script_sig_script, generate_p2sh_script_sig_script,
     generate_p2tr_tweaked_address, generate_redeem_script, generate_tap_key_origins,
 };
-use secp::{MaybePoint, MaybeScalar, Point, Scalar};
 
-use crate::utils::{schnorr_compute_challenge, schnorr_sign, Signature};
-
-pub struct SigningContext {
-    // R_a + R_c
-    p_pubnonce: Point,
-
-    // P
-    p_pubkey: Point,
-    // R_a.x + R_c.x
-    pub x_pubnonce: XOnlyPublicKey,
-}
-
-impl SigningContext {
-    pub fn new(p_pubnonce_user: XOnlyPublicKey, p_pubnonce_comm: XOnlyPublicKey, p_pubkey: Point) -> Self {
-        let p_pubnonce_user = Point::lift_x(&p_pubnonce_user.serialize()).unwrap();
-        let p_pubnonce_comm = Point::lift_x(&p_pubnonce_comm.serialize()).unwrap();
-        let p_pubnonce = p_pubnonce_user + p_pubnonce_comm;
-
-        if p_pubnonce.is_infinity() {
-            panic!("Failed to verify p_pubnonce");
-        }
-
-        let p_pubnonce = p_pubnonce.unwrap();
-
-        let x_pubnonce = XOnlyPublicKey::from_slice(&p_pubnonce.serialize_xonly()).unwrap();
-
-        Self {
-            p_pubnonce,
-            x_pubnonce,
-            p_pubkey,
-        }
-    }
-
-    fn compute_challenge(&self, message: &Message) -> MaybeScalar {
-        schnorr_compute_challenge(&self.p_pubkey, message.as_ref(), &self.x_pubnonce.serialize())
-    }
-
-    pub fn sign(&self, sec: Scalar, nonce: Scalar, message: &Message) -> Signature {
-        let sec = if self.p_pubkey.has_even_y() { sec } else { -sec };
-        let (r, s) = schnorr_sign(sec, nonce, self.compute_challenge(message));
-        if self.p_pubnonce.has_even_y() {
-            (r, s)
-        } else {
-            (r, -s)
-        }
-    }
-
-    pub fn user_combine_redeem(
-        &self,
-        mut signed_redeem: Transaction,
-        signature: Scalar,
-    ) -> Result<Transaction, ConstructionError> {
-        let r = self.x_pubnonce.serialize();
-        let s = signature.serialize();
-        let mut sig = Vec::<u8>::with_capacity(SCHNORR_SIGNATURE_SIZE + 1);
-        sig.extend_from_slice(&r);
-        sig.extend_from_slice(&s);
-        sig.push(bitcoin::TapSighashType::None as u8);
-        let mut witness = Witness::new();
-        witness.push(sig);
-        signed_redeem.input[0].witness = witness;
-        Ok(signed_redeem)
-    }
-}
+use crate::scripts::{gen_prepare_taproot};
 
 pub struct TxContext {
-    // P_a + P_c
-    pub p_pubkey: Point,
-
-    // P_a.x + P_c.x
-    pub x_pubkey: TweakedPublicKey,
-
-    // P_a
-    pub p_pubkey_user: Point,
-    // P_c
-    pub p_pubkey_comm: Point,
-
     multi_sig_address: Address,
     committee_address: Address,
 
     network: Network,
 
+    // The first output is controlled by the user and the committee.
+    // It holds the funds.
     funding_utxo_idx: usize,
+    funding_utxo_taproot_spend_info: TaprootSpendInfo,
+    funding_utxo_script: ScriptBuf,
+    funding_utxo_control_block: ControlBlock,
+
+    // The second output is controlled by the committee.
+    // It is used to lock the outputs to prevent front-run of the SIGHASH_NONE signature.
     dummy_utxo_idx: usize,
 }
 
 impl TxContext {
     pub fn new(x_pubkey_user: XOnlyPublicKey, x_pubkey_comm: XOnlyPublicKey, network: Network) -> Self {
-        let p_pubkey_user = Point::lift_x(&x_pubkey_user.serialize()).unwrap();
-        let p_pubkey_comm = Point::lift_x(&x_pubkey_comm.serialize()).unwrap();
+        let (funding_utxo_taproot_spend_info, funding_utxo_script, funding_utxo_control_block) =
+            gen_prepare_taproot(&x_pubkey_user, &x_pubkey_comm);
 
-        let p_pubkey: MaybePoint = p_pubkey_user + p_pubkey_comm;
+        let funding_utxo_script_pubkey = funding_utxo_taproot_spend_info.output_key();
 
-        if p_pubkey.is_infinity() {
-            panic!("Failed to verify p_pubkey");
-        }
-
-        let p_pubkey = p_pubkey.unwrap();
-
-        let x_pubkey = TweakedPublicKey::dangerous_assume_tweaked(
-            XOnlyPublicKey::from_slice(&p_pubkey.serialize_xonly()).unwrap(),
-        );
-
-        let multi_sig_address = generate_p2tr_tweaked_address(network, x_pubkey);
+        let multi_sig_address = generate_p2tr_tweaked_address(network, funding_utxo_script_pubkey);
 
         let committee_address =
             generate_p2tr_tweaked_address(network, TweakedPublicKey::dangerous_assume_tweaked(x_pubkey_comm));
 
         Self {
-            p_pubkey,
-            p_pubkey_user,
-            p_pubkey_comm,
-            x_pubkey,
             multi_sig_address,
             committee_address,
             network,
             funding_utxo_idx: 0,
+            funding_utxo_taproot_spend_info,
+            funding_utxo_script,
+            funding_utxo_control_block,
             dummy_utxo_idx: 1,
         }
     }
@@ -418,39 +344,59 @@ impl TxContext {
         Ok(psbt)
     }
 
-    pub fn extract_message(&self, redeem_psbt: &Psbt) -> Result<(Message, TapSighash), ConstructionError> {
-        // TODO: Add the verification part.
+    pub fn sign_redeem_funding_utxo(
+        &self,
+        fixed_amount: u64,
+        psbt: &mut Psbt,
+        secp: &Secp256k1<All>,
+        keypair: &Keypair,
+    ) -> Result<Signature, ConstructionError> {
+        // TODO: Add a verification function for the committee to confirm.
 
-        let tx = redeem_psbt.clone().extract_tx().unwrap();
+        let input_utxo = self.first_prepare_output(fixed_amount);
+        let unlock_leaf_hash = TapLeafHash::from_script(&self.funding_utxo_script, LeafVersion::TapScript);
+        let unlock_script = self.funding_utxo_script.clone();
+        let unlock_control_block = self.funding_utxo_control_block.clone();
+
+        psbt.inputs[self.funding_utxo_idx].witness_utxo = Some(input_utxo);
+        psbt.inputs[self.funding_utxo_idx].tap_scripts =
+            BTreeMap::from([(unlock_control_block, (unlock_script, LeafVersion::TapScript))]);
+
+        let tx = psbt.clone().extract_tx().unwrap();
         let mut cache = SighashCache::new(&tx);
 
         let prevouts = &[
-            redeem_psbt.inputs[self.funding_utxo_idx].witness_utxo.as_ref().unwrap(),
-            redeem_psbt.inputs[self.dummy_utxo_idx].witness_utxo.as_ref().unwrap(),
+            psbt.inputs[self.funding_utxo_idx].witness_utxo.as_ref().unwrap(),
+            psbt.inputs[self.dummy_utxo_idx].witness_utxo.as_ref().unwrap(),
         ];
 
         let prevouts = Prevouts::All(prevouts);
         let sighash_type = bitcoin::TapSighashType::None;
 
-        let tap_sighash = cache.taproot_key_spend_signature_hash(self.funding_utxo_idx, &prevouts, sighash_type)?;
+        let tap_sighash = cache.taproot_script_spend_signature_hash(
+            self.funding_utxo_idx,
+            &prevouts,
+            unlock_leaf_hash,
+            sighash_type,
+        )?;
         let msg = Message::from(tap_sighash);
-        Ok((msg, tap_sighash))
+        Ok(secp.sign_schnorr(&msg, keypair))
     }
 
-    pub fn committee_sign_redeem(
+    pub fn sign_redeem_dummy_utxo(
         &self,
-        redeem_psbt: &mut Psbt,
+        psbt: &mut Psbt,
         secp: &Secp256k1<All>,
         keypair: &Keypair,
     ) -> Result<Transaction, ConstructionError> {
         // TODO: Add the verification part. The committee shall verify the outputs provided by the user.
         // The dummy UTXO in the whitepaper shall be signed by the committee.
-        let mut tx = redeem_psbt.clone().extract_tx().unwrap();
+        let mut tx = psbt.clone().extract_tx().unwrap();
         let mut cache = SighashCache::new(&tx);
 
         let prevouts = &[
-            redeem_psbt.inputs[self.funding_utxo_idx].witness_utxo.as_ref().unwrap(),
-            redeem_psbt.inputs[self.dummy_utxo_idx].witness_utxo.as_ref().unwrap(),
+            psbt.inputs[self.funding_utxo_idx].witness_utxo.as_ref().unwrap(),
+            psbt.inputs[self.dummy_utxo_idx].witness_utxo.as_ref().unwrap(),
         ];
 
         let prevouts = Prevouts::All(prevouts);
@@ -465,7 +411,30 @@ impl TxContext {
         Ok(tx)
     }
 
-    pub fn default_outputs(&self, fixed_amount: u64, recipient: Address, sats_per_vbytes: u64) -> Vec<TxOut> {
+    pub fn aggregate_redeem(
+        &self,
+        mut signed_redeem: Transaction,
+        user_signature: Signature,
+        committee_signature: Signature,
+    ) -> Result<Transaction, ConstructionError> {
+        let mut u_sig = Vec::with_capacity(SCHNORR_SIGNATURE_SIZE + 1);
+        u_sig.extend_from_slice(&user_signature.serialize());
+        u_sig.push(bitcoin::TapSighashType::None as u8);
+
+        let mut c_sig = Vec::with_capacity(SCHNORR_SIGNATURE_SIZE + 1);
+        c_sig.extend_from_slice(&committee_signature.serialize());
+        c_sig.push(bitcoin::TapSighashType::None as u8);
+
+        let mut witness = Witness::new();
+        witness.push(c_sig);
+        witness.push(u_sig);
+        witness.push(self.funding_utxo_script.clone());
+        witness.push(self.funding_utxo_control_block.serialize());
+        signed_redeem.input[0].witness = witness;
+        Ok(signed_redeem)
+    }
+
+    pub fn default_redeem_outputs(&self, fixed_amount: u64, recipient: Address, sats_per_vbytes: u64) -> Vec<TxOut> {
         vec![TxOut {
             value: Amount::from_sat(self.estimate_output_amount(1, fixed_amount, sats_per_vbytes)),
             script_pubkey: recipient.script_pubkey(),
