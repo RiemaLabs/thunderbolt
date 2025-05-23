@@ -1,5 +1,5 @@
 use anyhow::Result;
-use bitcoin::{Address, Transaction, Txid};
+use bitcoin::{Address, Block, Transaction, Txid};
 use serde::{Deserialize, Serialize};
 
 use super::client_blockbook::BitcoinClientBlockbook;
@@ -33,6 +33,8 @@ pub trait BitcoinClient {
     async fn broadcast_transaction(&self, tx: &Transaction) -> Result<Txid>;
     async fn get_minimum_fee(&self) -> Result<u64>;
     async fn get_block_height(&self) -> Result<u64>;
+    async fn get_block_hash(&self, height: u64) -> Result<String>;
+    async fn get_block(&self, block_hash: &str) -> Result<Block>;
 }
 
 pub enum BitcoinClientEnum {
@@ -80,6 +82,22 @@ impl BitcoinClient for BitcoinClientEnum {
             BitcoinClientEnum::Electrs(client) => client.get_block_height().await,
             BitcoinClientEnum::Blockbook(client) => client.get_block_height().await,
             BitcoinClientEnum::Mock(client) => client.get_block_height().await,
+        }
+    }
+
+    async fn get_block_hash(&self, height: u64) -> Result<String> {
+        match self {
+            BitcoinClientEnum::Electrs(client) => client.get_block_hash(height).await,
+            BitcoinClientEnum::Blockbook(client) => client.get_block_hash(height).await,
+            BitcoinClientEnum::Mock(client) => client.get_block_hash(height).await,
+        }
+    }
+
+    async fn get_block(&self, block_hash: &str) -> Result<Block> {
+        match self {
+            BitcoinClientEnum::Electrs(client) => client.get_block(block_hash).await,
+            BitcoinClientEnum::Blockbook(client) => client.get_block(block_hash).await,
+            BitcoinClientEnum::Mock(client) => client.get_block(block_hash).await,
         }
     }
 }

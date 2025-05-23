@@ -1,13 +1,15 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use bitcoin::{Address, Transaction, Txid};
+use bitcoin::{Address, Block, Transaction, Txid};
 
 use super::client::{BitcoinClient, TxStatus, UtxoInfo};
 
 pub struct BitcoinClientMock {
     pub addr2utxos: HashMap<Address, Vec<UtxoInfo>>,
     pub txid2status: HashMap<Txid, TxStatus>,
+    pub height2blockhash: HashMap<u64, String>,
+    pub blockhash2block: HashMap<String, Block>,
     pub height: u64,
     pub sats_per_vbytes: u64,
 }
@@ -17,6 +19,8 @@ impl BitcoinClientMock {
         Self {
             addr2utxos: HashMap::new(),
             txid2status: HashMap::new(),
+            height2blockhash: HashMap::new(),
+            blockhash2block: HashMap::new(),
             height: 0,
             sats_per_vbytes: 1,
         }
@@ -33,7 +37,10 @@ impl BitcoinClient for BitcoinClientMock {
         Ok(self
             .txid2status
             .get(txid)
-            .unwrap_or(&TxStatus { confirmed: false, block_height: None })
+            .unwrap_or(&TxStatus {
+                confirmed: false,
+                block_height: None,
+            })
             .clone())
     }
 
@@ -47,5 +54,15 @@ impl BitcoinClient for BitcoinClientMock {
 
     async fn get_block_height(&self) -> Result<u64> {
         Ok(self.height)
+    }
+
+    async fn get_block_hash(&self, height: u64) -> Result<String> {
+        let block_hash = self.height2blockhash.get(&height).unwrap();
+        Ok(block_hash.clone())
+    }
+
+    async fn get_block(&self, block_hash: &str) -> Result<Block> {
+        let block = self.blockhash2block.get(block_hash).unwrap();
+        Ok(block.clone())
     }
 }

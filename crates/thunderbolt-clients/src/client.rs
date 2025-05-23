@@ -6,7 +6,7 @@ use cosmrs::proto::cosmos::tx::v1beta1::TxRaw;
 
 use cosmrs::proto::prost::Message;
 use cosmrs::rpc::client::HttpClient;
-use cosmrs::rpc::Client;
+use cosmrs::rpc::Client as CosmrsClient;
 use cosmrs::tendermint::block::Height;
 use cosmrs::tx::mode_info::Single;
 use cosmrs::tx::{AuthInfo, Body, Fee, MessageExt, ModeInfo, SignerInfo, SignerPublicKey};
@@ -24,12 +24,12 @@ pub struct ThunderboltAccount {
     pub account_number: u64,
 }
 
-pub struct ThunderboltClient {
+pub struct Client {
     pub client: HttpClient,
     pub chain_id: String,
 }
 
-impl ThunderboltClient {
+impl Client {
     pub async fn new(url: &str, chain_id: &str) -> Self {
         let res = HttpClient::new(url);
         if res.is_err() {
@@ -78,13 +78,13 @@ impl ThunderboltClient {
 }
 
 pub struct TxBuilder {
-    pub client: ThunderboltClient,
+    pub client: Client,
     pub account: AccountInfo,
     network: Network,
 }
 
 impl TxBuilder {
-    pub fn new(client: ThunderboltClient, private_key: &str, network: Network) -> Self {
+    pub fn new(client: Client, private_key: &str, network: Network) -> Self {
         let account = AccountInfo::new(network, private_key);
         Self {
             client,

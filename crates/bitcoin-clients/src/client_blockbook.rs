@@ -1,5 +1,6 @@
 use anyhow::Result;
-use bitcoin::{Address, Transaction, Txid};
+use bitcoin::hex::FromHex;
+use bitcoin::{Address, Block, Transaction, Txid};
 use reqwest::Client;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -136,23 +137,21 @@ pub struct BitcoinClientBlockbook {
 
 impl BitcoinClientBlockbook {
     pub async fn new(rpc_url: String) -> Result<Self> {
-        let res = Self { client: Client::new(), rpc_url };
+        let res = Self {
+            client: Client::new(),
+            rpc_url,
+        };
         let _ = res.get_block_height_impl().await?;
         Ok(res)
     }
 
-    async fn call_json_rpc<T: DeserializeOwned>(
-        &self,
-        method: &str,
-        params: &[serde_json::Value],
-    ) -> Result<T> {
+    async fn call_json_rpc<T: DeserializeOwned>(&self, method: &str, params: &[serde_json::Value]) -> Result<T> {
         let json = serde_json::json!({
             "method": method,
             "params": params
         });
 
-        let response: JSONRpcResponse<T> =
-            self.client.post(&self.rpc_url).json(&json).send().await?.json().await?;
+        let response: JSONRpcResponse<T> = self.client.post(&self.rpc_url).json(&json).send().await?.json().await?;
 
         if let Some(error) = response.error {
             return Err(anyhow::anyhow!("Failed to call JSON-RPC: {}", error.message));
@@ -189,8 +188,7 @@ impl BitcoinClientBlockbook {
         let res: Option<String> = self.call_json_rpc("sendrawtransaction", &params).await?;
 
         if let Some(txid) = res {
-            Ok(Txid::from_str(&txid)
-                .map_err(|e| anyhow::anyhow!("Failed to parse transaction ID: {}", e))?)
+            Ok(Txid::from_str(&txid).map_err(|e| anyhow::anyhow!("Failed to parse transaction ID: {}", e))?)
         } else {
             Err(anyhow::anyhow!("Failed to broadcast transaction"))
         }
@@ -205,6 +203,22 @@ impl BitcoinClientBlockbook {
     async fn get_block_height_impl(&self) -> Result<u64> {
         let res: u64 = self.call_json_rpc("getblockcount", &[]).await?;
         Ok(res)
+    }
+
+    async fn get_block_hash_impl(&self, height: u64) -> Result<String> {
+        let params = vec![serde_json::Value::Number(serde_json::Number::from(height))];
+        let res: String = self.call_json_rpc("getblockhash", &params).await?;
+        Ok(res)
+    }
+
+    async fn get_block_impl(&self, block_hash: &str) -> Result<Block> {
+        let params = vec![
+            serde_json::Value::String(block_hash.to_string()),
+            serde_json::Value::Number(serde_json::Number::from(0)),
+        ];
+        let res: String = self.call_json_rpc("getblock", &params).await?;
+        let block = bitcoin::consensus::deserialize(&Vec::from_hex(&res)?)?;
+        Ok(block)
     }
 }
 
@@ -238,5 +252,13 @@ impl BitcoinClient for BitcoinClientBlockbook {
 
     async fn get_block_height(&self) -> Result<u64> {
         self.get_block_height_impl().await
+    }
+
+    async fn get_block_hash(&self, height: u64) -> Result<String> {
+        self.get_block_hash_impl(height).await
+    }
+
+    async fn get_block(&self, block_hash: &str) -> Result<Block> {
+        self.get_block_impl(block_hash).await
     }
 }

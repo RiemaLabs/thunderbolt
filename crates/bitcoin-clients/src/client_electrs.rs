@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use bitcoin::hex::{Case, DisplayHex};
-use bitcoin::{consensus, Address, Transaction, Txid};
+use bitcoin::{consensus, Address, Block, Transaction, Txid};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -155,6 +155,31 @@ impl BitcoinClientElectrs {
         let block_height = response.json::<u64>().await?;
         Ok(block_height)
     }
+
+    async fn get_block_hash_impl(&self, height: u64) -> Result<String> {
+        let url = format!("{}/api/block-height/{height}", self.rpc_url);
+        let response = self.client.get(&url).send().await?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!("Failed to get block hash: {}", response.status()));
+        }
+
+        let block_hash = response.text().await?;
+        Ok(block_hash)
+    }
+
+    async fn get_block_impl(&self, block_hash: &str) -> Result<Block> {
+        let url = format!("{}/api/block/{block_hash}/raw", self.rpc_url);
+        let response = self.client.get(&url).send().await?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!("Failed to get block: {}", response.status()));
+        }
+
+        let raw_data = response.bytes().await?;
+        let block = bitcoin::consensus::deserialize(&raw_data)?;
+        Ok(block)
+    }
 }
 
 #[async_trait::async_trait]
@@ -180,5 +205,13 @@ impl BitcoinClient for BitcoinClientElectrs {
 
     async fn get_block_height(&self) -> Result<u64> {
         self.get_block_height_impl().await
+    }
+
+    async fn get_block_hash(&self, height: u64) -> Result<String> {
+        self.get_block_hash_impl(height).await
+    }
+
+    async fn get_block(&self, block_hash: &str) -> Result<Block> {
+        self.get_block_impl(block_hash).await
     }
 }

@@ -3,13 +3,13 @@ use bitcoin_utils::bitcoin::hex::DisplayHex;
 use bitcoin_utils::bitcoin::Network;
 use cosmrs::proto::cosmos::bank::v1beta1::MsgSend;
 use cosmrs::proto::cosmos::base::v1beta1::Coin;
-use cosmrs::rpc::Client;
+use cosmrs::rpc::Client as CosmrsClient;
 use cosmrs::tx::MessageExt;
 use cosmrs::Any;
-use thunderbolt_clients::{ThunderboltClient, TxBuilder};
+use thunderbolt_clients::{Client, TxBuilder};
 
-async fn setup_client() -> ThunderboltClient {
-    ThunderboltClient::new(
+async fn setup_client() -> Client {
+    Client::new(
         "http://dev-thunderbolt-gateway.nubit.network:26657",
         "thunderbolt-devnet",
     )
@@ -41,7 +41,7 @@ async fn test_query_base_account() {
 
 #[tokio::test]
 async fn test_client() {
-    let client = ThunderboltClient::new(
+    let client = Client::new(
         "http://dev-thunderbolt-gateway.nubit.network:26657",
         "thunderbolt-devnet",
     )
