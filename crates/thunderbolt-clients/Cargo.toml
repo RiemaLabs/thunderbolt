@@ -1,0 +1,19 @@
+[package]
+name = "thunderbolt-clients"
+version = "0.1.0"
+edition = "2021"
+description = "Utility clients for Thunderbolt RPC access"
+
+[dependencies]
+anyhow = "1.0.97"
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.140"
+cosmrs = { version = "0.22.0", features = ["cosmwasm", "rpc"] }
+bip322 = "0.0.9"
+k256 = { version = "0.13.4" }
+base64 = { version = "0.22.1" }
+
+bitcoin-utils = { path = "../bitcoin-utils" }
+
+[dev-dependencies]
+tokio = { version = "1.42.0", features = ["macros"] }
