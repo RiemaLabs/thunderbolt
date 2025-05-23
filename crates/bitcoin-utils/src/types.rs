@@ -66,7 +66,7 @@ impl BlockHashExt for BlockHash {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct BtcTxIdentifier {
+pub struct TxIdentifier {
     pub tx_hash: Txid,
     pub tx_index: u64,
     pub block_hash: BlockHash,
