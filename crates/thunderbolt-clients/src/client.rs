@@ -75,6 +75,11 @@ impl Client {
             account_number: base_account.account_number,
         })
     }
+
+    pub async fn health(&self) -> Result<(), ErrorReport> {
+        self.client.health().await?;
+        Ok(())
+    }
 }
 
 pub struct TxBuilder {
