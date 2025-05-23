@@ -1,4 +1,7 @@
+use std::str::FromStr;
+
 use bitcoin::key::{Parity, TapTweak};
+use bitcoin::secp256k1::SecretKey;
 use bitcoin::{
     bip32::Xpriv,
     hex::FromHex,
@@ -13,7 +16,7 @@ use crate::utils::{generate_p2sh_address, generate_p2tr_address, generate_p2wpkh
 #[derive(Clone)]
 pub struct AccountInfo {
     pub secp: Secp256k1<All>,
-    pub xpriv: Xpriv,
+    pub xpriv: Option<Xpriv>,
 
     keypair: Keypair,
     tweaked_keypair: Keypair,
@@ -39,14 +42,32 @@ impl AccountInfo {
         generate_p2wsh_address(network, &self.public_key)
     }
 
-    pub fn new(network: Network, secret: &str) -> Self {
+    pub fn new(network: Network, seed: &str) -> Self {
         let secp = Secp256k1::new();
-        let xpriv = Xpriv::new_master(network, &Vec::from_hex(secret).unwrap()).unwrap();
+        let xpriv = Xpriv::new_master(network, &Vec::from_hex(seed).unwrap()).unwrap();
         let keypair = xpriv.to_keypair(&secp);
         let tweaked_keypair = keypair.tap_tweak(&secp, None).to_inner();
         let private_key = PrivateKey::new(keypair.secret_key(), network);
         let public_key = PublicKey::from_private_key(&secp, &private_key);
         let (x_pubkey, _) = XOnlyPublicKey::from_keypair(&keypair);
+        AccountInfo {
+            secp,
+            xpriv: Some(xpriv),
+            keypair,
+            tweaked_keypair,
+            public_key,
+            x_pubkey,
+        }
+    }
+
+    pub fn new_from_secret_key(secret_key: &str) -> Self {
+        let secp = Secp256k1::new();
+        let secret_key = SecretKey::from_str(secret_key).unwrap();
+        let keypair = Keypair::from_secret_key(&secp, &secret_key);
+        let tweaked_keypair = keypair.tap_tweak(&secp, None).to_inner();
+        let public_key = keypair.public_key().into();
+        let (x_pubkey, _) = XOnlyPublicKey::from_keypair(&keypair);
+        let xpriv = None;
         AccountInfo {
             secp,
             xpriv,

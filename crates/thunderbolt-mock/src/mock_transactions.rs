@@ -1,12 +1,10 @@
-use bitcoin::secp256k1::schnorr::Signature;
-use secp::{Point, Scalar};
 use bitcoin::key::Secp256k1;
-use bitcoin::transaction::predict_weight_from_slices;
-use bitcoin::{Address, Network, Transaction, XOnlyPublicKey};
+use bitcoin::secp256k1::schnorr::Signature;
+use bitcoin::{Address, Network, Transaction};
 use bitcoin_utils::types::Utxo;
+use secp::{Point, Scalar};
 use thunderbolt_core::protocol::TxContext;
 use thunderbolt_core::tweak::Tweaker;
-use thunderbolt_core::utils::schnorr_verify;
 
 use crate::mock_committee::MockCommittee;
 use crate::mock_users::MockUser;
@@ -48,7 +46,7 @@ pub fn prepare_redeem(
             &prev_address,
             &mut prepare_tx,
             &secp,
-            &user.account.xpriv,
+            &user.account.xpriv.unwrap(),
         )
         .unwrap();
 
@@ -74,11 +72,6 @@ pub fn prepare_redeem(
             &user.account.get_tweaked_keypair(),
         )
         .unwrap();
-    
-
-
-
-  
 
     let outputs = tx_ctx.default_redeem_outputs(fixed_amount, receipient_address, sats_per_vbytes);
 
@@ -98,8 +91,6 @@ pub fn prepare_redeem(
 
     (signed_prepare_tx, final_redeem_tx)
 }
-
-
 
 pub fn prepare_transfer_reassign_redeem(
     mut user_a: MockUser,
@@ -123,9 +114,6 @@ pub fn prepare_transfer_reassign_redeem(
         Network::Testnet,
     );
 
-
-
-
     // [On-chain] Step 3: Prepare Transaction
 
     let mut prepare_tx = tx_ctx
@@ -144,7 +132,7 @@ pub fn prepare_transfer_reassign_redeem(
             &prev_address,
             &mut prepare_tx,
             &secp,
-            &user_a.account.xpriv,
+            &user_a.account.xpriv.unwrap(),
         )
         .unwrap();
 
@@ -153,10 +141,6 @@ pub fn prepare_transfer_reassign_redeem(
         .unwrap();
 
     // generate c_signature and user_signature
-
-   
-
-
 
     let c_signature = tx_ctx
         .sign_redeem_funding_utxo(
@@ -169,13 +153,6 @@ pub fn prepare_transfer_reassign_redeem(
     let c_sig_aux = c_signature[32..64].to_vec();
     let c_sig_aux_scalar = Scalar::from_slice(&c_sig_aux).unwrap();
 
-
-    
-
-
-    
-
-
     let user_signature = tx_ctx
         .sign_redeem_funding_utxo(
             fixed_amount,
@@ -186,11 +163,6 @@ pub fn prepare_transfer_reassign_redeem(
         .unwrap();
     let u_sig_aux = user_signature[32..64].to_vec();
     let u_sig_aux_scalar = Scalar::from_slice(&u_sig_aux).unwrap();
-
-
-       
-
- 
 
     // [On-chain] Step 3.1: Tweak Signature
 
@@ -228,10 +200,7 @@ pub fn prepare_transfer_reassign_redeem(
     let tweaking_comm_c = tweaker_comm_c.compute_shared_secret();
     let tweaking_c_comm = tweaker_c_comm.compute_shared_secret();
 
-   
-
     // Tweak this signature by `total_tweak`, using `tx_ctx` to recompute the challenge.
-    
 
     let tweaked_user_signature = u_sig_aux_scalar + tweaking_ab - tweaking_ba + tweaking_bc - tweaking_cb;
     let tweaked_c_signature = c_sig_aux_scalar + tweaking_comm_c - tweaking_c_comm;
@@ -242,7 +211,7 @@ pub fn prepare_transfer_reassign_redeem(
     tweaked_user_sig_bytes[32..64].copy_from_slice(&tweaked_user_signature.serialize());
 
     let mut tweaked_c_sig_bytes = [0u8; 64];
-    tweaked_c_sig_bytes[0..32].copy_from_slice(&c_signature[0..32].to_vec());  
+    tweaked_c_sig_bytes[0..32].copy_from_slice(&c_signature[0..32].to_vec());
     tweaked_c_sig_bytes[32..64].copy_from_slice(&tweaked_c_signature.serialize());
 
     let final_tweaked_user_signature = Signature::from_slice(&tweaked_user_sig_bytes).unwrap();
@@ -265,7 +234,7 @@ pub fn prepare_transfer_reassign_redeem(
     let final_redeem_tx = tx_ctx
         .aggregate_redeem(
             c_signed_redeem_tx,
-           final_tweaked_user_signature,
+            final_tweaked_user_signature,
             final_tweaked_c_signature,
         )
         .unwrap();

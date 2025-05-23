@@ -1,5 +1,6 @@
 use anyhow::Result;
 use bitcoin_utils::account::AccountInfo;
+use bitcoin_utils::bitcoin::hex::DisplayHex;
 use bitcoin_utils::bitcoin::{Network, PrivateKey};
 use cosmrs::proto::cosmos::auth::v1beta1::{BaseAccount, QueryAccountRequest, QueryAccountResponse};
 use cosmrs::proto::cosmos::tx::v1beta1::TxRaw;
@@ -89,8 +90,7 @@ pub struct TxBuilder {
 }
 
 impl TxBuilder {
-    pub fn new(client: Client, private_key: &str, network: Network) -> Self {
-        let account = AccountInfo::new(network, private_key);
+    pub fn new(client: Client, account: AccountInfo, network: Network) -> Self {
         Self {
             client,
             account,
@@ -147,6 +147,8 @@ impl TxBuilder {
         };
 
         let sign_doc_bytes = sign_doc.into_bytes()?;
+
+        println!("Sign doc bytes: {:?}", sign_doc_bytes.to_lower_hex_string());
 
         let private_key = PrivateKey::new(self.account.get_keypair().secret_key(), self.network);
 
