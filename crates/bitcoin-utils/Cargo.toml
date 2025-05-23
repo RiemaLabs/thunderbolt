@@ -11,4 +11,4 @@ secp = { version = "0.5.0", features = ["rand", "secp256k1"] }
 thiserror = "2.0.12"
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.140"
-rand = { version = "0.9.1" }
+rand = { version = "0.9" }
