@@ -1,6 +1,6 @@
 use bitcoin::{hashes::Hash, Amount, BlockHash, Txid};
 use rand::Rng;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Utxo {
@@ -63,4 +63,13 @@ impl BlockHashExt for BlockHash {
         let result = BlockHash::from_slice(&random_bytes).unwrap();
         result
     }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct BtcTxIdentifier {
+    pub tx_hash: Txid,
+    pub tx_index: u64,
+    pub block_hash: BlockHash,
+    pub block_number: u64,
+    pub block_timestamp: u64,
 }
