@@ -4,10 +4,10 @@ use bitcoin_utils::bitcoin::hex::DisplayHex;
 use bitcoin_utils::bitcoin::{Network, PrivateKey};
 use cosmrs::proto::cosmos::auth::v1beta1::{BaseAccount, QueryAccountRequest, QueryAccountResponse};
 use cosmrs::proto::cosmos::tx::v1beta1::TxRaw;
-
+use cosmrs::proto::cosmwasm::wasm::v1::{QuerySmartContractStateRequest, QuerySmartContractStateResponse};
 use cosmrs::proto::prost::Message;
 use cosmrs::rpc::client::HttpClient;
-use cosmrs::rpc::Client as CosmrsClient;
+use cosmrs::rpc::{Client as CosmrsClient};
 use cosmrs::tendermint::block::Height;
 use cosmrs::tx::mode_info::Single;
 use cosmrs::tx::{AuthInfo, Body, Fee, MessageExt, ModeInfo, SignerInfo, SignerPublicKey};
@@ -20,7 +20,7 @@ use crate::pubkey::ThunderboltPublicKey;
 #[derive(Debug, Clone)]
 pub struct ThunderboltAccount {
     pub address: String,
-    pub pubkey: ThunderboltPublicKey,
+    pub pubkey: Option<ThunderboltPublicKey>,
     pub sequence: u64,
     pub account_number: u64,
 }
@@ -68,10 +68,15 @@ impl Client {
         let account: QueryAccountResponse = QueryAccountResponse::decode(&res.value[..])?;
         let account_any = account.account.ok_or_else(|| ErrorReport::msg("Account not found"))?;
         let base_account: BaseAccount = BaseAccount::decode(&account_any.value[..])?;
-        let thunderbolt_pubkey = ThunderboltPublicKey::try_from(base_account.pub_key.unwrap())?;
+        let thunderbolt_pubkey = ThunderboltPublicKey::try_from(base_account.pub_key.unwrap());
+        let pubkey = if let Err(e) = thunderbolt_pubkey {
+            None
+        } else {
+            Some(thunderbolt_pubkey.unwrap())
+        };
         Ok(ThunderboltAccount {
             address: address.to_string(),
-            pubkey: thunderbolt_pubkey,
+            pubkey,
             sequence: base_account.sequence,
             account_number: base_account.account_number,
         })
@@ -80,6 +85,28 @@ impl Client {
     pub async fn health(&self) -> Result<(), ErrorReport> {
         self.client.health().await?;
         Ok(())
+    }
+
+    pub async fn query_cw20_balance(&self, address: &str, contract_address: &str) -> Result<u128, ErrorReport> {
+        let path = "/cosmwasm.wasm.v1.Query/SmartContractState";
+        let query_data = format!(r#"{{"balance":{{"address":"{}"}}}}"#, address);
+        let data = {
+            let req = QuerySmartContractStateRequest {
+                address: contract_address.into(),
+                query_data: query_data.as_bytes().to_vec(),
+            };
+            req.to_bytes()
+        }?;
+
+        let res = self.client.abci_query(Some(path.to_string()), data, None, false).await?;
+        let query_resp = QuerySmartContractStateResponse::decode(&res.value[..])?;
+        let response_json: serde_json::Value = serde_json::from_slice(&query_resp.data)?;
+        let balance = response_json["balance"]
+            .as_str()
+            .ok_or_else(|| ErrorReport::msg("Balance not found in response"))?
+            .parse::<u128>()
+            .map_err(|e| ErrorReport::msg(format!("Failed to parse balance: {}", e)))?;
+        Ok(balance)
     }
 }
 

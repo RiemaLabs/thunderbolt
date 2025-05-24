@@ -26,19 +26,29 @@ async fn test_query_base_account() {
 
     let deployer_address = account.p2tr_address(Network::Bitcoin).to_string();
 
-    let deployer_address = "bc1pfnqmznwuj8qal0heh7r9ng6hxmjc683nypl87rs48ltwxu8k4zpsp7n9ly".to_string();
-
     let thunderbolt_account = client.query_base_account(&deployer_address).await.unwrap();
 
     println!("Base account: {:?}", thunderbolt_account);
-    println!(
-        "Base account pubkey: {}",
-        thunderbolt_account
-            .pubkey
-            .to_x_only_pubkey()
-            .serialize()
-            .to_lower_hex_string()
-    );
+}
+
+#[tokio::test]
+async fn test_query_cw20_balance() {
+    let client = setup_client().await;
+
+    let contract_deployer_seed = "25f5ff288b007263c1ff7e05945a9000c6fb66d1a5e4eaa097e077d5238f7755";
+
+    let account = AccountInfo::new(Network::Bitcoin, contract_deployer_seed);
+
+    let deployer_address = account.p2tr_address(Network::Bitcoin).to_string();
+
+    let bridge_address = "bc1p3k7rccf7l7gkwmf0kr3yf9727l2duwnfqhh7fxpu43plk22hsxysy2x0w4".to_string();
+
+    let balance = client
+        .query_cw20_balance(&deployer_address, &bridge_address)
+        .await
+        .unwrap();
+
+    println!("Balance: {:?}", balance);
 }
 
 #[tokio::test]
