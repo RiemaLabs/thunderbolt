@@ -2,8 +2,8 @@ use std::str::FromStr;
 
 use bitcoin::hex::DisplayHex;
 use bitcoin::{consensus, Amount, Network, Txid};
-use bitcoin_clients::client::{BitcoinClient, BitcoinClientEnum};
 use bitcoin_clients::faucet::{init_nubit_client, prepare_utxo};
+use bitcoin_clients::{BitcoinClient, BitcoinClientEnum};
 use bitcoin_utils::types::Utxo;
 use thunderbolt_mock::mock_committee::{MockCommittee, COMMITTEE};
 use thunderbolt_mock::mock_transactions::prepare_redeem;

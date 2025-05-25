@@ -1,18 +1,18 @@
-use std::str::FromStr;
-use std::path::PathBuf;
 use std::env;
+use std::path::PathBuf;
+use std::str::FromStr;
 
 use bitcoin::hex::FromHex;
 use bitcoin::{Address, Network, Txid};
-use bitcoin_clients::client::BitcoinClient;
-use bitcoin_clients::client_blockbook::BitcoinClientBlockbook;
+use bitcoin_clients::BitcoinClient;
+use bitcoin_clients::BitcoinClientBlockbook;
 
 async fn init_client() -> BitcoinClientBlockbook {
     // Get the directory where the test file is located
     let test_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
     let env_path = test_dir.join(".env");
     dotenv::from_path(env_path).unwrap();
-    
+
     let rpc = dotenv::var("BLOCKBOOK_RPC").unwrap();
     let client = BitcoinClientBlockbook::new(rpc.to_string()).await.unwrap();
     client
