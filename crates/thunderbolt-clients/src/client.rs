@@ -7,7 +7,7 @@ use cosmrs::proto::cosmos::tx::v1beta1::TxRaw;
 use cosmrs::proto::cosmwasm::wasm::v1::{QuerySmartContractStateRequest, QuerySmartContractStateResponse};
 use cosmrs::proto::prost::Message;
 use cosmrs::rpc::client::HttpClient;
-use cosmrs::rpc::{Client as CosmrsClient};
+use cosmrs::rpc::Client as CosmrsClient;
 use cosmrs::tendermint::block::Height;
 use cosmrs::tx::mode_info::Single;
 use cosmrs::tx::{AuthInfo, Body, Fee, MessageExt, ModeInfo, SignerInfo, SignerPublicKey};
@@ -98,7 +98,10 @@ impl Client {
             req.to_bytes()
         }?;
 
-        let res = self.client.abci_query(Some(path.to_string()), data, None, false).await?;
+        let res = self
+            .client
+            .abci_query(Some(path.to_string()), data, None, false)
+            .await?;
         let query_resp = QuerySmartContractStateResponse::decode(&res.value[..])?;
         let response_json: serde_json::Value = serde_json::from_slice(&query_resp.data)?;
         let balance = response_json["balance"]
@@ -175,11 +178,12 @@ impl TxBuilder {
 
         let sign_doc_bytes = sign_doc.into_bytes()?;
 
-        println!("Sign doc bytes: {:?}", sign_doc_bytes.to_lower_hex_string());
+        let msg_hex = sign_doc_bytes.to_lower_hex_string();
+        let msg_utf8 = msg_hex.as_bytes();
 
         let private_key = PrivateKey::new(self.account.get_keypair().secret_key(), self.network);
 
-        let signature = bip322_sign(&self.account.p2tr_address(self.network), &sign_doc_bytes, private_key);
+        let signature = bip322_sign(&self.account.p2tr_address(self.network), &msg_utf8, private_key);
         let _ = private_key;
 
         if let Err(e) = signature {

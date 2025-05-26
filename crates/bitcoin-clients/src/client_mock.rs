@@ -5,6 +5,7 @@ use bitcoin::{Address, Block, Transaction, Txid};
 
 use super::client::{BitcoinClient, TxStatus, UtxoInfo};
 
+#[derive(Debug, Clone)]
 pub struct BitcoinClientMock {
     pub addr2utxos: HashMap<Address, Vec<UtxoInfo>>,
     pub txid2status: HashMap<Txid, TxStatus>,

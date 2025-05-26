@@ -37,6 +37,7 @@ pub trait BitcoinClient {
     async fn get_block(&self, block_hash: &str) -> Result<Block>;
 }
 
+#[derive(Debug, Clone)]
 pub enum BitcoinClientEnum {
     Electrs(BitcoinClientElectrs),
     Blockbook(BitcoinClientBlockbook),

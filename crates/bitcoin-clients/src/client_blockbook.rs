@@ -130,6 +130,7 @@ pub struct Vout {
     pub is_address: bool,
 }
 
+#[derive(Debug, Clone)]
 pub struct BitcoinClientBlockbook {
     client: Client,
     rpc_url: String,
