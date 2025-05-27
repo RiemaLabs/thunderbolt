@@ -137,7 +137,7 @@ impl Client {
     }
 
     pub async fn query_tx_by_hash(&self, hash: &str) -> Result<endpoint::tx::Response, ErrorReport> {
-        let hash = Hash::from_str(hash)?;
+        let hash = Hash::from_str(&hash.to_uppercase())?;
         let res: endpoint::tx::Response = self.client.tx(hash, false).await?;
         Ok(res)
     }
@@ -229,5 +229,19 @@ impl TxBuilder {
         };
 
         Ok(signed_tx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hash() {
+        let hash_str = "5198b7d113b5f9c299c3ef0aef33fda04c87ccc84406f0f375f4097982b1bfd9".to_uppercase();
+        let hash = Hash::from_str(&hash_str);
+        assert!(hash.is_ok());
+        let hash = hash.unwrap();
+        println!("hash: {}", hash);
     }
 }

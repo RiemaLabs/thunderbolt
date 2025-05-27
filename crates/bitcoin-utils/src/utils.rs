@@ -56,7 +56,7 @@ pub fn extract_xonly_pubkey_from_p2tr_address(address: &Address) -> Result<XOnly
     let script_pubkey_bytes = script_pubkey.to_bytes();
     let xonly_pubkey_bytes = script_pubkey_bytes[2..].to_vec();
     let xonly_pubkey = XOnlyPublicKey::from_slice(&xonly_pubkey_bytes)
-        .map_err(|_| AddressError::Unstandard("The address is not a valid taproot address".to_string()))?;
+        .map_err(|e| AddressError::Unstandard(format!("The address is not a valid taproot address: {:?}", e)))?;
     Ok(xonly_pubkey)
 }
 
