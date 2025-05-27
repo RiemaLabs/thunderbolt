@@ -13,7 +13,7 @@ use secp::{Point, Scalar};
 
 use crate::utils::{generate_p2sh_address, generate_p2tr_address, generate_p2wpkh_address, generate_p2wsh_address};
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct AccountInfo {
     pub secp: Secp256k1<All>,
     pub xpriv: Option<Xpriv>,

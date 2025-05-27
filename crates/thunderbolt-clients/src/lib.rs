@@ -3,3 +3,4 @@ mod client;
 mod pubkey;
 
 pub use client::*;
+pub use cosmrs as cosmrs;

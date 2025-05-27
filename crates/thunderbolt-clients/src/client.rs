@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use anyhow::Result;
 use bitcoin_utils::account::AccountInfo;
 use bitcoin_utils::bitcoin::hex::DisplayHex;
@@ -7,8 +9,9 @@ use cosmrs::proto::cosmos::tx::v1beta1::TxRaw;
 use cosmrs::proto::cosmwasm::wasm::v1::{QuerySmartContractStateRequest, QuerySmartContractStateResponse};
 use cosmrs::proto::prost::Message;
 use cosmrs::rpc::client::HttpClient;
-use cosmrs::rpc::Client as CosmrsClient;
+use cosmrs::rpc::{endpoint, Client as CosmrsClient};
 use cosmrs::tendermint::block::Height;
+use cosmrs::tendermint::Hash;
 use cosmrs::tx::mode_info::Single;
 use cosmrs::tx::{AuthInfo, Body, Fee, MessageExt, ModeInfo, SignerInfo, SignerPublicKey};
 use cosmrs::{tx::SignDoc, Tx};
@@ -25,6 +28,7 @@ pub struct ThunderboltAccount {
     pub account_number: u64,
 }
 
+#[derive(Debug, Clone)]
 pub struct Client {
     pub client: HttpClient,
     pub chain_id: String,
@@ -87,9 +91,23 @@ impl Client {
         Ok(())
     }
 
-    pub async fn query_cw20_balance(&self, address: &str, contract_address: &str) -> Result<u128, ErrorReport> {
-        let path = "/cosmwasm.wasm.v1.Query/SmartContractState";
+    pub async fn query_cw20_balance(&self, contract_address: &str, address: &str) -> Result<u128, ErrorReport> {
         let query_data = format!(r#"{{"balance":{{"address":"{}"}}}}"#, address);
+        let response_json = self.query_wasmd_contract_state(contract_address, &query_data).await?;
+        let balance = response_json["balance"]
+            .as_str()
+            .ok_or_else(|| ErrorReport::msg("Balance not found in response"))?
+            .parse::<u128>()
+            .map_err(|e| ErrorReport::msg(format!("Failed to parse balance: {}", e)))?;
+        Ok(balance)
+    }
+
+    pub async fn query_wasmd_contract_state(
+        &self,
+        contract_address: &str,
+        query_data: &str,
+    ) -> Result<serde_json::Value, ErrorReport> {
+        let path = "/cosmwasm.wasm.v1.Query/SmartContractState";
         let data = {
             let req = QuerySmartContractStateRequest {
                 address: contract_address.into(),
@@ -104,15 +122,28 @@ impl Client {
             .await?;
         let query_resp = QuerySmartContractStateResponse::decode(&res.value[..])?;
         let response_json: serde_json::Value = serde_json::from_slice(&query_resp.data)?;
-        let balance = response_json["balance"]
-            .as_str()
-            .ok_or_else(|| ErrorReport::msg("Balance not found in response"))?
-            .parse::<u128>()
-            .map_err(|e| ErrorReport::msg(format!("Failed to parse balance: {}", e)))?;
-        Ok(balance)
+        Ok(response_json)
+    }
+
+    pub async fn query_latest_block_height(&self) -> Result<u64, ErrorReport> {
+        let res = self.client.status().await?;
+        let height = res.sync_info.latest_block_height;
+        Ok(height.value())
+    }
+
+    pub async fn broadcast_tx(&self, tx: Vec<u8>) -> Result<String, ErrorReport> {
+        let res = self.client.broadcast_tx_sync(tx).await?;
+        Ok(res.hash.to_string())
+    }
+
+    pub async fn query_tx_by_hash(&self, hash: &str) -> Result<endpoint::tx::Response, ErrorReport> {
+        let hash = Hash::from_str(hash)?;
+        let res: endpoint::tx::Response = self.client.tx(hash, false).await?;
+        Ok(res)
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct TxBuilder {
     pub client: Client,
     pub account: AccountInfo,

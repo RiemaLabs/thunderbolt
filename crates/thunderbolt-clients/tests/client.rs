@@ -44,7 +44,7 @@ async fn test_query_cw20_balance() {
     let bridge_address = "bc1p3k7rccf7l7gkwmf0kr3yf9727l2duwnfqhh7fxpu43plk22hsxysy2x0w4".to_string();
 
     let balance = client
-        .query_cw20_balance(&deployer_address, &bridge_address)
+        .query_cw20_balance(&bridge_address, &deployer_address)
         .await
         .unwrap();
 
