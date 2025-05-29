@@ -23,7 +23,6 @@ use crate::pubkey::ThunderboltPublicKey;
 #[derive(Debug, Clone)]
 pub struct ThunderboltAccount {
     pub address: String,
-    pub pubkey: Option<ThunderboltPublicKey>,
     pub sequence: u64,
     pub account_number: u64,
 }
@@ -72,15 +71,8 @@ impl Client {
         let account: QueryAccountResponse = QueryAccountResponse::decode(&res.value[..])?;
         let account_any = account.account.ok_or_else(|| ErrorReport::msg("Account not found"))?;
         let base_account: BaseAccount = BaseAccount::decode(&account_any.value[..])?;
-        let thunderbolt_pubkey = ThunderboltPublicKey::try_from(base_account.pub_key.unwrap());
-        let pubkey = if let Err(e) = thunderbolt_pubkey {
-            None
-        } else {
-            Some(thunderbolt_pubkey.unwrap())
-        };
         Ok(ThunderboltAccount {
             address: address.to_string(),
-            pubkey,
             sequence: base_account.sequence,
             account_number: base_account.account_number,
         })
