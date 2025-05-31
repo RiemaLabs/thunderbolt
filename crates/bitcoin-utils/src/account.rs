@@ -155,4 +155,15 @@ mod tests {
             assert_eq!(tweaked_secret.base_point_mul(), tweaked_public);
         }
     }
+
+    #[test]
+    fn test_fixed_seed_taproot_address() {
+        let seed_hex = "YOUR PRIVATE SEED";
+        let network = Network::Bitcoin;
+
+        let account = AccountInfo::new(network, seed_hex);
+        let p2tr_address = account.p2tr_address(network);
+
+        println!("Taproot address for seed {}: {}", seed_hex, p2tr_address);
+    }
 }
