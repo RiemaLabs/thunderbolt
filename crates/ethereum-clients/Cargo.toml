@@ -1,0 +1,10 @@
+[package]
+name = "ethereum-clients"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[dependencies]
+alloy = { version = "0.12.5", features = ["full"] }
+anyhow = "1.0.97"
+getset = "0.1"
