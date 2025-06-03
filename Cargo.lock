@@ -1867,6 +1867,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ethereum-utils"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "eyre"
 version = "0.6.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
