@@ -10,7 +10,7 @@ use super::client::EthereumClient;
 
 sol!(
     #[allow(missing_docs)]
-    event WithdrawRequest(address indexed sender, string btcAddress, uint256 amount);
+    event WithdrawRequest(address indexed sender, uint64 tokenId, string recipient, uint256 amount);
 );
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -19,15 +19,17 @@ pub struct ParsedWithdrawRequestEvent {
     pub btc_address: String,
     pub amount: U256,
     pub tx_idt: EthTxIdentifier,
+    pub token_id: u64,
 }
 
 impl ParsedWithdrawRequestEvent {
-    pub fn new(sender: EthAddress, btc_address: String, amount: U256, tx_idt: EthTxIdentifier) -> Self {
+    pub fn new(sender: EthAddress, btc_address: String, amount: U256, token_id: u64, tx_idt: EthTxIdentifier) -> Self {
         Self {
             sender,
             btc_address,
             amount,
             tx_idt,
+            token_id,
         }
     }
 }
@@ -56,8 +58,9 @@ pub async fn extract_withdraw_events(
         let event = event.unwrap();
         let parsed_event = ParsedWithdrawRequestEvent::new(
             event.data().sender,
-            event.data().btcAddress.clone(),
+            event.data().recipient.clone(),
             event.data().amount,
+            event.data().tokenId,
             EthTxIdentifier::new(
                 log.transaction_hash.unwrap(),
                 log.transaction_index.unwrap(),
