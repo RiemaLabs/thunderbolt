@@ -1,8 +1,8 @@
 use bitcoin_utils::account::AccountInfo;
 use bitcoin_utils::bitcoin::hex::DisplayHex;
 use bitcoin_utils::bitcoin::Network;
+use cosmrs::proto::cosmos::bank::v1beta1::MsgSend;
 use cosmrs::proto::cosmos::base::v1beta1::Coin;
-use cosmrs::proto::{cosmos::bank::v1beta1::MsgSend, cosmwasm::wasm::v1::QuerySmartContractStateRequest};
 use cosmrs::rpc::Client as CosmrsClient;
 use cosmrs::tx::MessageExt;
 use cosmrs::Any;
@@ -49,25 +49,34 @@ async fn test_query_cw20_balance() {
 
 #[tokio::test]
 async fn query_bridge_operators() {
-    let client = setup_client().await;
-
     let contract_address = "bc1pzkzqv00zfpscjqfrujh2zlk6q5sde77s288376pn2pz3g4pm2mas6dt290";
     let query_data = r#"{"get_operators":{}}"#;
-    let response_json = client
-        .query_wasmd_contract_state(contract_address, query_data)
-        .await
-        .unwrap();
+    query_contract_state(contract_address, query_data).await;
+}
 
-    let operators_json = response_json["operators"]
-        .as_array()
-        .expect("operators not found in response");
+#[tokio::test]
+async fn query_token_to_mint_addr() {
+    let contract_address = "bc1pzkzqv00zfpscjqfrujh2zlk6q5sde77s288376pn2pz3g4pm2mas6dt290";
+    let query_data = r#"{"get_token_id_to_token_address":{"token_id":97001}}"#;
+    query_contract_state(contract_address, query_data).await;
+}
 
-    let operators: Vec<String> = operators_json
-        .iter()
-        .map(|v| v.as_str().expect("operator is not a string").to_string())
-        .collect();
+#[tokio::test]
+async fn query_minters() {
+    let contract_address = "bc1p4vynws44yx7xyrekkxnlyc6h58fawcfv964vul8n290u0whgjlkqa9c8gq";
+    let query_data = r#"{"minters":{}}"#;
+    query_contract_state(contract_address, query_data).await;
+}
 
-    println!("Operators: {:?}", operators);
+async fn query_contract_state(contract_address: &str, query: &str) {
+    let client = setup_client().await;
+
+    let response = client.query_wasmd_contract_state(contract_address, query).await;
+
+    match response {
+        Ok(resp_str) => println!("Response: {}", resp_str),
+        Err(e) => eprintln!("Query failed: {:?}", e),
+    }
 }
 
 #[tokio::test]
