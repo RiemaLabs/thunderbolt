@@ -12,7 +12,8 @@ cosmrs = { version = "0.22.0", features = ["cosmwasm", "rpc"] }
 bip322 = "0.0.9"
 k256 = { version = "0.13.4" }
 base64 = { version = "0.22.1" }
-
+tendermint = "0.40"
+primitive-types = { version = "0.13.1", features = ["serde"] }
 bitcoin-utils = { path = "../bitcoin-utils" }
 
 [dev-dependencies]

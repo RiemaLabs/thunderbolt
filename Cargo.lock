@@ -4856,8 +4856,10 @@ dependencies = [
  "bitcoin-utils",
  "cosmrs",
  "k256",
+ "primitive-types 0.13.1",
  "serde",
  "serde_json",
+ "tendermint",
  "tokio",
 ]
 
