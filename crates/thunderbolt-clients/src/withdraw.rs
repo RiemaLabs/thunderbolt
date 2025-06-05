@@ -1,11 +1,13 @@
 use base64::engine::general_purpose;
 use base64::Engine;
-use cosmrs::rpc::Error;
-use cosmrs::rpc::{query::Query, Client, HttpClient, Order};
+use cosmrs::rpc::{query::Query, Order};
+use cosmrs::rpc::{Client, Error};
 use primitive_types::U256;
 use serde::{Deserialize, Serialize};
 use tendermint::abci::EventAttribute;
 use tendermint::hash::Hash;
+
+use crate::Client as ThunderboltClient;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ThubTxIdentifier {
@@ -25,7 +27,7 @@ pub struct ParsedWithdrawRequestEvent {
 }
 
 pub async fn extract_withdraw_events(
-    cosm_client: &HttpClient,
+    thub_client: &ThunderboltClient,
     start_height: u64,
     end_height: u64,
     bridge_address: String,
@@ -38,7 +40,10 @@ pub async fn extract_withdraw_events(
             .and_eq("wasm.method", "withdraw")
             .and_gte("tx.height", start_height)
             .and_lte("tx.height", end_height);
-        let res = cosm_client.tx_search(query, false, page, 100, Order::Ascending).await?;
+        let res = thub_client
+            .client
+            .tx_search(query, false, page, 100, Order::Ascending)
+            .await?;
         let txs = res.txs;
         let is_last_page = txs.len() < 100;
         for tx in txs {
@@ -46,7 +51,7 @@ pub async fn extract_withdraw_events(
             let tx_index = tx.index as u64;
             let block_number = tx.height.value();
 
-            let block = cosm_client.block(tx.height).await?;
+            let block = thub_client.client.block(tx.height).await?;
             let block_hash: Hash = block.block_id.hash;
             let block_timestamp = block.block.header.time.unix_timestamp() as u64;
 
