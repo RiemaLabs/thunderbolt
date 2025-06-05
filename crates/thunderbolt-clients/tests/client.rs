@@ -1,12 +1,42 @@
+use anyhow::Error as ErrorReport;
 use bitcoin_utils::account::AccountInfo;
 use bitcoin_utils::bitcoin::hex::DisplayHex;
 use bitcoin_utils::bitcoin::Network;
-use cosmrs::proto::cosmos::bank::v1beta1::MsgSend;
+use cosmrs::proto::cosmos::bank::v1beta1::{MsgSend, QueryAllBalancesRequest, QueryAllBalancesResponse};
 use cosmrs::proto::cosmos::base::v1beta1::Coin;
+use cosmrs::proto::prost::Message;
 use cosmrs::rpc::Client as CosmrsClient;
 use cosmrs::tx::MessageExt;
 use cosmrs::Any;
 use thunderbolt_clients::{Client, TxBuilder};
+
+pub async fn query_account_balances(client: &Client, address: &str) -> Result<Vec<(String, String)>, ErrorReport> {
+    let path = "/cosmos.bank.v1beta1.Query/AllBalances";
+
+    let data = {
+        let req = QueryAllBalancesRequest {
+            address: address.to_string(),
+            pagination: None,
+            resolve_denom: true,
+        };
+        req.to_bytes()
+    }?;
+
+    let res = client
+        .client
+        .abci_query(Some(path.to_string()), data, None, false)
+        .await?;
+
+    let balances: QueryAllBalancesResponse = QueryAllBalancesResponse::decode(&res.value[..])?;
+
+    let result = balances
+        .balances
+        .into_iter()
+        .map(|coin| (coin.denom, coin.amount))
+        .collect();
+
+    Ok(result)
+}
 
 async fn setup_client() -> Client {
     Client::new("http://51.161.87.8:36657/", "thunderbolt-devnet").await
@@ -25,6 +55,18 @@ async fn test_query_base_account() {
     let thunderbolt_account = client.query_base_account(&deployer_address).await.unwrap();
 
     println!("Base account: {:?}", thunderbolt_account);
+}
+
+#[tokio::test]
+async fn test_query_account_balances() {
+    let client = setup_client().await;
+
+    let address = "bc1p23znppfw6ergph2qc6vee9kfkpxfeafrkgv3ugwgmx66zc9k5wqqwwqx2q";
+    let balances = query_account_balances(&client, address).await.unwrap();
+
+    for (denom, amount) in balances {
+        println!("Denom: {}, Amount: {}", denom, amount);
+    }
 }
 
 #[tokio::test]
