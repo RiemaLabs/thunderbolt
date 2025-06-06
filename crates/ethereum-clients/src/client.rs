@@ -1,10 +1,10 @@
 use alloy::network::Ethereum;
+use alloy::primitives::{Address, TxHash, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::RpcClient;
-use alloy::rpc::types::Block;
+use alloy::rpc::types::{Block, Filter, Log, TransactionReceipt, TransactionRequest};
 use alloy::transports::http::reqwest::Url;
 use alloy::transports::layers::RetryBackoffLayer;
-use alloy::transports::{RpcError, TransportErrorKind};
 use anyhow::Result;
 use getset::Getters;
 use std::fmt;
@@ -37,9 +37,45 @@ impl EthereumClient {
         })
     }
 
-    pub async fn get_safe_block_number(&self) -> Result<u64, RpcError<TransportErrorKind>> {
-        let confirmations = 12;
-        self.provider.get_block_number().await.map(|b| b - confirmations)
+    pub async fn fetch_logs(&self, filter: &Filter) -> Result<Vec<Log>> {
+        let logs = self.provider.get_logs(filter).await?;
+        Ok(logs)
+    }
+
+    pub async fn get_last_height(&self) -> Result<u64> {
+        let latest_block = self.provider.get_block_number().await?;
+        Ok(latest_block)
+    }
+
+    pub async fn get_gas_price(&self) -> Result<u128> {
+        let gas_price = self.provider.get_gas_price().await?;
+        Ok(gas_price)
+    }
+
+    pub async fn get_balance(&self, address: Address) -> Result<U256> {
+        self.provider.get_balance(address).await.map_err(Into::into)
+    }
+
+    pub async fn get_nonce(&self, address: Address) -> Result<u64> {
+        self.provider.get_transaction_count(address).await.map_err(Into::into)
+    }
+
+    pub async fn estimate_gas(&self, tx: TransactionRequest) -> Result<u64> {
+        self.provider.estimate_gas(tx).await.map_err(Into::into)
+    }
+
+    pub async fn get_transaction_receipt(&self, hash: TxHash) -> Result<Option<TransactionReceipt>> {
+        self.provider.get_transaction_receipt(hash).await.map_err(Into::into)
+    }
+
+    pub async fn broadcast_tx(&self, tx: Vec<u8>) -> Result<String> {
+        match self.provider.send_raw_transaction(&tx).await {
+            Ok(pending_tx) => {
+                let tx_hash = pending_tx.tx_hash();
+                Ok(format!("{:#x}", tx_hash))
+            }
+            Err(e) => Err(anyhow::anyhow!("Failed to broadcast tx: {:?}", e)),
+        }
     }
 }
 
