@@ -5,7 +5,6 @@ edition = "2021"
 license.workspace = true
 
 [dependencies]
-ethereum-utils = { path = "../ethereum-utils" }
 alloy = { version = "0.12.5", features = ["full"] }
 anyhow = "1.0.97"
 getset = "0.1"

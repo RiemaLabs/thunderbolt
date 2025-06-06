@@ -1863,7 +1863,6 @@ version = "0.1.0"
 dependencies = [
  "alloy",
  "anyhow",
- "ethereum-utils",
  "getset",
  "serde",
 ]
@@ -4851,15 +4850,12 @@ name = "thunderbolt-clients"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
  "bip322",
  "bitcoin-utils",
  "cosmrs",
  "k256",
- "primitive-types 0.13.1",
  "serde",
  "serde_json",
- "tendermint",
  "tokio",
 ]
 
