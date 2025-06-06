@@ -5,7 +5,7 @@ edition = "2021"
 license.workspace = true
 
 [dependencies]
-alloy = { version = "0.12.5", features = ["full"] }
+alloy = { version = "0.12.6", features = ["default"] }
 serde = "1.0.217"
 serde_json = "1.0.139"
 primitive-types = { version = "0.13.1", features = ["serde"] }
