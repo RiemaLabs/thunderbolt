@@ -9,3 +9,7 @@ alloy = { version = "0.12.6", features = ["default"] }
 anyhow = "1.0.97"
 getset = "0.1"
 serde = "1.0.217"
+
+
+[dev-dependencies]
+tokio = { version = "1.42.0", features = ["macros"] }
