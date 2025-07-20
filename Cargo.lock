@@ -4632,6 +4632,7 @@ name = "thunderbolt-clients"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bip322",
  "bitcoin-utils",
  "cosmrs",

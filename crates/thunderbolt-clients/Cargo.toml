@@ -12,6 +12,7 @@ cosmrs = { version = "0.22.0", features = ["cosmwasm", "rpc"] }
 bip322 = "0.0.9"
 k256 = { version = "0.13.4" }
 
+async-trait = "0.1.87"
 bitcoin-utils = { path = "../bitcoin-utils" }
 
 [dev-dependencies]
