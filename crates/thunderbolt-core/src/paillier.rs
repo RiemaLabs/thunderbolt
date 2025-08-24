@@ -29,18 +29,18 @@ pub fn vec_to_scalar(vec: &[u8]) -> Scalar {
 
 #[cfg(test)]
 mod tests {
-    use rand::{rngs::ThreadRng, RngCore};
 
     use super::*;
 
+    use rand::{rng, RngCore};
+
     #[test]
     fn encrypt_and_decrypt_scalar() {
-        let mut rng: ThreadRng = rand::thread_rng();
-
         // Draw 32 bytes, reduce to a valid nonzero scalar.
         // (You could also call Scalar::random(&mut rng).)
         let mut raw = [0u8; 32];
-        rng.fill_bytes(&mut raw);
+        let mut thread_rng = rng();
+        thread_rng.fill_bytes(&mut raw);
         let sk = Scalar::reduce_from(&raw); // always in [1,n)
         let scalar_bytes: [u8; 32] = sk.serialize();
 
