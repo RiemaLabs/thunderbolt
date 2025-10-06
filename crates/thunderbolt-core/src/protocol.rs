@@ -23,7 +23,7 @@ use bitcoin_utils::utils::{
     generate_p2tr_tweaked_address, generate_redeem_script, generate_tap_key_origins,
 };
 
-use crate::scripts::{gen_prepare_taproot};
+use crate::scripts::gen_prepare_taproot;
 
 pub struct TxContext {
     multi_sig_address: Address,
