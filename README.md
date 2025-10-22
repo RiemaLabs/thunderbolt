@@ -38,22 +38,22 @@ Each $(\text{ctx\_id}, \text{s})$ pair defines exactly one state row.
 
 ### Columns (per row)
 
-| Field             | Description                                                                                                                                                                                                    |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| $\text{ctx\_id}$  | Context ID as above.                                                                                                                                                                                           |
-| $\text{s}$        | Sequence number for this row ($\text{seq} = \text{s}$). Starts at $0$ and increments by $1$ after each valid transfer.                                                                                         |
-| $\text{outpoint}$ | Reference to the locked UTXO, typically $\text{outpoint} = (\text{txid}, \text{vout}, P, \text{amount})$.                                                                                                      |
-| $P$               | Joint public key $P = P_{x_n} + P_c = (x_n + x_c)\,G$. Must equal the $P$ embedded in $\text{outpoint}$.                                                                                                       |
-| $\text{Tc}_s$     | Committee mask ciphertext at sequence $\text{s}$. For $\text{s}=0$, $\text{Tc}_0 = \varnothing$. For $\text{s} \ge 1$, $\text{Tc}_s = \mathrm{Enc}_{pk_c}(t_s)$.                                               |
-| $\text{Tr}_s$     | Recipient takeover ciphertext for the $\text{s} \!\to\! \text{s}{+}1$ hop. For $\text{s}=0$, $\text{Tr}_0 = \varnothing$. For $\text{s} \ge 1$, $\text{Tr}_s = \mathrm{Enc}_{pk_{U_{\text{s}+1}}}(y_s + t_s)$. |
-| $\text{Com}_s$    | Current Pedersen commitment $\mathrm{Com}(y_s, \rho_s) = y_s H_1 + \rho_s H_2$ (commits to the **current** holder’s share $y_s$ at sequence $\text{s}$).                                                       |
-| $\text{alive}$    | Context liveness flag. **Only the latest row** ($\text{s} = \text{current\_seq}$) has $\text{alive} = \text{true}$. After redeem, the **final row** sets $\text{alive} = \text{false}$.                        |
+| Field             | Description                                                                                                                                                                             |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| $\text{ctx\_id}$  | Context ID as above.                                                                                                                                                                    |
+| $\text{s}$        | Sequence number for this row ($\text{seq} = \text{s}$). Starts at $0$ and increments by $1$ after each valid transfer.                                                                  |
+| $\text{outpoint}$ | Reference to the locked UTXO, typically $\text{outpoint} = (\text{txid}, \text{vout}, P, \text{amount})$.                                                                               |
+| $P$               | Joint public key $P = P_{x_n} + P_c = (x_n + x_c)\,G$. Must equal the $P$ embedded in $\text{outpoint}$.                                                                                |
+| $\text{Tc}_s$     | Committee mask ciphertext at sequence $\text{s}$. For $\text{s}=0$, $\text{Tc}_0 = \varnothing$.                                                                                        |
+| $\text{Tr}_s$     | Recipient takeover ciphertext for the $\text{s} \!\to\! \text{s}{+}1$ hop. For $\text{s}=0$, $\text{Tr}_0 = \varnothing$.                                                               |
+| $\text{Com}_s$    | Current Pedersen commitment $\mathrm{Com}(y_s, \rho_s) = y_s H_1 + \rho_s H_2$ (commits to the **current** holder’s share $y_s$ at sequence $\text{s}$).                                |
+| $\text{alive}$    | Context liveness flag. **Only the latest row** ($\text{s} = \text{current\_seq}$) has $\text{alive} = \text{true}$. After redeem, the **final row** sets $\text{alive} = \text{false}$. |
 
 ## Ledger Functions
 
 | Function                                                                           | Purpose                                                                                                            |
 | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| $\mathrm{register}(\text{outpoint}, P, \text{Com}_0, \pi_{\text{init}})$           | Register a newly locked UTXO on the ledger and commit about the initial share $x_n$.                               |
+| $\mathrm{register}(\text{outpoint}, P, \text{Com}_0, \pi_{\text{init}})$           | Register a newly locked UTXO on the ledger and commit to the initial share $x_n$.                               |
 | $\mathrm{transfer}(\text{ctx\_id}, \text{Tc}_s, \text{Tr}_s, \text{Com}_s, \pi_s)$ | Execute an ownership transfer verified by a zero-knowledge proof.                                                  |
 | $\mathrm{redeem}(\text{ctx\_id}, m, \pi_{\text{redeem}})$                          | Redeem the locked Bitcoin output. Verifies ownership and closes the context immediately upon successful signature. |
 
@@ -81,7 +81,7 @@ Each $(\text{ctx\_id}, \text{s})$ pair defines exactly one state row.
 
 Alice created her initial key share, combined it with the committee to form the joint key, locked BTC to that key on Bitcoin, computed the initial commitment, and registered the UTXO on the Thunderbolt ledger with a zero-knowledge proof to obtain a context ID.
 
-### Before Call Ledger (Preparation)
+### Before the Call (Preparation)
 
 - Generate the user share and the joint key:
   - Sample $x_0 \leftarrow \mathbb{Z}_q$ and set $P_{x_0} = x_0 G$.
@@ -127,7 +127,7 @@ $$
 
 $$
 \mathcal{H}_{\mathrm{FS}}^{\mathrm{reg}}
-= H\!\big(\text{``TB/register''}\ \|\ \text{ctx\_id}\ \|\ s = 0\ \|\ P\ \|\ P_c\ \|\ \text{Com}_0\big).
+= H\!\big(\text{``TB/register''}\ \|\ \text{ctx\_id}\ \|\ 0\ \|\ P\ \|\ P_c\ \|\ \text{Com}_0\big).
 $$
 
 ### State persistence (new row in the schema)
@@ -147,9 +147,9 @@ On success, insert a row with composite key $(\text{ctx\_id},\ \text{s}=0)$:
 
 Transfers ownership from the current holder to the next by encrypting the updated share to the recipient and the mask to the committee, proving correctness in zero-knowledge, and advancing the ledger state with a new commitment and sequence.
 
-### Before Call Ledger (Preparation by Alice)
+### Before the Call (Preparation by Alice)
 
-Assume Alice is the current holder at $(\text{ctx\_id}, \text{s})$ and knows $(y_{\text{s-1}}, \rho_{\text{s-1}})$ such that
+Assume Alice is the current holder at $(\text{ctx\_id}, \text{s-1})$ and knows $(y_{\text{s-1}}, \rho_{\text{s-1}})$ such that
 $\text{Com}_{\text{s-1}} = \mathrm{Com}(y_{\text{s-1}}, \rho_{\text{s-1}}) = y_{\text{s-1}} H_1 + \rho_{\text{s-1}} H_2$.
 
 - Obtain Bob’s Paillier public key $pk_{r_{\text{s}}}$.
@@ -197,7 +197,7 @@ $$
 \text{Com}_{\text{s-1}} &= y_{\text{s-1}} H_1 + \rho_{\text{s-1}} H_2,\\
 \text{Com}_{\text{s}} &= (y_{\text{s-1}} + t_{\text{s}}) H_1 + \rho_{\text{s}} H_2,\\
 \text{Tc}_{\text{s}} &= g_{C}^{\,t_{\text{s}}}\, r_1^{N_{C}} \bmod N_{C}^{2},\\
-\text{Tr}_{\text{s}} &= g_{r_{\text{s}}}^{\,\,y_\text{s}}\, r_2^{N_{r_{\text{s}}}} \bmod N_{r_{\text{s}}}^{2}.
+\text{Tr}_{\text{s}} = g_{r_{\text{s}}}^{\,y_{\text{s}}}\, r_2^{N_{r_{\text{s}}}} \bmod N_{r_{\text{s}}}^{2}.
 \end{aligned}
 $$
 
@@ -233,7 +233,7 @@ $$
 y_{\text{s}} = \mathrm{Dec}_{sk_{r_{\text{s}}}}(\text{Tr}_{\text{s}})\ \bmod q.
 $$
 
-He securely stores $y_{\text{s}}$ and in practice, pack $\rho_{\text{s}}$ together with $y$ in the Paillier plaintext (e.g., fixed-radix packing) so Bob recovers both from a single decryption; Alice deletes $(y_{\text{s}}, \rho_{\text{s}})$.
+He securely stores $y_{\text{s}}$ and in practice, pack $\rho_{\text{s}}$ together with $y$ in the Paillier plaintext (e.g., fixed-radix packing) so Bob recovers both from a single decryption; Alice deletes $(y_{\text{s-1}}, \rho_{\text{s-1}})$.
 
 ## Step 3: Further Transfers (Iterative)
 
@@ -307,11 +307,11 @@ Using the per-row committee masks $\text{Tc}_1,\dots,\text{Tc}_n$ (from all rows
 
 1. Multiplies them homomorphically to obtain an encryption of the sum $t_\Sigma = \sum_{i=1}^n t_i \bmod q$.
 2. Threshold-decrypts to recover $t_\Sigma$.
-3. Computes the compensated signing share $x_c' = (x_c - t_\Sigma) \bmod q$.
+3. Computes the compensated signing share $x_c' = (x_c + t_\Sigma) \bmod q$.
 
 ### 4.5 Two-party schnorr signing and finalization
 
-1. With this convention, the final holder’s share satisfies $y_n = (x_n - t_\Sigma) \bmod q$.
+1. With this convention, the final holder’s share satisfies $y_n = (x_n + t_\Sigma) \bmod q$.
 2. Zeta and the committee generate nonces $(k_Z, R_Z)$, $(k_C, R_C)$; set $R = R_Z + R_C$.
 3. Compute the challenge $e = H(R \parallel P \parallel m)$.
 4. Partial signatures:
@@ -319,13 +319,13 @@ Using the per-row committee masks $\text{Tc}_1,\dots,\text{Tc}_n$ (from all rows
    - $s_Z = k_Z + e \cdot y_n$
    - $s_C = k_C + e \cdot x_c'$
 
-   Using $y_n = x_n - t_\Sigma$ and $x_c' = x_c + t_\Sigma$:
+   Using $y_n = x_n + t_\Sigma$ and $x_c' = x_c - t_\Sigma$:
 
    $$
    s_Z + s_C
-   = (k_Z + e,y_n) + (k_C + e,x_c')
-   = (k_Z + k_C) + e,(x_n - t_{\Sigma} + x_c + t_{\Sigma})
-   = (k_Z + k_C) + e,(x_n + x_c),
+   = (k_Z + e \cdot y_n) + (k_C + e \cdot x_c')
+   = (k_Z + k_C) + e \cdot (x_n + t_{\Sigma} + x_c - t_{\Sigma})
+   = (k_Z + k_C) + e \cdot (x_n + x_c),
    $$
 
    i.e., the two-party Schnorr signature equals signing under the original joint secret (x_n + x_c).
