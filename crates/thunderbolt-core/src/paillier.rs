@@ -1,56 +1,53 @@
-use libpaillier::{Ciphertext, DecryptionKey, EncryptionKey, Nonce};
-use secp::Scalar;
+use libpaillier::{unknown_order::BigNumber, Ciphertext, DecryptionKey, EncryptionKey, Nonce};
+use zeroize::Zeroize;
 
-pub fn generate_paillier_keypair() -> (EncryptionKey, DecryptionKey) {
-    let dk = DecryptionKey::random().expect("paillier keygen");
-    let ek: EncryptionKey = (&dk).into();
-    (ek, dk)
+const PAILLIER_KEY_SIZE: usize = 3072;
+const PAILLIER_P_SIZE: usize = 2048;
+const PAILLIER_Q_SIZE: usize = 1024;
+
+pub trait PaillierAccount {
+    fn encrypt(&self, secret: &[u8], nonce: Nonce) -> Option<(Ciphertext, Nonce)>;
+    fn decrypt(&self, ciphertext: &Ciphertext) -> Option<Vec<u8>>;
 }
 
-pub fn paillier_encrypt(ek: &EncryptionKey, plaintext_be: &[u8]) -> Result<(Ciphertext, Nonce), String> {
-    ek.encrypt(plaintext_be, None)
-        .ok_or_else(|| "Paillier encryption failed".to_string())
+pub struct PaillierAccountLocal {
+    nonce: Nonce,
+    public_key: EncryptionKey,
+    private_key: DecryptionKey,
 }
 
-pub fn paillier_decrypt(dk: &DecryptionKey, ciphertext: &Ciphertext) -> Result<Vec<u8>, String> {
-    dk.decrypt(&ciphertext)
-        .ok_or_else(|| "Paillier decryption failed".to_string())
+impl PaillierAccount for PaillierAccountLocal {
+    fn encrypt(&self, secret: &[u8], nonce: Nonce) -> Option<(Ciphertext, Nonce)> {
+        self.public_key.encrypt(secret, Some(nonce))
+    }
+
+    fn decrypt(&self, ciphertext: &Ciphertext) -> Option<Vec<u8>> {
+        self.private_key.decrypt(ciphertext)
+    }
 }
 
-pub fn vec_to_scalar(vec: &[u8]) -> Scalar {
-    let mut buf = [0u8; 32];
-    let start = 32usize.saturating_sub(vec.len());
-    buf[start..].copy_from_slice(&vec);
+impl PaillierAccountLocal {
+    fn new() -> Option<Self> {
+        let mut p = BigNumber::prime(PAILLIER_P_SIZE);
+        let mut q = BigNumber::prime(PAILLIER_Q_SIZE);
+        let res = DecryptionKey::with_primes_unchecked(&p, &q);
+        // Make sure the primes are zero'd
+        p.zeroize();
+        q.zeroize();
+        let private_key = res?;
+        let public_key = EncryptionKey::from(&private_key);
+        Some(Self {
+            nonce: Nonce::zero(),
+            public_key,
+            private_key,
+        })
+    }
 
-    // Parse back into a nonzero Scalar
-    let sk2 = Scalar::from_slice(&buf).expect("valid scalar");
-    sk2
-}
+    fn nonce(&self) -> Nonce {
+        self.nonce.clone()
+    }
 
-#[cfg(test)]
-mod tests {
-
-    use super::*;
-
-    use rand::{rng, RngCore};
-
-    #[test]
-    fn encrypt_and_decrypt_scalar() {
-        // Draw 32 bytes, reduce to a valid nonzero scalar.
-        // (You could also call Scalar::random(&mut rng).)
-        let mut raw = [0u8; 32];
-        let mut thread_rng = rng();
-        thread_rng.fill_bytes(&mut raw);
-        let sk = Scalar::reduce_from(&raw); // always in [1,n)
-        let scalar_bytes: [u8; 32] = sk.serialize();
-
-        let (ek, dk) = generate_paillier_keypair();
-        let (ciphertext, _nonce) = paillier_encrypt(&ek, &scalar_bytes).unwrap();
-        let decrypted_bytes = paillier_decrypt(&dk, &ciphertext).unwrap();
-        let scalar_decrypted = vec_to_scalar(&decrypted_bytes);
-
-        assert_eq!(sk.serialize(), scalar_decrypted.serialize());
-
-        println!("the test is successful!");
+    fn nonce_increment(&mut self) {
+        self.nonce += 1;
     }
 }

@@ -1,95 +1,61 @@
-use bitcoin::key::Secp256k1;
-use bitcoin::secp256k1::schnorr::Signature;
 use bitcoin::{Address, Network, Transaction};
-use bitcoin_utils::types::Utxo;
-use secp::{Point, Scalar};
-use thunderbolt_core::protocol::TxContext;
-use thunderbolt_core::tweak::Tweaker;
 
-use crate::mock_committee::MockCommittee;
-use crate::mock_users::MockUser;
+use thunderbolt_core::bitcoin_tx::{PrepareTxInfo, TxContext};
+use thunderbolt_core::user::{User, UserLocal};
 
-pub fn prepare_redeem(
-    mut user: MockUser,
-    mut committee: MockCommittee,
-    prev_address: Address,
-    prev_outputs: Vec<Utxo>,
-    prev_outputs_tx: Option<Transaction>,
-    sats_per_vbytes: u64,
-    receipient_address: Address,
-    fixed_amount: u64,
-) -> (Transaction, Transaction) {
-    let secp = Secp256k1::new();
-
-    // Step 1: Generate Tx Context
-    let tx_ctx = TxContext::new(
-        user.account.get_tweaked_x_pubkey().0,
-        committee.account.get_tweaked_x_pubkey().0,
-        Network::Testnet,
+pub async fn do_prepare(user: &UserLocal, committee: &impl User, network: Network, prepare_tx_info: &PrepareTxInfo) {
+    // Step 1.1: Initialize Tx Context
+    let tx_ctx = TxContext::initialize(
+        user.get_bitcoin_account_local(),
+        committee.get_bitcoin_account(),
+        network,
+        prepare_tx_info,
     );
 
-    // Step 2: Construct Prepare Transaction
+    // Step 1.2: Submit Prepare Transaction to the network.
 
-    let mut prepare_tx = tx_ctx
-        .construct_unsigned_prepare(
-            &prev_address,
-            prev_outputs,
-            prev_outputs_tx,
-            sats_per_vbytes,
-            fixed_amount,
-        )
-        .unwrap();
+    // // Step 2: Construct Prepare Transaction
 
-    let signed_prepare_tx = tx_ctx
-        .sign_prepare(
-            &user.account.get_pubkey(),
-            &prev_address,
-            &mut prepare_tx,
-            &secp,
-            &user.account.xpriv.unwrap(),
-        )
-        .unwrap();
+    // let redeem_psbt = tx_ctx
+    //     .construct_unsigned_redeem(
+    //         tx_ctx.get_signed_prepare().compute_txid(),
+    //         prepare_tx_info.fixed_amount,
+    //         vec![],
+    //     )
+    //     .unwrap();
 
-    let redeem_psbt = tx_ctx
-        .construct_unsigned_redeem(signed_prepare_tx.compute_txid(), fixed_amount, vec![])
-        .unwrap();
+    // // Step 3: Sign
+    // let c_signature = tx_ctx
+    //     .sign_redeem_funding_utxo(
+    //         fixed_amount,
+    //         &mut redeem_psbt.clone(),
+    //         &secp,
+    //         &committee.account.get_tweaked_keypair(),
+    //     )
+    //     .unwrap();
 
-    // Step 3: Sign
-    let c_signature = tx_ctx
-        .sign_redeem_funding_utxo(
-            fixed_amount,
-            &mut redeem_psbt.clone(),
-            &secp,
-            &committee.account.get_tweaked_keypair(),
-        )
-        .unwrap();
+    // let user_signature = tx_ctx
+    //     .sign_redeem_funding_utxo(
+    //         fixed_amount,
+    //         &mut redeem_psbt.clone(),
+    //         &secp,
+    //         &user.account.get_tweaked_keypair(),
+    //     )
+    //     .unwrap();
 
-    let user_signature = tx_ctx
-        .sign_redeem_funding_utxo(
-            fixed_amount,
-            &mut redeem_psbt.clone(),
-            &secp,
-            &user.account.get_tweaked_keypair(),
-        )
-        .unwrap();
+    // let outputs = tx_ctx.default_redeem_outputs(fixed_amount, receipient_address, sats_per_vbytes);
 
-    let outputs = tx_ctx.default_redeem_outputs(fixed_amount, receipient_address, sats_per_vbytes);
+    // let mut unsigned_redeem_tx = tx_ctx
+    //     .construct_unsigned_redeem(signed_prepare_tx.compute_txid(), fixed_amount, outputs)
+    //     .unwrap();
 
-    let mut unsigned_redeem_tx = tx_ctx
-        .construct_unsigned_redeem(signed_prepare_tx.compute_txid(), fixed_amount, outputs)
-        .unwrap();
+    // // [On-chain] Step 4: Redeem Transaction
 
-    let c_signed_redeem_tx = tx_ctx
-        .sign_redeem_dummy_utxo(&mut unsigned_redeem_tx, &secp, &committee.account.get_tweaked_keypair())
-        .unwrap();
+    // let final_redeem_tx = tx_ctx
+    //     .aggregate_redeem(unsigned_redeem_tx, user_signature, c_signature)
+    //     .unwrap();
 
-    // [On-chain] Step 4: Redeem Transaction
-
-    let final_redeem_tx = tx_ctx
-        .aggregate_redeem(c_signed_redeem_tx, user_signature, c_signature)
-        .unwrap();
-
-    (signed_prepare_tx, final_redeem_tx)
+    // (signed_prepare_tx, final_redeem_tx)
 }
 
 pub fn prepare_transfer_reassign_redeem(

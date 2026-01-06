@@ -1,4 +1,3 @@
-use bitcoin::hex::DisplayHex;
 use musig2::compute_challenge_hash_tweak;
 use secp::{MaybeScalar, Point, Scalar};
 
@@ -21,8 +20,6 @@ pub fn schnorr_verify(x_pubkey: [u8; 32], msg: &[u8], signature: Signature) -> b
     let (r, s) = signature;
     let e = schnorr_compute_challenge(&pubkey, msg, &r);
     let p_r = s.base_point_mul() - e * pubkey;
-    println!("p_r: {:?}", p_r.serialize_xonly().to_lower_hex_string());
-    println!("r: {:?}", r.to_lower_hex_string());
     if p_r.is_infinity() {
         return false;
     }
