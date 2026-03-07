@@ -7,6 +7,8 @@ $$
 P = (x_s + y_s)G.
 $$
 
+All scalar equalities appearing in elliptic-curve relations are interpreted modulo the group order $q$.
+
 The transfer is split into two phases.
 
 First, **Bob publishes a one-time invoice**. In this phase, Bob chooses a fresh refresh value $r_s$ and publishes:
@@ -52,7 +54,7 @@ The invoice contains:
   ct_C = \mathrm{Enc}_{pk_C}(r_s; \rho_C).
   $$
 
-The purpose of the invoice proof is to show that **all three objects encode the same value** $r_s$.
+The purpose of the invoice proof is to show that **all three objects encode the same integer value** $r_s$.
 
 Without this proof, a malicious Bob could publish an invoice where:
 
@@ -103,7 +105,7 @@ $$
 
 ## NIZK proof and verification
 
-**Proof:** $\pi_{\mathrm{inv}} = (A_D, A_B, A_C, z, \tau_B, \tau_C)$ (obtained via Fiat--Shamir on the above relation). The prover uses one value $r_s$ and one commitment randomness $\alpha$: commitments are $A_D = \alpha H$, $A_B = g_B^{\alpha}\beta_B^{N_B}$, $A_C = g_C^{\alpha}\beta_C^{N_C}$; response $z = \alpha + c r_s$ is the **same** in all three components, so the verifier sees a single $z$ tying $D_s$, $\mathrm{ct}_B$, and $\mathrm{ct}_C$ to the same $r_s$.
+**Proof:** $\pi_{\mathrm{inv}} = (A_D, A_B, A_C, z, \tau_B, \tau_C)$ (obtained via Fiat--Shamir on the above relation). The prover uses one integer value $r_s$ and one commitment randomness $\alpha$: commitments are $A_D = \alpha H$, $A_B = g_B^{\alpha}\beta_B^{N_B}$, $A_C = g_C^{\alpha}\beta_C^{N_C}$; response $z = \alpha + c r_s$ is the **same** in all three components, so the verifier sees a single $z$ tying $D_s$, $\mathrm{ct}_B$, and $\mathrm{ct}_C$ to the same $r_s$.
 
 **Verification:** set
 $$
@@ -128,13 +130,13 @@ then check (same $z$ in all three):
   z\Gamma_C := g_C^z \tau_C^{N_C}
   $$
 
-Accept iff all three hold. The single $z$ in all three equations forces the same value $r_s$ everywhere.
+Accept iff all three hold. The single $z$ in all three equations forces the same integer value $r_s$ everywhere.
 
 ---
 
 ## Security Meaning
 
-This proof guarantees the existence of a single value $r_s$ such that:
+This proof guarantees the existence of a single integer value $r_s$ such that:
 
 - the public anchor delta is $D_s = r_s H$,
 - Bob's ciphertext decrypts to $r_s$,
@@ -148,7 +150,7 @@ This is exactly the proof that enforces the ``same $r_s$ everywhere'' property o
 
 # Core Proof 2: Transfer Consistency Proof
 
-**From Core Proof 1.** We assume the invoice proof has been verified, so the same value $r_s$ satisfies $D_s = r_s H$ and $ct_B = \mathrm{Enc}_{pk_B}(r_s)$ (and $ct_C = \mathrm{Enc}_{pk_C}(r_s)$). The transfer proof uses $ct_B$ and $D_s$ as fixed public inputs with that meaning.
+**From Core Proof 1.** We assume the invoice proof has been verified, so the same integer value $r_s$ satisfies $D_s = r_s H$ and $ct_B = \mathrm{Enc}_{pk_B}(r_s)$ (and $ct_C = \mathrm{Enc}_{pk_C}(r_s)$). The transfer proof uses $ct_B$ and $D_s$ as fixed public inputs with that meaning.
 
 ---
 
@@ -261,7 +263,7 @@ then check (same $z$ in both):
 
 ## Security Meaning
 
-This proof guarantees that there exists a single value $x_s$ such that:
+This proof guarantees that there exists a single integer value $x_s$ such that:
 
 - $X_s = x_s H$, i.e. it is the true opening of the current public anchor,
 - $T_{s+1} \ominus ct_B$ encrypts that same $x_s$ under Bob's key.
@@ -336,7 +338,7 @@ $$
 X_{s+1} = X_s + D_s = (x_s + r_s)H.
 $$
 
-At the same time, the Committee decrypts $ct_C$ from the invoice, recovers the same integer $r_s$, and updates its share by
+At the same time, the Committee decrypts the committee-side invoice object, recovers the same integer $r_s$, and updates its share by
 
 $$
 y_{s+1} = y_s - r_s.
@@ -358,7 +360,7 @@ $$
 (x_s + y_s)G.
 $$
 
-This is exactly the ``one add / one subtract'' invariant. For this invariant, it is sufficient that the same integer $r_s$ is used consistently in the invoice, in Alice's holder update, and in the honest Committee's compensating update. Since scalar multiplication on the curve is taken modulo $q$, no additional canonical range condition is needed merely to preserve the fixed on-chain key.
+This is exactly the ``one add / one subtract'' invariant. For this invariant, it is sufficient that the same integer $r_s$ is used consistently in the invoice, in Alice's holder update, and in the committee-side compensating update. This committee-side update may be carried out either by a single honest Committee entity or collectively by a threshold committee via a VESS-based sharing / resharing protocol. Since scalar multiplication on the curve is taken modulo $q$, no additional canonical range condition is needed merely to preserve the fixed on-chain key.
 
 ---
 
@@ -370,9 +372,9 @@ Victor Shoup's *Simple VESS* gives a scheme for **verifiably encrypting a Shamir
 
 **How our schema relates:**
 
-- **Core Proof 1 (Invoice)** is a multi-receiver extension of the Camenisch--Shoup verifiable-encryption-of-discrete-log building block: we prove that one integer $r_s$ is the discrete log of the public point $D_s$ and also the plaintext of two ciphertexts, namely $\mathrm{ct}_B$ and $\mathrm{ct}_C$. In other words, we perform verifiable encryption of the discrete log of $D_s$ simultaneously for Bob and for the Committee, using one shared response across one EC relation and two Paillier relations.
+- **Core Proof 1 (Invoice)** is a multi-receiver extension at the level of the proof relation: we prove that one integer $r_s$ is the discrete log of the public point $D_s$ and also the plaintext of two ciphertexts, namely $\mathrm{ct}_B$ and $\mathrm{ct}_C$. In other words, we perform verifiable encryption of the discrete log of $D_s$ simultaneously for Bob and for the Committee, using one shared response across one EC relation and two Paillier relations.
 
-- **Core Proof 2 (Transfer)** is the same primitive in the single-ciphertext case: the ciphertext $T_{s+1} \ominus \mathrm{ct}_B$ encrypts the value $x_s$ whose discrete-log relation is $X_s = x_s H$. Thus Proof 2 is again a verifiable-encryption-of-discrete-log proof in the Camenisch--Shoup style.
+- **Core Proof 2 (Transfer)** is the same primitive in the single-ciphertext case: the ciphertext $T_{s+1} \ominus \mathrm{ct}_B$ encrypts the integer value $x_s$ whose discrete-log relation is $X_s = x_s H$. Thus Proof 2 is again a verifiable-encryption-of-discrete-log proof in the Camenisch--Shoup style.
 
 - **Committee-side update via VESS.** If the Committee is instantiated as a threshold committee rather than a single actor, then the committee-side object need not be modeled as one ciphertext to one trusted Committee. Instead, Bob can distribute the committee-side refresh using a VESS / resharing protocol: informally, he verifiably encrypts to the committee a Shamir sharing of the compensating update associated with $r_s$. In that case, the protocol no longer relies on a single honest Committee entity locally applying $y_{s+1} = y_s - r_s$. Rather, correctness of the committee-side update follows collectively from successful completion of the VESS-based sharing / resharing protocol under the required threshold-honesty assumption.
 
