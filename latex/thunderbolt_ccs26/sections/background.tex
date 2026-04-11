@@ -1,0 +1,41 @@
+\section{Background}\label{sec:background}
+
+This section provides the necessary context on Ethereum's multi-client consensus architecture and the critical role of serialization standards. We also analyze the limitations of existing fuzzing approaches in this domain and define our threat model.
+
+\subsection{Client Diversity and State Consistency}
+
+Modern blockchain networks, particularly Ethereum post-Merge, explicitly prioritize \textit{client diversity} as a defense against monocultural software failures. The network is maintained by a heterogeneous set of consensus clients (e.g., Prysm~\cite{prysm}, Lighthouse~\cite{lighthouse}, Teku~\cite{teku}, Nimbus~\cite{nimbus}) implemented in different programming languages. These clients must collectively execute a deterministic state transition function $S_{n+1} = \mathsf{STF}(S_n, B)$, where $S_n$ is the pre-state and $B$ is the incoming block.
+
+Correctness in this setting implies absolute semantic equivalence. Every honest client, regardless of its underlying implementation language or memory model, must derive the exact same post-state $S_{n+1}$ for any given valid input. Furthermore, clients must uniformly reject invalid inputs. A divergence in this logic, where Client A accepts a block that Client B rejects or where they compute different state roots, leads to a \textit{chain split}. In a Proof-of-Stake (PoS) system, such partitions can prevent the network from finalizing checkpoints, potentially causing severe economic penalties (slashing) for honest validators and undermining the ledger's integrity.
+
+\subsection{State Serialization and Canonicalization}
+
+To ensure that complex data structures hash to unique Merkle roots, consensus protocols rely on strict serialization standards. Ethereum employs \emph{simple serialize (SSZ)}, a typed serialization framework designed for determinism and efficiency. Unlike flexible formats such as Protobuf~\cite{protobuf} or JSON~\cite{rfc8259}, SSZ mandates \emph{canonicalization}: for every logical object, there must be exactly one valid byte sequence representation.
+
+This requirement introduces significant complexity in parsing logic, particularly for variable-length types. Two specific structures are notorious sources of implementation discrepancies:
+
+\begin{itemize}
+    \item Bitlists and padding: SSZ uses bitlists to represent validator participation. To determine the length of the list within a byte-aligned stream, the specification requires a ``sentinel bit.'' Implementations must strictly validate that no non-zero padding bits exist after this sentinel. Failure to enforce this check allows \emph{non-canonical} encodings, which are logically equivalent but byte-different, to enter the system and break hash uniqueness.
+    
+    \item Offsets and containers: Variable-length fields within a container are managed via offsets. The specification imposes strict constraints on these offsets: they must point to valid data boundaries, be monotonic, and leave no gaps in the byte stream. Parsers must distinguish between ``malformed'' inputs (invalid offsets) and ``non-canonical'' inputs (valid data but redundant encoding), a subtle distinction that often varies across implementations.
+\end{itemize}
+
+\subsection{Challenges in Consensus Fuzzing}
+
+Fuzzing is the industry standard for detecting consensus bugs, yet it faces two fundamental limitations when applied to the state serialization layer.
+
+First, standard fuzzers are semantically blind. Tools like AFL++~\cite{aflplusplus} or LibFuzzer~\cite{libfuzzer} optimize for code coverage, effectively finding syntax-level parsing errors. However, consensus bugs often reside deep within the state transition logic, guarded by complex validity predicates (e.g., timestamp checks, balance sufficiency) that random mutation rarely satisfies. Without a model of the protocol specification, fuzzers waste the majority of their time generating inputs that are immediately rejected by the parser's outer layers.
+
+Second, the \emph{sparse} reward problem hinders the detection of silent divergences. A logic bug in serialization may not cause a crash; it may simply result in one client silently normalizing a non-canonical input while another rejects it. Coverage metrics are often insensitive to these differences, as the control flow for ``accept'' and ``reject'' paths may be nearly identical in terms of basic blocks visited. Consequently, a fuzzer receives no feedback to indicate that it is exploring a fragile semantic boundary unless a full consensus split is triggered.
+
+\subsection{Threat Model}
+
+We consider a network attacker aiming to disrupt the consensus of the blockchain. The attacker has the following capabilities and constraints:
+
+\begin{itemize}
+    \item \emph{Capabilities}. The attacker can broadcast arbitrary binary data to the peer-to-peer network. We assume the attacker has full knowledge of the public consensus specifications and the source code of open-source clients. They can construct malformed, non-canonical, or semantically boundary-case serialization blobs.
+    
+    \item \emph{Constraints}. The attacker cannot break standard cryptographic primitives, such as finding hash collisions or forging signatures. We assume the underlying network transport is reliable.
+    
+    \item \emph{Goal}. The primary goal is to trigger a \emph{consensus split} (partitioning the network into disjoint forks) or a \emph{denial-of-service} (crashing specific client implementations). We focus specifically on vulnerabilities arising from the deserialization and processing of consensus state objects.
+\end{itemize}

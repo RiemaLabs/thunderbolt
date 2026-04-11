@@ -1,0 +1,77 @@
+% \documentclass[sigconf,review,anonymous,screen]{acmart}
+
+\documentclass[sigconf,screen,nonacm]{acmart}
+
+\AtBeginDocument{%
+  \providecommand\BibTeX{{%
+    Bib\TeX}}}
+
+\input{sections/setup}
+
+\begin{document}
+\sloppy
+
+\title{Breaking Blockchain Consensus via Boundary-Seeking Fuzzing of Inter-Client State Serialization}
+
+
+\author{Hanzhi Liu}
+\email{hanzhi@ucsb.edu}
+\affiliation{%
+  \institution{University of California, Santa Barbara}
+  \city{Santa Barbara}
+  \state{CA}
+  \country{USA}
+}
+
+\author{Yanju Chen}
+\email{yanju@ucsd.edu}
+\affiliation{%
+  \institution{University of California, San Diego}
+  \city{San Diego}
+  \state{CA}
+  \country{USA}
+}
+
+\author{Hongbo Wen}
+\email{hongbowen@ucsb.edu}
+\affiliation{%
+  \institution{University of California, Santa Barbara}
+  \city{Santa Barbara}
+  \state{CA}
+  \country{USA}
+}
+
+\author{Yu Feng}
+\email{yufeng@cs.ucsb.edu}
+\affiliation{%
+  \institution{University of California, Santa Barbara}
+  \city{Santa Barbara}
+  \state{CA}
+  \country{USA}
+}
+
+\input{sections/abstract}
+
+\maketitle
+
+\input{sections/intro}
+\input{sections/background}
+\input{sections/overview}
+\input{sections/inpabs}
+\input{sections/fuzzing}
+\input{sections/impl}
+\input{sections/eval-report}
+\input{sections/related}
+\input{sections/conclusion}
+
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{main}
+
+\newpage
+\appendix
+\input{sections/apdx-osci}
+\input{sections/apdx-typp}
+\input{sections/apdx-template}
+
+\end{document}
+

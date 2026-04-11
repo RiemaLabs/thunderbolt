@@ -1,0 +1,104 @@
+\section{Evaluation}\label{sec:eval}
+
+This section evaluates the effectiveness of \tool at exposing consensus-critical SSZ canonicalization vulnerabilities.
+We focus on two research questions:
+\begin{itemize}
+    \item \textbf{RQ1 (Reproduction):} Can \tool reliably reproduce historical SSZ canonicalization vulnerabilities on consensus-layer schemas?
+    \item \textbf{RQ2 (Zero-Day):} Can \tool uncover previously unknown vulnerability instances in production SSZ implementations?
+\end{itemize}
+
+\subsection{Experimental Setup}
+
+\paragraph{Benchmarks}
+We compile a benchmark suite of \textbf{five} historical SSZ vulnerabilities, each originally discovered by \tool and later confirmed by maintainers (see our bug reports).
+The suite spans five specification-defined canonicalization boundaries in SSZ~\cite{sszspec}:
+(1) \emph{dirty bitvector padding} acceptance in \icode{Bitvector[N]};
+(2) \emph{dirty boolean} encodings beyond \icode{0x00/0x01};
+(3) \emph{null-bitlist} deserialization without the sentinel bit;
+(4) \emph{union trailing-data} acceptance (notably relevant to \icode{Optional[T]} encodings in \cite{eip6800}); and
+(5) \emph{variable-length container gaps} violating offset contiguity.
+
+\paragraph{Targets, metric, and protocol}
+Each benchmark is instantiated on an Ethereum consensus-layer schema that contains the affected field (e.g., \icode{BeaconState.JustificationBits} for dirty bitvector padding).
+We report \emph{Time to Exposure (TTE)}, i.e., the wall-clock time required to produce the first failure-inducing input in a cold-start run.
+Unless otherwise stated, we report the median TTE over 30 independent runs.
+
+\paragraph{Baseline}
+As a baseline, we use a structure-aware LibFuzzer~\cite{libfuzzer} configuration under a 30-minute budget per target.
+Under this setting, LibFuzzer failed to reproduce any of the historical bugs.
+
+\paragraph{Bug provenance and counting}
+To avoid cherry-picking and to keep ground truth auditable, every benchmark and zero-day instance reported in this section corresponds to a historical bug recorded in \texttt{docs/bugs} (each initially discovered by \tool and subsequently confirmed upstream).
+When counting zero-days, we count \emph{per-implementation} instances: a single specification boundary (e.g., dirty bitvector padding) may manifest as multiple independent bugs across different client libraries, and each vulnerable codebase is counted as a distinct instance.
+
+\paragraph{Environment}
+All measurements were collected on a commodity workstation (Apple M3 Max, macOS 15.6.1) using Go 1.25.1.
+
+\subsection{RQ1: Reproducing Historical Vulnerabilities}
+
+\autoref{tab:repro-report} summarizes reproduction results.
+Across all five benchmarks, \tool exposes the vulnerability in a cold-start setting with millisecond-scale TTE.
+In each case, \tool synthesizes a non-canonical but semantically valid encoding that triggers either a round-trip mismatch (i.e., \({\sf enc}({\sf dec}(w)) \neq w\)) or a hash-tree-root divergence under canonicalization.
+
+\begin{table*}[t]
+\centering
+\caption{Bug reproduction effectiveness on historical SSZ vulnerabilities. We report median TTE over 30 cold-start runs. ``--'' indicates the bug was not found within the 30-minute timeout.}
+\label{tab:repro-report}
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Benchmark ID} & \textbf{Affected Implementations} & \textbf{Consensus Schema} & \textbf{LibFuzzer TTE (ms)} & \textbf{\tool TTE (ms)} \\
+\midrule
+BV-DirtyPadding & Prysm/fastssz, Teku, py-ssz, dynamic-ssz~{\scriptsize\cite{prysm,fastssz,teku,pyssz,dynamic_ssz}} & \icode{BeaconState.JustificationBits} & -- & 5.390 \\
+Bool-Dirty      & Prysm/fastssz, dynamic-ssz~{\scriptsize\cite{prysm,fastssz,dynamic_ssz}} & \icode{Validator.Slashed} & -- & 0.351 \\
+Bitlist-Null    & dynamic-ssz~{\scriptsize\cite{dynamic_ssz}} & \icode{PendingAttestation.AggregationBits} & -- & 4.020 \\
+Union-DirtyTail & Lighthouse, Lodestar, remerkleable~{\scriptsize\cite{lighthouse,lodestar,remerkleable}} & \icode{SuffixStateDiff.new\_value} & -- & 0.164 \\
+Gap-Offsets     & remerkleable~{\scriptsize\cite{remerkleable}} & \icode{PendingAttestation} & -- & 0.588 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+
+These results indicate that \tool{}'s specification-aligned buckets expose canonicalization boundaries directly, enabling reliable reproduction even when the triggering inputs are semantically silent (i.e., no crash).
+
+\subsection{RQ2: Zero-Day Instances in Production Implementations}
+
+We further ran \tool on production-grade SSZ implementations used across major consensus clients and libraries.
+\autoref{tab:0day-instances-report} lists the previously unknown vulnerability instances uncovered in this study.
+Each row corresponds to a distinct vulnerable implementation (i.e., we count per-implementation instances, even when multiple projects share the same root cause).
+
+\begin{table*}[t]
+\centering
+\caption{Previously unknown vulnerability instances discovered by \tool in production SSZ implementations.}
+\label{tab:0day-instances-report}
+\small
+\begin{tabular}{cll}
+\toprule
+\textbf{\#} & \textbf{Vulnerability} & \textbf{Implementation / Issue} \\
+\midrule
+1 & Container deserialize short/empty input & Lodestar~\cite{lodestar} \href{https://github.com/ChainSafe/ssz/issues/502}{ChainSafe/ssz\#502} \\
+2.1 & Bitvector dirty padding & Teku~\cite{teku} \href{https://github.com/Consensys/teku/pull/10173}{Consensys/teku\#10173} \\
+2.2 & Bitvector dirty padding & Prysm (fastssz)~\cite{prysm,fastssz} \\
+2.3 & Bitvector dirty padding & ethereum/py-ssz~\cite{pyssz} \\
+2.4 & Bitvector dirty padding & dynamic-ssz~\cite{dynamic_ssz} \href{https://github.com/pk910/dynamic-ssz/issues/54}{pk910/dynamic-ssz\#54} \\
+3.1 & Boolean canonicalization \{0x00,0x01\} & fastssz / Prysm~\cite{fastssz,prysm} \href{https://github.com/ferranbt/fastssz/issues/222}{ferranbt/fastssz\#222} \\
+3.2 & Boolean canonicalization \{0x00,0x01\} & dynamic-ssz~\cite{dynamic_ssz} \href{https://github.com/pk910/dynamic-ssz/issues/53}{pk910/dynamic-ssz\#53} \\
+4.1 & Union trailing data accepted & Lighthouse~\cite{lighthouse} \href{https://github.com/sigp/ethereum_ssz/issues/64}{sigp/ethereum\_ssz\#64} \\
+4.2 & Union trailing data accepted & Lodestar~\cite{lodestar} \href{https://github.com/ChainSafe/ssz/issues/507}{ChainSafe/ssz\#507} \\
+4.3 & Union trailing data accepted & ethereum/remerkleable~\cite{remerkleable} \href{https://github.com/protolambda/remerkleable/issues/28}{protolambda/remerkleable\#28} \\
+5 & Variable-length container gap & ethereum/remerkleable~\cite{remerkleable} \href{https://github.com/protolambda/remerkleable/issues/29}{protolambda/remerkleable\#29} \\
+6 & Null-bitlist trap & dynamic-ssz~\cite{dynamic_ssz} \href{https://github.com/pk910/dynamic-ssz/issues/56}{pk910/dynamic-ssz\#56} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+In total, \tool uncovered \textbf{12} previously unknown vulnerability instances.
+Several instances are consensus-breaking because they enable non-canonical encodings that are accepted by one client but rejected (or normalized) by another, yielding different state roots.
+
+\subsection{Discussion}
+
+These results highlight two practical implications.
+First, consensus risk concentrates at a small set of specification-defined canonicalization boundaries, but each boundary can manifest as multiple independent implementation bugs.
+Second, by systematically abstracting and prioritizing these boundaries, \tool provides a practical mechanism for continuously vetting heterogeneous SSZ stacks ahead of new spec features such as \cite{eip6800}.
