@@ -1,321 +1,248 @@
-@inproceedings{yang2021fluffy,
-  title        = {Finding Consensus Bugs in Ethereum via Multi-transaction Differential Fuzzing},
-  author       = {Yang, Youngseok and Kim, Taesoo and Chun, Byung-Gon},
-  booktitle    = {15th {USENIX} Symposium on Operating Systems Design and Implementation (OSDI~21)},
-  year         = {2021},
-  url          = {https://www.usenix.org/conference/osdi21/presentation/yang}
+% ── Thunderbolt core references ──
+
+@inproceedings{camenisch2003verifiable,
+  title     = {Practical Verifiable Encryption and Decryption of Discrete Logarithms},
+  author    = {Camenisch, Jan and Shoup, Victor},
+  booktitle = {Advances in Cryptology --- {CRYPTO} 2003},
+  series    = {LNCS},
+  volume    = {2729},
+  pages     = {126--144},
+  year      = {2003},
+  publisher = {Springer},
+  doi       = {10.1007/978-3-540-45146-4_8}
 }
 
-@misc{sszspec,
-  title        = {SimpleSerialize (SSZ)},
-  howpublished = {Ethereum Consensus Specifications},
-  url          = {https://ethereum.github.io/consensus-specs/ssz/simple-serialize/},
-  year         = {2025},
-  note         = {Accessed 2025-12-12}
-}
-
-@misc{eip6800,
-  title        = {{EIP}-6800: Ethereum state using a unified verkle tree},
-  howpublished = {Ethereum Improvement Proposals},
-  url          = {https://eips.ethereum.org/EIPS/eip-6800},
-  year         = {2023},
-  note         = {Accessed 2025-12-12}
-}
-
-@misc{beaconfuzz,
-  title        = {beacon-fuzz: Differential Fuzzer for Ethereum 2.0},
-  howpublished = {Sigma Prime (GitHub repository)},
-  url          = {https://github.com/sigp/beacon-fuzz},
+@misc{shoup2024simple,
+  title        = {Simple {VESS} (Verifiable Encrypted Secret Sharing)},
+  author       = {Shoup, Victor},
+  howpublished = {Cryptology ePrint Archive, Report 2024/253},
   year         = {2024},
-  note         = {Accessed 2025-12-12}
+  url          = {https://eprint.iacr.org/2024/253}
 }
 
-@inproceedings{ma2023loki,
-  title        = {LOKI: State-Aware Fuzzing Framework for the Implementation of Blockchain Consensus Protocols},
-  author       = {Ma, Fuchen and Chen, Yuanliang and Ren, Meng and Zhou, Yuanhang and Jiang, Yu and Chen, Ting and Li, Huizhong and Sun, Jiaguang},
-  booktitle    = {Network and Distributed System Security Symposium (NDSS)},
-  year         = {2023},
-  doi          = {10.14722/ndss.2023.24078}
+@article{paillier1999public,
+  title     = {Public-Key Cryptosystems Based on Composite Degree Residuosity Classes},
+  author    = {Paillier, Pascal},
+  booktitle = {Advances in Cryptology --- {EUROCRYPT} '99},
+  series    = {LNCS},
+  volume    = {1592},
+  pages     = {223--238},
+  year      = {1999},
+  publisher = {Springer},
+  doi       = {10.1007/3-540-48910-X_16}
 }
 
-@inproceedings{boehme2020entropic,
-  title        = {Boosting Fuzzer Efficiency: An Information Theoretic Perspective},
-  author       = {B{\"o}hme, Marcel and Manes, Valentin J. M. and Cha, Sang Kil},
-  booktitle    = {Proceedings of the 28th {ACM} Joint Meeting on European Software Engineering Conference and Symposium on the Foundations of Software Engineering (ESEC/FSE)},
+@inproceedings{fiat1987prove,
+  title     = {How to Prove Yourself: Practical Solutions to Identification and Signature Problems},
+  author    = {Fiat, Amos and Shamir, Adi},
+  booktitle = {Advances in Cryptology --- {CRYPTO} '86},
+  series    = {LNCS},
+  volume    = {263},
+  pages     = {186--194},
+  year      = {1987},
+  publisher = {Springer},
+  doi       = {10.1007/3-540-47721-7_12}
+}
+
+% ── Bitcoin / Lightning ──
+
+@misc{poon2016lightning,
+  title        = {The {Bitcoin Lightning Network}: Scalable Off-Chain Instant Payments},
+  author       = {Poon, Joseph and Dryja, Thaddeus},
+  year         = {2016},
+  howpublished = {White paper},
+  url          = {https://lightning.network/lightning-network-paper.pdf}
+}
+
+@misc{bip340,
+  title        = {{BIP} 340: Schnorr Signatures for secp256k1},
+  author       = {Wuille, Pieter and Nick, Jonas and Ruffing, Tim},
+  howpublished = {Bitcoin Improvement Proposals},
   year         = {2020},
-  doi          = {10.1145/3368089.3409748}
+  url          = {https://github.com/bitcoin/bips/blob/master/bip-0340.mediawiki}
 }
 
-@inproceedings{aschermann2020ijon,
-  title        = {Ijon: Exploring Deep State Spaces via Fuzzing},
-  author       = {Aschermann, Cornelius and Schumilo, Sergej and Abbasi, Ali and Holz, Thorsten},
-  booktitle    = {{IEEE} Symposium on Security and Privacy (S\&P)},
-  year         = {2020},
-  doi          = {10.1109/SP40000.2020.00117}
+@misc{spilman2013,
+  title        = {Anti {DoS} for tx replacement},
+  author       = {Spilman, Jeremy},
+  howpublished = {Bitcoin-development mailing list},
+  year         = {2013},
+  url          = {https://lists.linuxfoundation.org/pipermail/bitcoin-dev/2013-April/002433.html}
 }
 
-@inproceedings{cassez2022beaconchain,
-  title        = {Formal Verification of the Ethereum 2.0 Beacon Chain},
-  author       = {Cassez, Franck and Fuller, Joanne and Asgaonkar, Aditya},
-  booktitle    = {Tools and Algorithms for the Construction and Analysis of Systems (TACAS)},
-  year         = {2022},
-  doi          = {10.1007/978-3-030-99524-9_9}
+@inproceedings{decker2015fast,
+  title     = {A Fast and Scalable Payment Network with Bitcoin Duplex Micropayment Channels},
+  author    = {Decker, Christian and Wattenhofer, Roger},
+  booktitle = {Stabilization, Safety, and Security of Distributed Systems (SSS)},
+  series    = {LNCS},
+  volume    = {9212},
+  pages     = {3--18},
+  year      = {2015},
+  publisher = {Springer},
+  doi       = {10.1007/978-3-319-21741-3_1}
 }
 
-@article{bano2020twins,
-  title        = {Twins: {BFT} Systems Made Robust},
-  author       = {Bano, Shehar and Sonnino, Alberto and Chursin, Andrey and Perelman, Dmitri and Li, Zekun and Ching, Avery and Malkhi, Dahlia},
-  journal      = {arXiv preprint arXiv:2004.10617},
-  year         = {2020},
-  url          = {https://arxiv.org/abs/2004.10617}
-}
-
-
-@misc{cocomazzi2024ghost,
-  title        = {Ghost in the Block: Ethereum Consensus Vulnerability},
-  author       = {Giuseppe Cocomazzi},
-  howpublished = {Asymmetric Research (blog post)},
-  year         = {2024},
-  url          = {https://blog.asymmetric.re/ghost-in-the-block-ethereum-consensus-vulnerability/},
-  note         = {Accessed 2025-12-12}
-}
-
-@inproceedings{cai2025vest,
-  title        = {Vest: Verified, Secure, High-Performance Parsing and Serialization for Rust},
-  author       = {Cai, Yi and Singh, Pratap and Lin, Zhengyao and Bosamiya, Jay and Gancher, Joshua and Surbatovich, Milijana and Parno, Bryan},
-  booktitle    = {34th {USENIX} Security Symposium ({USENIX} Security 25)},
-  year         = {2025},
-  url          = {https://www.usenix.org/conference/usenixsecurity25/presentation/cai-yi}
-}
-
-@misc{prysm,
-  title        = {Prysm Documentation | Prysm},
-  howpublished = {Prysm documentation},
-  url          = {https://prysm.offchainlabs.com/docs/},
-  year         = {2025},
-  note         = {Accessed 2025-12-13}
-}
-
-@misc{lighthouse,
-  title        = {Introduction - Lighthouse Book},
-  howpublished = {Sigma Prime documentation},
-  url          = {https://lighthouse-book.sigmaprime.io/},
-  year         = {2025},
-  note         = {Accessed 2025-12-13}
-}
-
-@misc{teku,
-  title        = {Welcome | Teku documentation},
-  howpublished = {Teku documentation},
-  url          = {https://docs.teku.consensys.net/},
-  year         = {2025},
-  note         = {Accessed 2025-12-13}
-}
-
-@misc{nimbus,
-  title        = {The Nimbus Guide - The Nimbus Guide},
-  howpublished = {Nimbus documentation},
-  url          = {https://nimbus.guide/},
-  year         = {2025},
-  note         = {Accessed 2025-12-13}
-}
-
-@misc{lodestar,
-  title        = {Lodestar: An {Ethereum} Consensus Client},
-  howpublished = {ChainSafe documentation},
-  url          = {https://lodestar.chainsafe.io/},
-  year         = {2025},
-  note         = {Accessed 2025-12-13}
-}
-
-@misc{chainsafe_ssz,
-  title        = {Simple Serialize | Chainsafe Systems},
-  howpublished = {ChainSafe documentation},
-  url          = {https://chainsafe.github.io/ssz/},
-  year         = {2025},
-  note         = {Accessed 2025-12-13}
-}
-
-@misc{fastssz,
-  title        = {ssz package - github.com/ferranbt/fastssz - Go Packages},
-  howpublished = {pkg.go.dev},
-  url          = {https://pkg.go.dev/github.com/ferranbt/fastssz},
-  year         = {2025},
-  note         = {Accessed 2025-12-13}
-}
-
-@misc{pyssz,
-  title        = {ssz: Python implementation of the Simple Serialization encoding and decoding},
-  howpublished = {Python Package Index (PyPI)},
-  url          = {https://pypi.org/project/ssz/},
-  year         = {2025},
-  note         = {Accessed 2025-12-13}
-}
-
-@misc{dynamic_ssz,
-  title        = {dynamic-ssz: Dynamic {SSZ} Serializer},
-  howpublished = {GitHub repository},
-  url          = {https://github.com/pk910/dynamic-ssz},
-  year         = {2025},
-  note         = {Accessed 2025-12-13}
-}
-
-@misc{remerkleable,
-  title        = {Typed mutable SSZ views over cached and immutable binary merkle trees},
-  howpublished = {Python Package Index (PyPI)},
-  url          = {https://pypi.org/project/remerkleable/},
-  year         = {2025},
-  note         = {Accessed 2025-12-13}
-}
-
-@misc{ethereum_ssz,
-  title        = {ssz - Rust},
-  howpublished = {docs.rs},
-  url          = {https://docs.rs/ethereum_ssz},
-  year         = {2025},
-  note         = {Accessed 2025-12-13}
-}
-
-@misc{libfuzzer,
-  title        = {libFuzzer: A Library for Coverage-Guided Fuzz Testing},
-  howpublished = {LLVM documentation},
-  url          = {https://llvm.org/docs/LibFuzzer.html},
-  year         = {2025},
-  note         = {Accessed 2025-12-13}
-}
-
-@misc{aflplusplus,
-  title        = {The {AFL}++ fuzzing framework},
-  howpublished = {Project website},
-  url          = {https://aflplus.plus/},
-  year         = {2025},
-  note         = {Accessed 2025-12-13}
-}
-
-@misc{geth_rlp,
-  title        = {rlp package - github.com/ethereum/go-ethereum/rlp - Go Packages},
-  howpublished = {pkg.go.dev},
-  url          = {https://pkg.go.dev/github.com/ethereum/go-ethereum/rlp},
-  note         = {Accessed 2025-12-13},
-  year         = {2025}
-}
-
-@article{kullback1951information,
-  title        = {On Information and Sufficiency},
-  author       = {Kullback, Solomon and Leibler, Richard A.},
-  journal      = {The Annals of Mathematical Statistics},
-  volume       = {22},
-  number       = {1},
-  pages        = {79--86},
-  year         = {1951},
-  doi          = {10.1214/aoms/1177729694}
-}
-
-@book{sutton2018reinforcement,
-  title        = {Reinforcement Learning: An Introduction},
-  author       = {Sutton, Richard S. and Barto, Andrew G.},
-  edition      = {2},
-  publisher    = {The MIT Press},
+@misc{decker2018eltoo,
+  title        = {eltoo: A Simple Layer2 Protocol for Bitcoin},
+  author       = {Decker, Christian and Russell, Rusty and Osuntokun, Olaoluwa},
+  howpublished = {White paper},
   year         = {2018},
-  url          = {http://incompleteideas.net/book/the-book-2nd.html}
+  url          = {https://blockstream.com/eltoo.pdf}
 }
 
-@inproceedings{vaswani2017attention,
-  title        = {Attention Is All You Need},
-  author       = {Vaswani, Ashish and Shazeer, Noam and Parmar, Niki and Uszkoreit, Jakob and Jones, Llion and Gomez, Aidan N. and Kaiser, Lukasz and Polosukhin, Illia},
-  booktitle    = {Advances in Neural Information Processing Systems (NeurIPS)},
-  year         = {2017},
-  url          = {https://arxiv.org/abs/1706.03762}
+% ── Virtual channels / channel factories ──
+
+@inproceedings{dziembowski2018virtual,
+  title     = {General State Channel Networks},
+  author    = {Dziembowski, Stefan and Faust, Sebastian and Host{\'a}kov{\'a}, Kristina},
+  booktitle = {Proceedings of the 2018 ACM SIGSAC Conference on Computer and Communications Security (CCS)},
+  pages     = {949--966},
+  year      = {2018},
+  publisher = {ACM},
+  doi       = {10.1145/3243734.3243856}
 }
 
-@article{schulman2015trpo,
-  title        = {Trust Region Policy Optimization},
-  author       = {Schulman, John and Levine, Sergey and Moritz, Philipp and Jordan, Michael I. and Abbeel, Pieter},
-  journal      = {arXiv preprint arXiv:1502.05477},
-  year         = {2015},
-  url          = {https://arxiv.org/abs/1502.05477}
+@inproceedings{burchert2018scalable,
+  title     = {Scalable Funding of Bitcoin Micropayment Channel Networks},
+  author    = {Burchert, Conrad and Decker, Christian and Wattenhofer, Roger},
+  booktitle = {Royal Society Open Science},
+  volume    = {5},
+  number    = {8},
+  year      = {2018},
+  doi       = {10.1098/rsos.180089}
 }
 
-@inproceedings{weinberger2009featurehashing,
-  title        = {Feature Hashing for Large Scale Multitask Learning},
-  author       = {Weinberger, Kilian and Dasgupta, Anirban and Langford, John and Smola, Alex and Attenberg, Josh},
-  booktitle    = {Proceedings of the 26th International Conference on Machine Learning (ICML)},
-  year         = {2009},
-  url          = {https://arxiv.org/abs/0902.2206}
+% ── Threshold signatures ──
+
+@inproceedings{komlo2021frost,
+  title     = {{FROST}: Flexible Round-Optimized Schnorr Threshold Signatures},
+  author    = {Komlo, Chelsea and Goldberg, Ian},
+  booktitle = {Selected Areas in Cryptography (SAC)},
+  series    = {LNCS},
+  volume    = {12804},
+  pages     = {34--65},
+  year      = {2021},
+  publisher = {Springer},
+  doi       = {10.1007/978-3-030-81652-0_2}
 }
 
-@inproceedings{li2021mbt,
-  title        = {Model-based testing of networked applications},
-  author       = {Li, Yishuai and Pierce, Benjamin C. and Zdancewic, Steve},
-  booktitle    = {{ISSTA} '21: 30th {ACM} {SIGSOFT} International Symposium on Software Testing and Analysis},
+@misc{ruffing2022roast,
+  title        = {{ROAST}: Robust Asynchronous Schnorr Threshold Signatures},
+  author       = {Ruffing, Tim and Ronge, Viktoria and Jin, Elliott and Schneider-Bensch, Jonas and Schr{\"o}der, Dominique},
+  howpublished = {Cryptology ePrint Archive, Report 2022/550},
+  year         = {2022},
+  url          = {https://eprint.iacr.org/2022/550}
+}
+
+@inproceedings{lindell2017fast,
+  title     = {Fast Secure Two-Party {ECDSA} Signing},
+  author    = {Lindell, Yehuda},
+  booktitle = {Advances in Cryptology --- {CRYPTO} 2017},
+  series    = {LNCS},
+  volume    = {10402},
+  pages     = {613--644},
+  year      = {2017},
+  publisher = {Springer},
+  doi       = {10.1007/978-3-319-63715-0_21}
+}
+
+% ── Verifiable encryption / fair exchange ──
+
+@inproceedings{asokan1998optimistic,
+  title     = {Optimistic Fair Exchange of Digital Signatures},
+  author    = {Asokan, N. and Shoup, Victor and Waidner, Michael},
+  booktitle = {Advances in Cryptology --- {EUROCRYPT} '98},
+  series    = {LNCS},
+  volume    = {1403},
+  pages     = {591--606},
+  year      = {1998},
+  publisher = {Springer},
+  doi       = {10.1007/BFb0054156}
+}
+
+% ── VSS ──
+
+@inproceedings{feldman1987practical,
+  title     = {A Practical Scheme for Non-interactive Verifiable Secret Sharing},
+  author    = {Feldman, Paul},
+  booktitle = {28th Annual Symposium on Foundations of Computer Science (FOCS)},
+  pages     = {427--438},
+  year      = {1987},
+  doi       = {10.1109/SFCS.1987.4}
+}
+
+@inproceedings{pedersen1991non,
+  title     = {Non-Interactive and Information-Theoretic Secure Verifiable Secret Sharing},
+  author    = {Pedersen, Torben Pryds},
+  booktitle = {Advances in Cryptology --- {CRYPTO} '91},
+  series    = {LNCS},
+  volume    = {576},
+  pages     = {129--140},
+  year      = {1991},
+  publisher = {Springer},
+  doi       = {10.1007/3-540-46766-1_9}
+}
+
+% ── SNARKs ──
+
+@inproceedings{groth16,
+  title     = {On the Size of Pairing-Based Non-interactive Arguments},
+  author    = {Groth, Jens},
+  booktitle = {Advances in Cryptology --- {EUROCRYPT} 2016},
+  series    = {LNCS},
+  volume    = {9666},
+  pages     = {305--326},
+  year      = {2016},
+  publisher = {Springer},
+  doi       = {10.1007/978-3-662-49896-5_11}
+}
+
+@misc{gabizon2019plonk,
+  title        = {{PlonK}: Permutations over Lagrange-bases for Oecumenical Noninteractive arguments of Knowledge},
+  author       = {Gabizon, Ariel and Williamson, Zachary J. and Ciobotaru, Oana},
+  howpublished = {Cryptology ePrint Archive, Report 2019/953},
+  year         = {2019},
+  url          = {https://eprint.iacr.org/2019/953}
+}
+
+@misc{sp1,
+  title        = {{SP1}: A zkVM for Developers},
+  author       = {{Succinct Labs}},
+  howpublished = {Project documentation},
+  year         = {2024},
+  url          = {https://docs.succinct.xyz/}
+}
+
+@misc{risczero,
+  title        = {{RISC} Zero: General-Purpose Verifiable Computing},
+  author       = {{RISC Zero}},
+  howpublished = {Project documentation},
+  year         = {2024},
+  url          = {https://www.risczero.com/}
+}
+
+@misc{boneh2020recursive,
+  title        = {Recursive Proof Composition from Accumulation Schemes},
+  author       = {Boneh, Dan and Drake, Justin and Fisch, Ben and Gabizon, Ariel},
+  howpublished = {Cryptology ePrint Archive, Report 2020/499},
+  year         = {2020},
+  url          = {https://eprint.iacr.org/2020/499}
+}
+
+% ── Ethereum L2 (for related work) ──
+
+@misc{arbitrum,
+  title        = {Arbitrum: Scalable, Private Smart Contracts},
+  author       = {{Offchain Labs}},
+  howpublished = {Project documentation},
   year         = {2021},
-  doi          = {10.1145/3460319.3464798},
-  url          = {https://doi.org/10.1145/3460319.3464798}
+  url          = {https://developer.arbitrum.io/}
 }
 
-@misc{protobuf,
-  title        = {Protocol Buffers},
+@misc{zkSync,
+  title        = {zkSync: Scaling Freedom for All},
+  author       = {{Matter Labs}},
   howpublished = {Project documentation},
-  url          = {https://protobuf.dev/},
-  year         = {2025},
-  note         = {Accessed 2025-12-13}
-}
-
-@techreport{rfc8259,
-  author      = {Bray, Tim},
-  title       = {The {JavaScript} Object Notation ({JSON}) Data Interchange Format},
-  institution = {RFC Editor},
-  type        = {RFC},
-  number      = {8259},
-  year        = {2017},
-  url         = {https://www.rfc-editor.org/rfc/rfc8259},
-  note        = {Accessed 2025-12-13}
-}
-
-@misc{rlp,
-  title        = {Recursive-length prefix ({RLP}) serialization | ethereum.org},
-  howpublished = {ethereum.org developer documentation},
-  url          = {https://ethereum.org/developers/docs/data-structures-and-encoding/rlp/},
-  year         = {2025},
-  note         = {Accessed 2025-12-13}
-}
-
-@misc{geth,
-  title        = {Home | go-ethereum},
-  howpublished = {Project website},
-  url          = {https://geth.ethereum.org/},
-  year         = {2025},
-  note         = {Accessed 2025-12-13}
-}
-
-@misc{geth_disclosure,
-  title        = {Vulnerability disclosure | go-ethereum},
-  howpublished = {Project documentation},
-  url          = {https://geth.ethereum.org/docs/developers/geth-developer/disclosures},
-  year         = {2025},
-  note         = {Accessed 2025-12-13}
-}
-
-@misc{polygon_reorg_bor,
-  title        = {Frequent small reorgs caused by heimdall <-> bor interaction},
-  howpublished = {GitHub issue, 0xPolygon/bor},
-  url          = {https://github.com/0xPolygon/bor/issues/1118},
   year         = {2023},
-  note         = {Accessed 2025-12-13}
-}
-
-@misc{eth_staking,
-  title        = {Beaconcha.in API: epoch latest},
-  howpublished = {Beaconcha.in API},
-  url          = {https://beaconcha.in/api/v1/epoch/latest},
-  year         = {2025},
-  note         = {Accessed 2025-12-13}
-}
-
-@misc{polygon_tvl,
-  title        = {DefiLlama API: Polygon TVL charts},
-  howpublished = {DefiLlama API},
-  url          = {https://api.llama.fi/charts/Polygon},
-  year         = {2025},
-  note         = {Accessed 2026-01-14}
+  url          = {https://zksync.io/}
 }
