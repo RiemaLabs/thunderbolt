@@ -1,4 +1,3 @@
-use bitcoin::key::rand::{self, thread_rng};
 use bitcoin::{Network, XOnlyPublicKey};
 use bitcoin_utils::account::AccountInfo;
 use lazy_static::lazy_static;

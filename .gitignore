@@ -109,3 +109,6 @@ flake.lock
 
 # setup params.
 *.srs
+.omx/
+autoresearch-results.tsv
+benchmarks/sp1-transfer-benchmark/target/

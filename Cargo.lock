@@ -2761,6 +2761,8 @@ dependencies = [
  "lazy_static",
  "musig2",
  "secp",
+ "serde",
+ "serde_json",
  "thunderbolt-core",
  "tokio",
 ]

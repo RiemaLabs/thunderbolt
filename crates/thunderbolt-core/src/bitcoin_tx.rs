@@ -1,8 +1,10 @@
 use bitcoin::bip32::Xpriv;
 use bitcoin::key::constants::SCHNORR_SIGNATURE_SIZE;
+use bitcoin::key::Keypair;
 use bitcoin::key::TweakedPublicKey;
 use bitcoin::psbt::PsbtSighashType;
-use bitcoin::secp256k1::schnorr::Signature;
+use bitcoin::secp256k1::{schnorr::Signature, Message};
+use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
 use bitcoin::taproot::{ControlBlock, TaprootSpendInfo};
 use bitcoin::Txid;
 use bitcoin::{
@@ -83,7 +85,7 @@ impl TxContext {
         tx_ctx
     }
 
-    fn new(x_pubkey_user: XOnlyPublicKey, x_pubkey_comm: XOnlyPublicKey, network: Network) -> Self {
+    pub fn new(x_pubkey_user: XOnlyPublicKey, x_pubkey_comm: XOnlyPublicKey, network: Network) -> Self {
         let (locked_utxo_taproot_spend_info, locked_utxo_script, locked_utxo_control_block) =
             gen_prepare_taproot(&x_pubkey_user, &x_pubkey_comm);
 
@@ -373,6 +375,28 @@ impl TxContext {
         psbt.inputs[0].witness_utxo = Some(input_txout0);
 
         Ok(psbt)
+    }
+
+    pub fn sign_redeem_script_path(
+        &self,
+        fixed_amount: u64,
+        psbt: &Psbt,
+        secp: &Secp256k1<All>,
+        keypair: &Keypair,
+    ) -> Result<Signature, ConstructionError> {
+        let prevout = TxOut {
+            value: Amount::from_sat(fixed_amount),
+            script_pubkey: self.multi_sig_address.script_pubkey(),
+        };
+        let leaf_hash = self.locked_utxo_script.tapscript_leaf_hash();
+        let sighash = SighashCache::new(&psbt.unsigned_tx).taproot_script_spend_signature_hash(
+            0,
+            &Prevouts::All(&[prevout]),
+            leaf_hash,
+            TapSighashType::All,
+        )?;
+        let message = Message::from(sighash);
+        Ok(secp.sign_schnorr(&message, keypair))
     }
 
     pub fn aggregate_redeem(

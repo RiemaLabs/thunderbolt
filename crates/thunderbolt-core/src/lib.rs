@@ -7,5 +7,6 @@ pub mod traits;
 pub mod tweak;
 pub mod user;
 pub mod utils;
+pub mod zkp;
 
 pub use errors::*;
