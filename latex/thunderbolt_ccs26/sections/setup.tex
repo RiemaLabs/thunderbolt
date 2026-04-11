@@ -1,61 +1,46 @@
 \usepackage{xspace}
 \usepackage{url}
 \usepackage{hyperref}
-\usepackage{enumitem} % For better list formatting
-\usepackage{mdframed}
+\usepackage{enumitem}
 \usepackage{booktabs}
 \usepackage{multirow}
 \usepackage{algorithm}
 \usepackage{graphicx}
-
 \usepackage[noend]{algpseudocode}
-\usepackage{mathtools} % Added for better math layouts
+\usepackage{mathtools}
+\usepackage{amsmath,amssymb,amsthm}
 
 \setlist[itemize]{leftmargin=2em}
 \setlist[enumerate]{leftmargin=2em}
 
-\usepackage{tikz}
-\usetikzlibrary{positioning}
-\usepackage{pgfplots}
+%% Theorem-like environments
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{remark}[theorem]{Remark}
 
-% Math operators
-\DeclareMathOperator*{\softmax}{softmax} % Use * to place subscript under
-\DeclareMathOperator{\KL}{D_{KL}} % Standard KL notation
-\DeclareMathOperator*{\argmax}{arg\,max}
+%% Author comment commands
+\usepackage{xcolor}
+\newcommand{\DM}[1]{{\color{blue} DM: #1}}
+\newcommand{\HB}[1]{{\color{orange} HB: #1}}
 
-\usepackage{colortbl}
-\definecolor{RoyalBlue}{RGB}{65, 105, 225}
-\definecolor{Orange}{RGB}{255, 165, 0}
-\definecolor{Teal}{rgb}{0.0, 0.5, 0.5}
-\definecolor{bluegray}{rgb}{0.4, 0.6, 0.8}
-\definecolor{antiquebrass}{rgb}{0.8, 0.58, 0.46}
-\definecolor{amethyst}{rgb}{0.6, 0.4, 0.8}
-\definecolor{darkpastelgreen}{rgb}{0.01, 0.75, 0.24}
+%% Protocol/system name
+\newcommand{\thunderbolt}{\textsc{Thunderbolt}\xspace}
 
-\renewcommand{\tablename}{Table}
+%% Crypto notation
+\newcommand{\GG}{\mathbb{G}}              % EC group
+\newcommand{\ZZ}{\mathbb{Z}}              % integers
+\newcommand{\Enc}{\mathrm{Enc}}           % Paillier encryption
+\newcommand{\Dec}{\mathrm{Dec}}           % Paillier decryption
+\newcommand{\Hash}{\mathsf{Hash}}         % hash function
 
+%% Autoref names
 \def\sectionautorefname{Section}
 \def\subsectionautorefname{Section}
 \def\algorithmautorefname{Algorithm}
 \def\figureautorefname{Figure}
 \def\tableautorefname{Table}
 \def\equationautorefname{Equation}
-
-\newcommand{\tool}{{\textsc{Bolt}}\xspace}
-\newcommand{\yanju}[1]{{{\color{blue}{{(Yanju: #1)\xspace}}}}}
-\newcommand{\yu}[1]{{{\color{red}{{(YU: #1)\xspace}}}}}
-\newcommand{\tbd}[1]{{{\color{red}{{{\bf #1}\xspace}}}}}
-
-\definecolor{hlcolor}{HTML}{156082}
-\newcommand{\hl}[1]{{{\color{hlcolor}{#1\xspace}}}}
-
-\newcommand{\icode}[1]{{\texttt{\small #1\xspace}}}
-\newcommand{\imidrule}{\specialrule{0pt}{0.2em}{0.2em}}
-
-\newcommand{\reducedstrut}{\vrule width 0pt height .1\ht\strutbox depth .1\dp\strutbox\relax}
-\newcommand{\irule}[1]{%
-  \begingroup
-  \setlength{\fboxsep}{0pt}%  
-  \colorbox{RoyalBlue!15}{\reducedstrut(#1)\/}%
-  \endgroup
-}
+\def\definitionautorefname{Definition}
+\def\lemmaautorefname{Lemma}
+\def\theoremautorefname{Theorem}
