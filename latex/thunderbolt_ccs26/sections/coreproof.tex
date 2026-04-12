@@ -1,6 +1,6 @@
 \section{Cryptographic Primitive}\label{sec:coreproof}
 
-This section develops the two NIZK proofs that certify a single \thunderbolt transfer step, instantiating the VEDL-based construction motivated in \autoref{sec:motivation}. Throughout, let $\GG$ be the secp256k1 group of prime order $q$ with base point $H$. Let $(N_B, g_B)$ and $(N_C, g_C)$ be Paillier public keys for Bob and the Committee, respectively. All Paillier arithmetic is modulo $N_B^2$ or $N_C^2$ as appropriate. All elliptic-curve scalar equalities are taken modulo $q$.
+This section develops the two NIZK proofs that certify a single \thunderbolt transfer step, instantiating the VEDL-based construction motivated in \autoref{sec:motivation}. Throughout, let $\GG$ be the secp256k1 group of prime order $q$ with base point $H$. Let $(N_B, g_B)$ and $(N_C, g_C)$ be Paillier public keys for Bob and the Committee, respectively. All Paillier arithmetic is modulo $N_B^2$ or $N_C^2$ as appropriate. All elliptic-curve scalar equalities are taken modulo $q$. Let $\kappa$ denote the statistical security parameter (concretely, $\kappa = 128$); we set $\tilde{q} = q^2 \cdot 2^{\kappa}$ as the masking range for Sigma-protocol commitment scalars, which ensures statistical zero-knowledge with distance at most $2^{-\kappa}$.
 
 \subsection{Transfer Model}\label{sec:transfer-model}
 
@@ -60,7 +60,7 @@ $$
 
 \paragraph{Why this proof is needed.} Without it, a malicious Bob could commit different refresh values in $D_s$, $\mathrm{ct}_B$, and $\mathrm{ct}_C$, breaking the fixed-key invariant.
 
-\paragraph{Sigma protocol.} The prover (Bob) samples a commitment scalar $\alpha$ and commitment randomnesses $\beta_B, \beta_C$, and computes:
+\paragraph{Sigma protocol.} The prover (Bob) samples a commitment scalar $\alpha \gets \ZZ_{\tilde{q}}$ and commitment randomnesses $\beta_B \gets \ZZ_{N_B}^*$, $\beta_C \gets \ZZ_{N_C}^*$, and computes:
 \begin{align*}
 A_D &= \alpha\,H, \\
 A_B &= g_B^{\alpha}\, \beta_B^{N_B} \bmod N_B^2, \\
@@ -112,11 +112,11 @@ If the prover is honest, then $z = \alpha + c\,r_s$, $\tau_B = \beta_B \cdot \rh
 Given two accepting transcripts $(A_D, A_B, A_C,\; c, z, \tau_B, \tau_C)$ and $(A_D, A_B, A_C,\; c', z', \tau_B', \tau_C')$ with $c \neq c'$, define $\Delta c = c - c'$ and $\Delta z = z - z'$. From the EC equation: $\Delta z \cdot H = \Delta c \cdot D_s$, so $D_s = (\Delta z / \Delta c)\,H$, yielding $r_s^* = \Delta z / \Delta c \bmod q$. From the Bob--Paillier equation: $g_B^{\Delta z} \cdot (\tau_B / \tau_B')^{N_B} = \mathrm{ct}_B^{\Delta c}$, from which we extract $\rho_B^* = (\tau_B / \tau_B')^{(\Delta c)^{-1}} \bmod N_B$ satisfying $\mathrm{ct}_B = g_B^{r_s^*} \cdot (\rho_B^*)^{N_B}$. The Committee--Paillier extraction is identical, yielding $\rho_C^*$. Because a single $\Delta z$ drives all three extractions, the extracted plaintext $r_s^*$ is the same in all three relations, establishing $(D_s, \mathrm{ct}_B, \mathrm{ct}_C;\; r_s^*, \rho_B^*, \rho_C^*) \in \mathcal{R}_{\mathrm{inv}}$.
 
 \emph{Honest-verifier zero-knowledge.}
-The simulator $\mathcal{S}$, given the statement $(D_s, \mathrm{ct}_B, \mathrm{ct}_C)$, samples $z \gets \ZZ_q$, $\tau_B \gets \ZZ_{N_B}^*$, $\tau_C \gets \ZZ_{N_C}^*$, programs the random oracle to return $c$, and sets:
+The simulator $\mathcal{S}$, given the statement $(D_s, \mathrm{ct}_B, \mathrm{ct}_C)$, samples $z \gets \ZZ_{\tilde{q}}$, $\tau_B \gets \ZZ_{N_B}^*$, $\tau_C \gets \ZZ_{N_C}^*$, programs the random oracle to return $c$, and sets:
 $A_D = z\,H - c\,D_s$,\;
 $A_B = g_B^{z}\,\tau_B^{N_B} \cdot \mathrm{ct}_B^{-c} \bmod N_B^2$,\;
 $A_C = g_C^{z}\,\tau_C^{N_C} \cdot \mathrm{ct}_C^{-c} \bmod N_C^2$.
-The simulated transcript $(A_D, A_B, A_C, c, z, \tau_B, \tau_C)$ is identically distributed to an honest transcript, since $z$ is uniform and the commitments are uniquely determined.
+The simulated transcript $(A_D, A_B, A_C, c, z, \tau_B, \tau_C)$ is statistically indistinguishable from an honest transcript (statistical distance at most $2^{-\kappa}$), since the masking range $\tilde{q}$ absorbs the shift $c \cdot r_s$.
 
 Soundness in the non-interactive (Fiat--Shamir compiled) setting follows from the forking lemma~\cite{pointcheval1996security} applied in the random-oracle model.
 \end{proof}
@@ -141,7 +141,7 @@ $$
 
 \paragraph{Why this proof is needed.} Without it, Alice could inject an arbitrary $x'_s \neq x_s$ into $T_{s+1}$, leaving Bob with a ciphertext inconsistent with the public anchor.
 
-\paragraph{Sigma protocol.} The prover (Alice) samples a commitment scalar $\alpha$ and a Paillier commitment randomness $\beta$, and computes:
+\paragraph{Sigma protocol.} The prover (Alice) samples a commitment scalar $\alpha \gets \ZZ_{\tilde{q}}$ and a Paillier commitment randomness $\beta \gets \ZZ_{N_B}^*$, and computes:
 \begin{align*}
 A_X &= \alpha\,H, \\
 A_T &= g_B^{\alpha}\, \beta^{N_B} \bmod N_B^2.
@@ -193,7 +193,7 @@ With $z = \alpha + c\,x_s$ and $\tau = \beta \cdot \eta_s^c$: $z\,H = \alpha\,H 
 Given two accepting transcripts with challenges $c \neq c'$, define $\Delta c = c - c'$, $\Delta z = z - z'$. From the EC equation: $x_s^* = \Delta z / \Delta c \bmod q$ satisfying $X_s = x_s^*\,H$. From the Paillier equation: $\eta_s^* = (\tau / \tau')^{(\Delta c)^{-1}} \bmod N_B$ satisfying $U = g_B^{x_s^*}\,(\eta_s^*)^{N_B} \bmod N_B^2$. The shared $\Delta z$ ensures the same $x_s^*$ opens both relations.
 
 \emph{Honest-verifier zero-knowledge.}
-The simulator samples $z \gets \ZZ_q$, $\tau \gets \ZZ_{N_B}^*$, programs $c$ via the random oracle, and sets $A_X = z\,H - c\,X_s$ and $A_T = g_B^{z}\,\tau^{N_B} \cdot U^{-c} \bmod N_B^2$. The resulting transcript is identically distributed to an honest one.
+The simulator samples $z \gets \ZZ_{\tilde{q}}$, $\tau \gets \ZZ_{N_B}^*$, programs $c$ via the random oracle, and sets $A_X = z\,H - c\,X_s$ and $A_T = g_B^{z}\,\tau^{N_B} \cdot U^{-c} \bmod N_B^2$. The resulting transcript is statistically indistinguishable from an honest one (statistical distance at most $2^{-\kappa}$).
 
 As with the Invoice proof, non-interactive soundness follows from the forking lemma~\cite{pointcheval1996security}.
 \end{proof}

@@ -26,12 +26,12 @@ A \emph{Sigma protocol}~\cite{cramer1997modular, damgard2002sigma} is a three-mo
 
 \subsection{Verifiable Encryption of Discrete Logarithms}\label{sec:bg-vedl}
 
-Camenisch and Shoup~\cite{camenisch2003verifiable} give an efficient protocol for \emph{verifiable encryption of discrete logarithms}: given a discrete-log pair $(m, M = mH)$ and a Paillier ciphertext $c = \Enc_{pk}(m)$, the prover produces a Sigma-protocol proof that $c$ encrypts the same integer whose discrete log is $M$. The proof relation is
+Camenisch and Shoup~\cite{camenisch2003verifiable} give an efficient protocol for \emph{verifiable encryption of discrete logarithms}: given a discrete-log pair $(m, M = mH)$ and a Paillier ciphertext $\mathit{ct} = \Enc_{pk}(m)$, the prover produces a Sigma-protocol proof that $\mathit{ct}$ encrypts the same integer whose discrete log is $M$. The proof relation is
 $$
-\mathcal{R}_{\mathrm{VE}} = \{(M, c;\; m, \rho) : M = mH \;\land\; c = g^m \rho^N \bmod N^2\}.
+\mathcal{R}_{\mathrm{VE}} = \{(M, \mathit{ct};\; m, \rho) : M = mH \;\land\; \mathit{ct} = g^m \rho^N \bmod N^2\}.
 $$
 
-The key technique is a \emph{shared response}: the Sigma-protocol response $z$ simultaneously satisfies both the elliptic-curve verification equation ($zH \stackrel{?}{=} A_{\mathrm{EC}} + cM$) and the Paillier verification equation ($g^z\tau^N \stackrel{?}{=} A_{\mathrm{Pai}} \cdot c^c$), where the same $z$ forces the same underlying integer in both relations. This ``shared-$z$'' construction is the technical core of our proofs.
+The key technique is a \emph{shared response}: the Sigma-protocol response $z$ simultaneously satisfies both the elliptic-curve verification equation ($zH \stackrel{?}{=} A_{\mathrm{EC}} + cM$) and the Paillier verification equation ($g^z\tau^N \stackrel{?}{=} A_{\mathrm{Pai}} \cdot \mathit{ct}^{\,c}$), where $c$ is the Fiat--Shamir challenge and the same $z$ forces the same underlying integer in both relations. This ``shared-$z$'' construction is the technical core of our proofs.
 
 \subsection{Verifiable Encrypted Secret Sharing (VESS)}\label{sec:bg-vess}
 
