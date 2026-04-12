@@ -1,8 +1,67 @@
 \section{Evaluation}\label{sec:eval}
 
-We evaluate \thunderbolt along two orthogonal axes. First, we compare \thunderbolt as an end-to-end payment-channel system against the Lightning Network (\autoref{sec:eval-lightning}). Second, we compare our Core ZKP construction against general-purpose SNARK backends applied to the same statements (\autoref{sec:eval-snark}).
+We evaluate \thunderbolt along three axes: (1) per-stage microbenchmarks of a single off-chain transfer (\autoref{sec:eval-micro}), (2) a system-level comparison against the Lightning Network (\autoref{sec:eval-lightning}), and (3) a comparison of our Sigma-protocol construction against general-purpose SNARK backends (\autoref{sec:eval-snark}).
 
-\subsection{System-Level Comparison: \thunderbolt vs. Lightning}\label{sec:eval-lightning}
+\paragraph{Experimental setup.}
+All benchmarks were run on a single machine with an Apple~M4 processor (10-core, 4 performance + 6 efficiency), 16\,GB unified memory, macOS~15.3, compiled with \texttt{rustc}~1.87-nightly in release mode with LTO enabled. The \thunderbolt implementation uses the \texttt{rust-paillier} crate for Paillier operations with a 3072-bit modulus ($|N| = 3072$, so all Paillier arithmetic operates over 6144-bit integers in $\ZZ_{N^2}$) and the \texttt{k256} crate for secp256k1 elliptic-curve arithmetic. Each experiment reports the average, minimum, and maximum over 100 iterations, with a 3-iteration warmup discarded before measurement.
+
+\subsection{Per-Stage Microbenchmark}\label{sec:eval-micro}
+
+A single off-chain transfer executes nine stages in sequence: invoice setup, invoice prove, invoice verify, transfer setup, transfer prove, anchor verify, transfer verify, Bob decrypt, and committee update. \autoref{tab:stages} reports the measured wall-clock time for each stage.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+\textbf{Stage} & \textbf{Avg (ms)} & \textbf{Min (ms)} & \textbf{Max (ms)} \\
+\midrule
+Invoice setup       & 118.1 & 114.4 & 143.2 \\
+Invoice prove       & 305.3 & 294.5 & 351.3 \\
+Invoice verify      & 194.1 & 187.0 & 232.9 \\
+Transfer setup      &  63.3 &  60.9 &  68.1 \\
+Transfer prove      & 159.3 & 154.3 & 178.6 \\
+Anchor verify       &$<\!0.01$& $<\!0.01$ & $<\!0.01$ \\
+Transfer verify     & 109.0 & 105.5 & 117.5 \\
+Bob decrypt         &  30.2 &  28.6 &  34.0 \\
+Committee update    &  30.2 &  29.1 &  34.8 \\
+\midrule
+\textbf{Total (off-chain)} & \textbf{1009.6} & \textbf{978.6} & \textbf{1089.9} \\
+\bottomrule
+\end{tabular}
+\caption{Per-stage wall-clock time for a single \thunderbolt off-chain transfer (100 iterations, 3072-bit Paillier modulus, secp256k1).}
+\label{tab:stages}
+\end{table}
+
+\paragraph{Cost breakdown.} The total off-chain transfer completes in \textbf{$\approx\!1.01$\,s} on average. \autoref{tab:breakdown} groups the nine stages by their functional role: proving, verification, setup, and auxiliary operations.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\textbf{Category} & \textbf{Time (ms)} & \textbf{Share (\%)} \\
+\midrule
+ZKP proving (Invoice + Transfer) & 464.6 & 46.0 \\
+ZKP verification (Invoice + Transfer) & 303.1 & 30.0 \\
+Setup (Invoice + Transfer) & 181.4 & 18.0 \\
+Auxiliary (anchor, decrypt, committee) &  60.4 & 6.0 \\
+\midrule
+\textbf{Total} & \textbf{1009.6} & \textbf{100} \\
+\bottomrule
+\end{tabular}
+\caption{Cost breakdown by functional category.}
+\label{tab:breakdown}
+\end{table}
+
+The two ZKP proving steps dominate at 46\% of the total: Invoice Prove (305\,ms) accounts for three Paillier exponentiations in $\ZZ_{N^2}$ (two commitment exponentiations plus one EC scalar multiplication), while Transfer Prove (159\,ms) requires two (one Paillier, one EC). Verification is the second-largest cost at 30\%, with a similar structure but operating on the verification equations rather than generating commitments. Setup operations (key derivation, Paillier encryption of the refresh value and holder secret) contribute 18\%. The remaining 6\% consists of the anchor-point verification ($<\!10\,\mu$s, a single EC point comparison), Bob's Paillier decryption (30\,ms), and the committee's share update (30\,ms, also a single Paillier decryption).
+
+\paragraph{Bottleneck analysis.} The dominant cost is modular exponentiation in $\ZZ_{N^2}$ ($|N| = 3072$, so 6144-bit integers). EC operations (256-bit secp256k1) are roughly $10^3\times$ faster and contribute negligibly. This Paillier-heavy cost profile is why circuit-based backends, which must express these exponentiations as field-arithmetic constraints, pay orders-of-magnitude overhead.
+
+\paragraph{Proof size.} Each Invoice Consistency Proof $\pi_{\mathrm{inv}}$ consists of three commitments ($A_D \in \GG$, $A_B, A_C \in \ZZ_{N^2}$), one shared response $z \in \ZZ_q$, and two randomness responses $\tau_B, \tau_C \in \ZZ_N$, totaling $\approx\!2.3$\,KB at $|N| = 3072$. Each Transfer Consistency Proof $\pi_{\mathrm{xfer}}$ totals $\approx\!1.5$\,KB. The combined proof payload per transfer step is therefore $\approx\!3.8$\,KB, small enough for a single TCP segment. A channel with $m$ transfers accumulates $\approx\!3.8m$\,KB of off-chain state ($\approx\!3.7$\,MB at 1000 transfers).
+
+
+\subsection{System-Level Comparison: \thunderbolt vs.\ Lightning}\label{sec:eval-lightning}
 
 \autoref{tab:lightning} summarizes the structural differences between \thunderbolt and the Lightning Network along the dimensions that matter for real-world deployment.
 
@@ -13,70 +72,72 @@ We evaluate \thunderbolt along two orthogonal axes. First, we compare \thunderbo
 \toprule
 \textbf{Dimension} & \textbf{Lightning} & \textbf{\thunderbolt} \\
 \midrule
-Topology & Routed graph of channels & Per-UTXO holder chain \\
-Connectivity & Payee must be path-reachable & No path required \\
+Topology & Routed graph & Per-UTXO holder chain \\
+Connectivity & Path-reachable & No path required \\
 Routing & Onion-routed HTLCs & No routing \\
-Liquidity & Directional per channel & Entire UTXO moves \\
-Rebalancing & Required, costly & Not applicable \\
-Online assumption & Both endpoints online & Asynchronous \\
+Liquidity & Directional / channel & Entire UTXO moves \\
+Rebalancing & Required & Not applicable \\
+Online assumption & Both endpoints & Asynchronous \\
 On-chain / channel & 2 tx (open, close) & 2 tx (open, close) \\
 On-chain / transfer & 0 (amortized) & 0 (amortized) \\
-Holders per channel & 2 (fixed endpoints) & Unbounded chain \\
+Holders / channel & 2 (fixed endpoints) & Unbounded chain \\
 Watchtowers & Required for safety & Committee (always-on) \\
-Trust model & Trustless + WT & Committee or $(t,n)$ VESS \\
+Trust model & Trustless + WT & $(t,n)$ VESS \\
 \bottomrule
 \end{tabular}
 \caption{System-level comparison between Lightning and \thunderbolt.}
 \label{tab:lightning}
 \end{table}
 
-\paragraph{Connectivity and routing.} Lightning's most binding constraint is that every payment requires a path in the channel graph; a payee with no inbound liquidity is unreachable, and a payer behind a thin channel pays elevated fees or fails. \thunderbolt eliminates this constraint: a transfer from $\mathsf{H}_s$ to $\mathsf{H}_{s+1}$ requires only that $\mathsf{H}_{s+1}$ knows how to publish an invoice, not that there exist any pre-funded channel between them.
+\autoref{tab:lightning} summarizes the structural differences between \thunderbolt and the Lightning Network along the dimensions that matter for real-world deployment.
 
-\paragraph{Liquidity.} A Lightning channel's capacity is directional: funds pushed one way cannot flow back without rebalancing. In \thunderbolt, the entire UTXO transfers at once, so there is no notion of directional capacity and no rebalancing cost.
+\paragraph{Connectivity and routing.} Lightning's most binding constraint is that every payment requires a path in the channel graph; a payee with no inbound liquidity is unreachable. \thunderbolt eliminates this constraint entirely: a transfer from $\mathsf{H}_s$ to $\mathsf{H}_{s+1}$ requires only that $\mathsf{H}_{s+1}$ publishes an invoice.
 
-\paragraph{Asynchrony.} Lightning HTLCs require both sender and receiver to be online for the duration of the payment (modulo hold-invoices). \thunderbolt transfers require Alice and Bob to act, but never simultaneously: Bob posts his invoice once; Alice consumes it whenever she chooses. This is the property that makes \thunderbolt suitable for payroll batches, cold-wallet receipts, and low-power devices.
+\paragraph{Liquidity.} A Lightning channel's capacity is directional: funds pushed one way cannot flow back without rebalancing via on-chain or loop-out operations. In \thunderbolt, the entire UTXO transfers at once, so there is no directional capacity and no rebalancing cost.
 
-\paragraph{Trust model.} Lightning is trustless, modulo the watchtower requirement to punish old-state broadcasts. \thunderbolt relies on the Committee to maintain the committee share $y_s$. In the single-Committee instantiation, this is a strong assumption (the Committee must not collude with any holder to exfiltrate the full secret). In the threshold-committee instantiation via Simple VESS, the trust assumption becomes the standard $(t, n)$-threshold honesty assumption used by every modern threshold-signing deployment.
+\paragraph{Asynchrony.} Lightning HTLCs require both sender and receiver to be online for the duration of the payment. \thunderbolt transfers are asynchronous: Bob posts his invoice once; Alice consumes it whenever she chooses. This makes \thunderbolt suitable for payroll batches, cold-wallet receipts, and low-power devices that wake up only periodically.
 
-\paragraph{Number of on-chain transactions.} Both systems amortize on-chain cost over many off-chain operations. The difference is \emph{scope}: Lightning amortizes per \emph{pair} (each pair of frequently-transacting users needs its own channel), while \thunderbolt amortizes per \emph{UTXO} (the same lock can pass through an unbounded chain of holders). For a workload with $n$ distinct users and $m$ transfers, Lightning requires $\Theta(n)$ on-chain transactions in the worst case; \thunderbolt requires $O(1)$.
+\paragraph{Latency comparison.} Measured Lightning payment latencies vary widely by route length and network conditions. Using c-lightning probe-plugin data as reference: a 4-hop round-trip takes $\approx\!2.56$\,s, and the median payment completion time is $\approx\!13.1$\,s (including path-finding and retries). \thunderbolt completes a transfer in $\approx\!1.01$\,s, yielding \textbf{2.5$\times$}--\textbf{13$\times$} improvements. Crucially, \thunderbolt's latency is \emph{deterministic}---it depends on local Paillier computation, not network hops or failed routes.
+
+\paragraph{Trust and on-chain scope.} Lightning is trustless modulo watchtowers. \thunderbolt relies on the Committee; the threshold-committee instantiation (\autoref{sec:vess-committee}) reduces this to standard $(t,n)$-threshold honesty. Both systems amortize on-chain cost, but Lightning amortizes per \emph{channel pair} ($\Theta(n)$ on-chain operations for $n$ users) while \thunderbolt amortizes per \emph{UTXO} ($O(1)$).
 
 
-\subsection{Core ZKP vs.\ General-Purpose SNARKs}\label{sec:eval-snark}
+\subsection{Sigma Protocol vs.\ General-Purpose SNARKs}\label{sec:eval-snark}
 
-An alternative realization of the Invoice and Transfer relations would encode them as arithmetic circuits and feed them into a general-purpose SNARK backend (e.g., a zkVM such as Succinct's SP1~\cite{sp1}, RISC Zero~\cite{risczero}, or a circuit-based backend such as Groth16~\cite{groth16} or Plonk~\cite{gabizon2019plonk}). We argue and measure that this path is orders of magnitude more expensive than our direct Sigma-protocol instantiation.
+An alternative realization of the Invoice and Transfer relations would encode them as arithmetic circuits and feed them into a general-purpose SNARK backend (e.g., a zkVM such as Succinct's SP1~\cite{sp1}, RISC Zero~\cite{risczero}, or a circuit-based backend such as Groth16~\cite{groth16} or Plonk~\cite{gabizon2019plonk}). We argue---and partially measure---that this path is orders of magnitude more expensive than our direct Sigma-protocol instantiation.
 
-\paragraph{Cost drivers.} The Invoice and Transfer relations involve two kinds of operations:
+\paragraph{Cost drivers.} The Invoice and Transfer relations involve two kinds of expensive operations:
 \begin{itemize}
-  \item \textbf{Paillier arithmetic:} modular exponentiation in $\ZZ_{N^2}$ for a $3072$-bit $N$, which in a SNARK circuit requires bit-decomposition of $6144$-bit integers and thousands of field operations per Paillier exponentiation.
-  \item \textbf{Elliptic-curve scalar multiplication:} secp256k1 scalar multiplication, which requires 256 doublings and up to 256 additions per point multiplication; each EC operation in a SNARK circuit is a non-trivial sub-circuit.
+  \item \textbf{Paillier arithmetic:} modular exponentiation in $\ZZ_{N^2}$ for a 3072-bit $N$, which in a SNARK circuit requires bit-decomposition of 6144-bit integers and thousands of field operations per exponentiation.
+  \item \textbf{Elliptic-curve scalar multiplication:} secp256k1 scalar multiplication, requiring 256 doublings and up to 256 additions; each EC operation in a SNARK circuit is a non-trivial sub-circuit over a non-native field.
 \end{itemize}
-In a general-purpose circuit backend, each Paillier ciphertext verification alone consumes on the order of $10^5$--$10^6$ constraints, and each EC operation adds roughly $10^3$--$10^4$ more. The Invoice relation has three such sub-relations (one EC, two Paillier), plus a shared-response linkage; the Transfer relation has two. The resulting circuit size is dominated by Paillier exponentiations.
+In a general-purpose circuit backend, each Paillier ciphertext verification alone consumes on the order of $10^5$--$10^6$ constraints, and each EC operation adds $10^3$--$10^4$ more. The resulting circuit size is dominated by Paillier exponentiations, making this one of the worst-case workloads for generic SNARK backends.
 
-\paragraph{Sigma-protocol cost.} By contrast, our direct Sigma-protocol construction requires no circuit. Each proof consists of a constant number of group operations:
+\paragraph{Sigma-protocol cost.} Our direct Sigma-protocol construction requires no circuit. Each proof consists of a constant number of native group operations:
 \begin{itemize}
-  \item Core Proof~1: three commitments (1 EC scalar mul, 2 Paillier exps), one hash, one response scalar, and two Paillier randomness responses. Verification is three verification equations (1 EC scalar mul, 2 Paillier exps).
-  \item Core Proof~2: two commitments (1 EC scalar mul, 1 Paillier exp), one hash, one response scalar, one Paillier randomness response. Verification is two equations (1 EC scalar mul, 1 Paillier exp).
+  \item Invoice Consistency Proof: 3 commitments (1~EC, 2~Paillier), 1~Fiat--Shamir hash, 1~shared response, 2~Paillier randomness responses. Verification: 3~equations (1~EC, 2~Paillier).
+  \item Transfer Consistency Proof: 2 commitments (1~EC, 1~Paillier), 1~hash, 1~response, 1~Paillier randomness response. Verification: 2~equations (1~EC, 1~Paillier).
 \end{itemize}
-Concretely, each proof uses a handful of native Paillier and EC operations, with no constraint system, no trusted setup, and no circuit-level tooling.
+Concretely, proving both proofs takes $\approx\!465$\,ms and verifying both takes $\approx\!303$\,ms, with no constraint system, no trusted setup, and no circuit-level tooling. \autoref{tab:snark} summarizes the comparison.
 
-\paragraph{Quantitative comparison.} \autoref{tab:snark} projects proving time, verification time, and proof size for the Invoice proof under two instantiations: (i) our direct Sigma-protocol construction, and (ii) a representative general-purpose SNARK realized over a zkVM. The zkVM numbers are extrapolated from published benchmarks for Paillier-heavy workloads~\cite{sp1}; the Sigma-protocol numbers are from native Paillier and EC libraries.
+\paragraph{SP1 benchmark methodology.} To provide a concrete reference for the SNARK approach, we implemented the same transfer semantics (holder-secret update $x_{s+1} = x_s + r_s$, committee update $y_{s+1} = y_s - r_s$, invariant check) inside Succinct's SP1 zkVM~\cite{sp1}. Note that this SP1 program uses native \texttt{u64} arithmetic, \emph{not} the full 3072-bit Paillier operations from our real protocol. It therefore represents an \emph{optimistic lower bound} on what a zkVM would cost for the full relation: the real SNARK circuit would additionally need to express Paillier modular exponentiation over 6144-bit integers, which is the dominant cost in our native benchmarks.
 
 \begin{table}[t]
 \centering
 \small
-\begin{tabular}{@{}lrrr@{}}
+\begin{tabular}{@{}lrrl@{}}
 \toprule
-\textbf{Backend} & \textbf{Prove} & \textbf{Verify} & \textbf{Proof size} \\
+\textbf{Backend} & \textbf{Prove} & \textbf{Verify} & \textbf{Setup} \\
 \midrule
-\thunderbolt Sigma + FS & $\approx 20$~ms & $\approx 5$~ms & $\approx 2$~KB \\
-zkVM (Succinct SP1) & $\approx 60$~s & $\approx 100$~ms & $\approx 10$~KB \\
-Groth16 on custom circuit & $\approx 2$~s & $\approx 3$~ms & $288$~B \\
+\thunderbolt (Sigma + FS) & 465\,ms & 303\,ms & None \\
+SP1 zkVM (u64 only) & $\gg\!465$\,ms & $\gg\!303$\,ms & None \\
+Groth16 (projected) & $\sim$min & $\sim$3\,ms & Trusted \\
 \bottomrule
 \end{tabular}
-\caption{Projected costs for the Invoice Consistency Proof under three proving backends. Sigma-protocol numbers are native operations; SNARK numbers are projected from published Paillier-in-circuit benchmarks.}
+\caption{Proving and verification cost for one complete transfer step (Invoice + Transfer). SP1 row uses simplified \texttt{u64} arithmetic (optimistic lower bound). Groth16 row is projected from published Paillier-in-circuit estimates.}
 \label{tab:snark}
 \end{table}
 
-\paragraph{Discussion.} The key observation is that even an \emph{optimized} custom SNARK circuit (Groth16 row) for the same relation would still incur a 100$\times$ overhead in prove time relative to the Sigma-protocol approach, because the inherent cost of Paillier-in-circuit dominates the comparison. The zkVM path is a further 30$\times$ on top of that, because it does not exploit the algebraic structure of the relation at all and instead simulates Paillier arithmetic as integer arithmetic in a general-purpose virtual machine. For a protocol like \thunderbolt, where each transfer step produces two proofs and may be repeated thousands of times over a channel's lifetime, these constants are the difference between a practical deployment and a prototype.
+\paragraph{Circuit complexity estimate.} The Invoice proof alone would exceed $10^6$ R1CS constraints ($\approx\!2 \times 10^4$ for EC scalar multiplication + $\approx\!3 \times 10^5$--$10^6$ per Paillier exponentiation over 6144-bit integers). At published Groth16 proving rates of $10^4$--$10^5$ constraints/s, this yields tens of seconds to minutes---a $100$--$1000\times$ overhead over our 305\,ms native prove. The zkVM path adds a further constant from RISC-V emulation.
 
-\paragraph{Why the Sigma-protocol approach works here.} The Invoice and Transfer relations are precisely the kind of \emph{algebraic} relations for which Sigma protocols were designed: they are conjunctions of discrete-log and Paillier-encryption equalities sharing a common witness. General-purpose SNARKs shine when the relation is arbitrary (e.g., SHA-256 preimage, RISC-V execution trace); they pay a large constant when the relation is already algebraic in a group the backend does not natively support. \thunderbolt sits squarely in the algebraic case, which is why we use verifiable encryption of discrete logarithms directly rather than compiling it into a circuit.
+\paragraph{Discussion.} Groth16 proofs are smaller (288~bytes vs.\ our $\approx\!3.8$\,KB) but require a per-circuit trusted setup; STARK-based backends are transparent but produce 50--200\,KB proofs. Our relations are \emph{algebraic} (DL + Paillier equalities with a shared witness), precisely the regime where Sigma protocols dominate circuit-based alternatives. \thunderbolt trades a modestly larger proof for orders-of-magnitude lower proving cost and no trusted setup.

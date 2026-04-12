@@ -9,6 +9,9 @@
 \usepackage[noend]{algpseudocode}
 \usepackage{mathtools}
 \usepackage{amsmath,amssymb,amsthm}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,backgrounds,calc}
+\usepackage{pifont} % for \ding circled numbers in captions
 
 \setlist[itemize]{leftmargin=2em}
 \setlist[enumerate]{leftmargin=2em}
@@ -33,6 +36,7 @@
 \newcommand{\Enc}{\mathrm{Enc}}           % Paillier encryption
 \newcommand{\Dec}{\mathrm{Dec}}           % Paillier decryption
 \newcommand{\Hash}{\mathsf{Hash}}         % hash function
+\newcommand{\domaintag}[1]{\texttt{#1}}   % Fiat--Shamir domain separation tag
 
 %% Autoref names
 \def\sectionautorefname{Section}

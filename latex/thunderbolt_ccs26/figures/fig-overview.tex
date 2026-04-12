@@ -1,0 +1,111 @@
+%% Figure 1: Illustrative overview of Thunderbolt
+%% Two-column width (figure*)
+\begin{figure*}[t]
+\centering
+\resizebox{0.85\textwidth}{!}{%
+\begin{tikzpicture}[
+  P/.style={font=\large\bfseries, inner sep=2pt},
+  L/.style={font=\normalsize},
+  A/.style={-{Stealth[length=2.2mm, width=2mm]}, line width=1.1pt},
+  Adash/.style={A, densely dashed, color=black!70},
+  chainbox/.style={draw=black!60, rounded corners=3pt, inner sep=5pt,
+                   font=\normalsize\bfseries, fill=black!6,
+                   minimum width=1.4cm, minimum height=0.7cm, align=center},
+  holder/.style={circle, draw=black!70, line width=0.8pt,
+                 inner sep=3pt, minimum size=0.85cm,
+                 font=\normalsize\bfseries, fill=white},
+  committee/.style={draw=black!70, rounded corners=3pt, inner sep=6pt,
+                    minimum width=3.5cm, minimum height=0.95cm,
+                    font=\normalsize\bfseries, fill=white, align=center},
+]
+
+%% ── Shared edge coordinates ──
+\coordinate (boxNW) at (-0.5, 7.0);
+\coordinate (boxNE) at (12.5, 7.0);
+\coordinate (boxSW) at (-0.5, -0.3);
+\coordinate (boxSE) at (12.5, -0.3);
+
+%% ── Bitcoin Chain strip (top) ──
+\begin{scope}[on background layer]
+\draw[black!35, line width=0.6pt, fill=black!5, rounded corners=4pt]
+  (boxNW) rectangle (boxNE |- {(0,5.4)});
+\end{scope}
+\node[font=\normalsize\bfseries, anchor=north west, text=black!75]
+  at ([shift={(0.15,-0.05)}]boxNW) {Bitcoin Chain};
+
+\node[chainbox] (setup) at (1.6, 6.15) {Setup};
+\node[L, anchor=north, font=\small, text=black!60] at (setup.south) {lock UTXO to $P$};
+
+\node[chainbox] (finalize) at (10.8, 6.15) {Finalize};
+
+\draw[black!40, densely dotted, line width=1.2pt] (setup.east) -- (finalize.west);
+\node[font=\normalsize, text=black!70, fill=black!5, inner sep=2pt, align=center]
+  at (6.2, 6.15) {$P = (x_s + y_s)\,G$\\\textit{(fixed)}};
+
+%% ── Off-chain region (shares left/right edges with chain strip) ──
+\begin{scope}[on background layer]
+\draw[black!30, dashed, rounded corners=6pt, line width=0.8pt]
+  ({-0.5}, 4.2) rectangle (boxSE);
+\end{scope}
+\node[font=\small\itshape, text=black!55, anchor=north west] at (-0.35, 4.1)
+  {off-chain state};
+
+%% ── Off-chain holder chain ──
+\node[holder] (h0) at (1.6, 2.7) {$\mathsf{H}_0$};
+\node[holder] (h1) at (4.2, 2.7) {$\mathsf{H}_1$};
+\node[holder] (h2) at (6.8, 2.7) {$\mathsf{H}_2$};
+\node[holder] (h3) at (9.4, 2.7) {$\mathsf{H}_3$};
+\node[holder] (h4) at (10.8, 2.7) {$\mathsf{H}_4$};
+\node[font=\Large, text=black!55] at (12.2, 2.7) {$\cdots$};
+
+%% Transfer arrows between holders
+\draw[A] (h0) -- node[above, font=\small, text=black!70] {transfer} (h1);
+\draw[A] (h1) -- node[above, font=\small, text=black!70] {transfer} (h2);
+\draw[A] (h2) -- node[above, font=\small, text=black!70] {transfer} (h3);
+\draw[A] (h3) -- (h4);
+\draw[Adash] (h4) -- (11.9, 2.7);
+
+%% ── Setup → H0 arrow (down from chain) ──
+\draw[A, black!55] (setup.south) ++(0,-0.35) -- (h0.north);
+
+%% ── H4 → Finalize arrow (vertical: H4 aligned with Finalize) ──
+\draw[Adash] (10.8, 3.5) -- (finalize.south);
+\node[L, anchor=north, font=\small, text=black!60, fill=black!5, inner sep=1.5pt]
+  at (finalize.south) {spend UTXO};
+
+%% ── Committee (below holder chain, centered) ──
+\node[committee] (C) at (5.5, 0.45) {Committee $\mathsf{C}$};
+
+%% Committee update arrows (from each holder, fanning down to C)
+\draw[Adash] (h0.south) -- ++(0,-0.35)
+  node[pos=0.95, left, font=\scriptsize, text=black!60] {$-r_0$}
+  -- ([xshift=-1.05cm]C.north);
+\draw[Adash] (h1.south) -- ++(0,-0.2)
+  node[pos=0.9, left, font=\scriptsize, text=black!60] {$-r_1$}
+  -- ([xshift=-0.35cm]C.north);
+\draw[Adash] (h2.south) -- ++(0,-0.2)
+  node[pos=0.9, right, font=\scriptsize, text=black!60] {$-r_2$}
+  -- ([xshift=0.35cm]C.north);
+\draw[Adash] (h3.south) -- ++(0,-0.35)
+  node[pos=0.95, right, font=\scriptsize, text=black!60] {$-r_3$}
+  -- ([xshift=1.05cm]C.north);
+\draw[Adash] (h4.south) -- ++(0,-0.35)
+  node[pos=0.95, right, font=\scriptsize, text=black!60] {$-r_4$}
+  -- ([xshift=1.5cm]C.north);
+
+%% ── Holder secret annotation (drawn AFTER arrows so fill covers them) ──
+\node[L, font=\small, text=black!80, anchor=north,
+      draw=black!55, line width=0.6pt, rounded corners=2pt,
+      fill=yellow!15, inner sep=4pt]
+  at (5.5, 1.8) {\textbf{holding invariant:}
+    $\;x_{s+1} = x_s + r_s,\quad y_{s+1} = y_s - r_s$};
+
+%% ── Phantom bounds for consistent sizing ──
+\path (-0.9, -0.7) (12.9, 7.2);
+
+\end{tikzpicture}%
+}
+\caption{Illustrative overview of \thunderbolt. A Bitcoin UTXO is locked once on-chain under the fixed key $P = (x_s + y_s)G$ at \textsf{Setup}, and the chain sees no further activity until \textsf{Finalize}. Ownership transfers between successive holders $\mathsf{H}_0, \mathsf{H}_1, \ldots$ happen entirely off-chain (dashed box). At each step, a fresh refresh value $r_s$ is added to the current holder's secret and subtracted from the Committee share, so that $(x_s + y_s)G$ remains equal to $P$ throughout.}
+\label{fig:overview}
+\Description{Diagram showing the Thunderbolt protocol overview: a Bitcoin chain strip at top with Setup and Finalize events, a horizontal chain of holders H0 through H4 connected by off-chain transfer arrows in the middle, and a Committee node centered below receiving subtract-r updates from each holder.}
+\end{figure*}

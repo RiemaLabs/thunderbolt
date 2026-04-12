@@ -1,0 +1,111 @@
+%% Figure 2: Transfer Phase — single transfer step (sequence-diagram style)
+%% Single-column width
+\begin{figure}[t]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tikzpicture}[
+  A/.style={-{Stealth[length=2mm, width=1.8mm]}, line width=0.9pt},
+  Adash/.style={A, densely dashed, color=black!60},
+  actor/.style={draw=black!70, rounded corners=3pt, inner sep=4pt,
+                minimum width=1.4cm, minimum height=0.55cm,
+                font=\small\bfseries, fill=white},
+  sbox/.style={draw=black!50, rounded corners=2pt, inner sep=3pt,
+               font=\footnotesize, fill=black!4, align=left},
+  stepnum/.style={circle, draw=black!55, fill=white, inner sep=0.5pt,
+                  font=\tiny\bfseries, minimum size=0.35cm},
+  lifeline/.style={densely dotted, black!25, line width=0.7pt},
+]
+
+%% ── Column positions ──
+\def\xA{0}        % Alice
+\def\xB{4.2}      % Bob
+\def\xC{2.1}      % Committee (centered)
+
+%% ── Actor headers ──
+\node[actor] (alice) at (\xA, 0) {Alice ($\mathsf{H}_s$)};
+\node[actor] (bob)   at (\xB, 0) {Bob ($\mathsf{H}_{s+1}$)};
+
+%% ── Lifelines ──
+\draw[lifeline] (\xA, -0.35) -- (\xA, -5.6);
+\draw[lifeline] (\xB, -0.35) -- (\xB, -7.4);
+
+%% ═══════════════════════════════════
+%% Step 1: Bob creates invoice
+%% ═══════════════════════════════════
+\node[sbox, anchor=north] (s1) at (\xB, -0.85) {%
+  \begin{tabular}{@{}l@{}}
+  Sample $r_s$;~~$D_s = r_s\,H$\\[0.5pt]
+  $\mathrm{ct}_B = \Enc_{pk_B}(r_s)$\\[0.5pt]
+  $\mathrm{ct}_C = \Enc_{pk_C}(r_s)$\\[0.5pt]
+  Prove $\pi_{\mathrm{inv}}$
+  \end{tabular}
+};
+\node[stepnum] at (s1.north west) [above right=-1pt and -1pt] {1};
+
+%% ── Invoice: Bob publishes, Alice fetches (async) ──
+\draw[A, densely dashed, black!55] (\xB-0.3, -2.6) --
+  node[above, font=\tiny, text=black!55, pos=0.5]
+  {$(D_s,\,\mathrm{ct}_B,\,\mathrm{ct}_C,\,\pi_{\mathrm{inv}})$}
+  node[below, font=\tiny\itshape, text=black!40, pos=0.5]
+  {publish / fetch (async)}
+  (\xA+0.15, -2.6);
+
+%% ═══════════════════════════════════
+%% Step 2: Alice verifies invoice + consumes
+%% ═══════════════════════════════════
+\node[sbox, anchor=north] (s2) at (\xA, -2.95) {%
+  \begin{tabular}{@{}l@{}}
+  Verify $\pi_{\mathrm{inv}}$\\[0.5pt]
+  $T_{s+1} = \Enc_{pk_B}(x_s) \oplus \mathrm{ct}_B$\\[0.5pt]
+  $X_{s+1} = X_s + D_s$\\[0.5pt]
+  Prove $\pi_{\mathrm{xfer}}$
+  \end{tabular}
+};
+\node[stepnum] at (s2.north west) [above right=-1pt and -1pt] {2};
+
+%% ── Transfer tuple + ct_C arrows (both from Alice's box) ──
+\draw[A] (\xA+0.15, -4.95) --
+  node[above, font=\tiny, text=black!55, pos=0.5]
+  {$(T_{s+1},\,X_{s+1},\,\pi_{\mathrm{xfer}})$}
+  (\xB-0.15, -4.95);
+
+\draw[Adash] (\xA+0.15, -5.5) --
+  node[above, font=\tiny, text=black!55, pos=0.5]
+  {$\mathrm{ct}_C$}
+  (\xC-0.15, -5.5);
+
+%% ═══════════════════════════════════
+%% Step 3: Committee verifies + updates (ABOVE step 4)
+%% ═══════════════════════════════════
+\draw[lifeline] (\xC, -5.35) -- (\xC, -8.0);
+\node[sbox, anchor=north] (s3) at (\xC, -5.7) {%
+  \begin{tabular}{@{}l@{}}
+  Verify $\pi_{\mathrm{inv}}$\\[0.5pt]
+  Decrypt $\mathrm{ct}_C \!\to\! r_s$\\[0.5pt]
+  $y_{s+1} = y_s - r_s$
+  \end{tabular}
+};
+\node[stepnum] at (s3.north east) [above left=-1pt and -1pt] {3};
+\node[actor, anchor=north] (comm) at (\xC, -7.0) {Committee $\mathsf{C}$};
+
+%% ═══════════════════════════════════
+%% Step 4: Bob verifies + decrypts (BELOW step 3)
+%% ═══════════════════════════════════
+\node[sbox, anchor=north] (s4) at (\xB, -6.5) {%
+  \begin{tabular}{@{}l@{}}
+  Verify $\pi_{\mathrm{xfer}}$\\[0.5pt]
+  Decrypt $T_{s+1}$\\[0.5pt]
+  $x_{s+1} = x_s + r_s$
+  \end{tabular}
+};
+\node[stepnum] at (s4.north west) [above right=-1pt and -1pt] {4};
+
+%% ── Phantom bounds ──
+\path (-1.6, -7.9) (5.8, 0.4);
+
+\end{tikzpicture}%
+}
+\caption{Transfer phase detail (one step $s \to s{+}1$). Bob creates an invoice with $\pi_{\mathrm{inv}}$~(\ding{172}); Alice verifies $\pi_{\mathrm{inv}}$, consumes the invoice, and publishes the updated ciphertext with $\pi_{\mathrm{xfer}}$~(\ding{173}); the Committee verifies $\pi_{\mathrm{inv}}$ and applies the compensating subtract~(\ding{174}); Bob verifies $\pi_{\mathrm{xfer}}$ and decrypts the new holder secret~(\ding{175}). Steps \ding{174} and \ding{175} proceed independently.}
+\label{fig:transfer}
+\Description{Sequence diagram of a single Thunderbolt transfer step showing four numbered phases: Bob's invoice creation, Alice's verification and consume phase, Committee's verification and compensating update, and Bob's verification and decryption of the new holder secret.}
+\end{figure}
