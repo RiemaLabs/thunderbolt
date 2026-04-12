@@ -112,3 +112,34 @@ flake.lock
 .omx/
 autoresearch-results.tsv
 benchmarks/sp1-transfer-benchmark/target/
+
+## LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.nav
+*.snm
+*.vrb
+*.idx
+*.ilg
+*.ind
+*.acn
+*.acr
+*.alg
+*.glg
+*.glo
+*.gls
+*.xdy
+*.bcf
+*.run.xml
+# Keep main.pdf tracked if you commit the rendered paper; otherwise uncomment:
+# *.pdf
+autoresearch-results.tsv
