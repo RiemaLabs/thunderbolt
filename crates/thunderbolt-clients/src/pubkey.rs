@@ -83,6 +83,9 @@ mod tests {
         let pubkey_str = "0379be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179a";
         let x_only_public_key = Secp256k1PublicKey::from_str(pubkey_str).unwrap().x_only_public_key().0;
         let thunderbolt_pubkey = ThunderboltPublicKey::from(x_only_public_key);
-        assert_eq!(thunderbolt_pubkey.value[2..].to_lower_hex_string()[2..], pubkey_str[2..]);
+        assert_eq!(
+            thunderbolt_pubkey.value[2..].to_lower_hex_string()[2..],
+            pubkey_str[2..]
+        );
     }
 }

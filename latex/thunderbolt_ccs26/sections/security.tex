@@ -1,0 +1,154 @@
+\section{Security Analysis}\label{sec:security}
+
+We formalize \thunderbolt's security in the UC framework~\cite{canetti2001uc}.
+A protocol \emph{UC-realizes} $\mathcal{F}$ if every PPT real-world adversary can be simulated by an ideal-world simulator interacting only with $\mathcal{F}$, with computationally indistinguishable effect on any environment $\mathcal{Z}$; this implies security under arbitrary composition.
+
+\subsection{Hybrid Model}\label{sec:uc-hybrid}
+
+We analyze \thunderbolt in the $(\mathcal{F}_{\mathrm{RO}},\, \mathcal{F}_{\mathrm{PKI}})$-hybrid model.
+$\mathcal{F}_{\mathrm{RO}}$ is the standard random-oracle functionality~\cite{bellare1993random},
+used by the Fiat--Shamir compilation of both NIZK proofs.
+$\mathcal{F}_{\mathrm{PKI}}$ distributes Paillier public keys $(pk_B, pk_C)$ to all parties before the
+channel opens.
+The threshold committee's Shamir sharing is information-theoretically secure and requires no
+additional ideal functionality.
+We consider a static-corruption adversary that may corrupt any subset of past and future holders
+and at most $t-1$ of the $n$ committee members before the channel opens.
+
+\subsection{Ideal Functionality $\mathcal{F}_{\thunderbolt}$}\label{sec:ideal-func}
+
+$\mathcal{F}_{\thunderbolt}$ is parameterized by a prime-order group $\GG$ and threshold $(t,n)$.
+It interacts with an unbounded sequence of holder parties $\mathsf{H}_0, \mathsf{H}_1, \ldots$,
+committee members $\mathsf{C}_1,\ldots,\mathsf{C}_n$, the Bitcoin Chain, and the adversary $\mathcal{A}$.
+It maintains state $(s,\; \mathsf{owner},\; P,\; \mathsf{fin},\; \mathcal{P})$,
+initialized to $(0,\; \mathsf{H}_0,\; \bot,\; \bot,\; \emptyset)$,
+where $\mathcal{P}$ is the set of pending (unconsumed) invoice identifiers.
+
+\paragraph{Open.}
+On $(\mathsf{open},\, P)$ from $\mathsf{H}_0$ and $(\mathsf{open\text{-}ack})$ from at least $t$
+committee members:
+record $P \in \GG$, set $\mathsf{owner} \leftarrow \mathsf{H}_0$,
+and send $(\mathsf{opened},\, P)$ to all parties.
+
+\paragraph{Invoice.}
+On $(\mathsf{invoice})$ from any party $B$:
+sample a fresh identifier $\iota$, add $\iota$ to $\mathcal{P}$,
+record that $\iota$ was issued to $B$,
+and send $(\mathsf{invoice\text{-}ready},\, \iota)$ to $\mathsf{owner}$.
+
+\paragraph{Transfer.}
+On $(\mathsf{transfer},\, \iota)$ from $\mathsf{owner}$, where $\iota$ was issued to recipient $B$:
+\begin{itemize}
+  \item If $\mathsf{fin} \neq \bot$ or $\iota \notin \mathcal{P}$, ignore.
+  \item Remove $\iota$ from $\mathcal{P}$ (consuming it exactly once).
+  \item Set $s \leftarrow s+1$ and $\mathsf{owner} \leftarrow B$.
+  \item Notify $\mathcal{A}$ of the state update.
+  \item Deliver $(\mathsf{ownership\text{-}received},\, s)$ to $B$ when $\mathcal{A}$ schedules
+        delivery, capturing $B$'s asynchronous availability.
+\end{itemize}
+
+\paragraph{Finalize.}
+On $(\mathsf{finalize})$ from $\mathsf{owner}$ together with $(\mathsf{finalize\text{-}ack})$ from
+at least $t$ distinct committee members:
+set $\mathsf{fin} \leftarrow \top$ and send $(\mathsf{closing\text{-}tx},\, P,\, s)$ to the Bitcoin Chain.
+
+\medskip\noindent
+$\mathcal{F}_{\thunderbolt}$ enforces by construction:
+(i)~only the current owner can initiate a transfer;
+(ii)~the on-chain key $P$ is fixed at open time;
+(iii)~each invoice identifier $\iota$ is consumed at most once, preventing equivocation;
+(iv)~ownership delivery is deferred to adversarial scheduling, capturing the offline-recipient guarantee;
+and (v)~finalization requires $t$ honest committee members.
+These enforce \emph{ownership security} via (i) and (v), \emph{fixed-key integrity} via (ii), and \emph{transfer correctness} plus the offline-recipient guarantee via (iii) and (iv).
+
+\subsection{UC Realization}\label{sec:uc-realization}
+
+\begin{theorem}[\thunderbolt UC-realizes $\mathcal{F}_{\thunderbolt}$]\label{thm:uc-realization}
+The \thunderbolt protocol UC-realizes $\mathcal{F}_{\thunderbolt}$ in the
+$(\mathcal{F}_{\mathrm{RO}},\, \mathcal{F}_{\mathrm{PKI}})$-hybrid model, under the ECDLP assumption
+in $\GG$ and the DCR assumption for the Paillier moduli, and assuming at most $t-1$ of the $n$
+committee members are statically corrupted.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+We construct a simulator $\mathcal{S}$ and argue that no PPT environment $\mathcal{Z}$ can distinguish
+real from ideal execution with non-negligible probability.
+
+\emph{Simulating proofs for honest senders.}
+$\mathcal{S}$ holds no witness $(x_s, \eta_s)$; it invokes the ZK simulators of \autoref{thm:proof1-sound} and \autoref{thm:proof2-sound} to produce transcripts $(\tilde\pi_{\mathrm{inv}}, \tilde\pi_{\mathrm{xfer}})$ statistically indistinguishable from real proofs, programming $\mathcal{F}_{\mathrm{RO}}$ on fresh inputs.
+
+\emph{Extracting from corrupted senders.}
+If a corrupted party produces accepting proofs $(\pi_{\mathrm{inv}},\, \pi_{\mathrm{xfer}})$,
+$\mathcal{S}$ programs $\mathcal{F}_{\mathrm{RO}}$ to return two distinct challenges for the same commitment, yielding two accepting transcripts, and
+runs the special-soundness extractor of \autoref{thm:proof2-sound}, yielding $x_s^*$ with
+$X_s = x_s^*\,H$.
+By the ECDLP assumption, $x_s^* = x_s$, confirming the party holds the current-owner credential;
+$\mathcal{S}$ then forwards $(\mathsf{transfer},\, \iota)$ to $\mathcal{F}_{\thunderbolt}$.
+A corrupted party unable to produce valid proofs is rejected by honest verifiers,
+and no transfer occurs in either world.
+
+\emph{Simulating committee members.}
+$\mathcal{S}$ runs the honest member algorithm with fresh random coins (indistinguishable). For fewer-than-$t$ corrupted members, their Shamir shares are uniformly random by information-theoretic security; $\mathcal{S}$ programs them as uniform values consistent with the public verification polynomial.
+
+\emph{Finalization.}
+For an honest finalization, $\mathcal{S}$ reconstructs $y_s$ from $t$ honest shares, combines it
+with the extracted $x_s$, and produces a signature under $P$.
+An adversary attempting unilateral finalization must either compute a discrete log of $P$ (hard by
+ECDLP) or recover $y_s$ from fewer than $t$ Shamir shares (impossible by information-theoretic
+secrecy).
+
+In all cases the simulated and real transcripts are computationally indistinguishable,
+so $\mathcal{Z}$ cannot distinguish the two worlds with non-negligible advantage.
+\end{proof}
+
+\subsection{Attack Vector Analysis}\label{sec:attack-vectors}
+
+We discuss three concrete attack patterns and identify the mechanisms
+by which $\mathcal{F}_{\thunderbolt}$ rules them out.
+
+\paragraph{Committee--holder collusion.}
+If $t$ committee members collude with the current holder $\mathsf{H}_s$, they can reconstruct $y_s$
+and unilaterally spend the UTXO, bypassing the protocol entirely.
+This is an inherent limitation of the $(t,n)$-threshold trust model: \thunderbolt provides security
+\emph{conditional on} $|\mathcal{I}| < t$, exactly as FROST~\cite{komlo2021frost} and
+ROAST~\cite{ruffing2022roast} do for threshold signing.
+
+More broadly, any \emph{past} holder $\mathsf{H}_{s'}$ who retains their secret $x_{s'}$ is equally
+dangerous: since $(x_{s'} + y_{s'})\,G = P$ for every step $s'$, a coalition of $t$ committee members
+who can reconstruct $y_{s'}$ from their share history can combine it with $x_{s'}$ to produce a
+valid on-chain signature.
+To close this window, committee members must \emph{securely delete} their refresh shares
+$r_s^{(i)}$ immediately after each step, preventing retrospective reconstruction of past committee
+secrets $y_{s'}$.
+Without this deletion discipline, the set of parties capable of mounting the attack grows by one at
+each transfer.
+
+In practice, committee selection should follow established principles from threshold custody
+deployments: \emph{diversity} across organizational and jurisdictional domains;
+\emph{stake or reputation} via on-chain bonds with slashing for detectable misbehavior;
+and \emph{rotation} via periodic re-election with VESS-based resharing (\autoref{sec:vess-committee}).
+For high-value UTXOs, a $3$-of-$5$ or $5$-of-$9$ committee drawn from reputable custodians provides
+a trust model comparable to existing Bitcoin multisig custody solutions~\cite{antonopoulos2017mastering}.
+
+\paragraph{Double-spending and equivocation.}
+A malicious holder $\mathsf{H}_s$ might attempt to (a)~consume the same invoice twice,
+(b)~issue valid transfer proofs to two different recipients, or
+(c)~finalize on-chain while a transfer is in flight.
+Attack~(a) is prevented by the \emph{monotonic anchor}: each transfer advances $X_s$ to
+$X_{s+1} = X_s + D_s$; the committee accepts a proof only against the current anchor,
+so a replay against the same invoice fails.
+Attack~(b) is prevented identically: the committee processes only the first valid transfer for
+step $s$ and advances its state, rejecting any subsequent proof for the same step.
+Attack~(c) is mitigated by the cooperative nature of finalization: the holder needs $t$
+committee co-signatures and the committee can refuse to sign while a transfer is pending.
+All three cases correspond to $\mathcal{F}_{\thunderbolt}$ ignoring duplicate or out-of-order inputs
+via the single-consumption rule on invoice identifiers.
+
+\paragraph{Denial-of-service by the committee.}
+If fewer than $t$ committee members are responsive, the channel is frozen.
+Liveness is not a protocol goal (\autoref{sec:sm-goals}).
+Practical mitigations include: \emph{redundancy} ($n \gg t$, e.g., $t{=}3, n{=}7$);
+an \emph{on-chain timeout escape hatch} where the funding UTXO includes a timelock branch allowing
+the holder to unilaterally sweep after a pre-agreed period (e.g., 30 days), mirroring
+Lightning's commitment timeout; and \emph{committee monitoring} with heartbeats and VESS
+resharing to replace non-responsive members.

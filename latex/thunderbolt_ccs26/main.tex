@@ -72,7 +72,7 @@
 %%
 %%\acmBooktitle{Woodstock '18: ACM Symposium on Neural Gaze Detection,
 %%  June 03--05, 2018, Woodstock, NY}
-\acmISBN{978-1-4503-XXXX-X/2018/06}
+\acmISBN{978-1-4503-XXXX-X/2026/11}
 
 %%
 %% Submission ID.
@@ -237,10 +237,15 @@
 \begin{CCSXML}
 <ccs2012>
    <concept>
+       <concept_id>10002978.10002991</concept_id>
+       <concept_desc>Security and privacy~Cryptography</concept_desc>
+       <concept_significance>500</concept_significance>
+   </concept>
+   <concept>
        <concept_id>10002978.10003006.10003013</concept_id>
        <concept_desc>Security and privacy~Distributed systems security</concept_desc>
        <concept_significance>500</concept_significance>
-       </concept>
+   </concept>
  </ccs2012>
 \end{CCSXML}
 
@@ -276,21 +281,18 @@
 
 \input{sections/intro}
 \input{sections/background}
-\input{sections/motivation}
+\input{sections/sysmodel}
 \input{sections/coreproof}
-\input{sections/protocol}
+\input{sections/security}
 \input{sections/eval}
 \input{sections/related}
 \input{sections/conclusion}
 
 %%
-%% The acknowledgments section is defined using the "acks" environment
-%% (and NOT an unnumbered section). This ensures the proper
-%% identification of the section in the article metadata, and the
-%% consistent spelling of the heading.
-% \begin{acks}
-% To Robert, for the bagels and explaining CMYK and color spaces.
-% \end{acks}
+%% Acknowledgements (not anonymized in camera-ready; suppressed in review mode).
+\begin{acks}
+This paper was edited for grammar and style using Claude claude-opus-4-6 (Anthropic).
+\end{acks}
 
 %%
 %% The next two lines define the bibliography style to be used, and
@@ -299,6 +301,19 @@
 \bibliography{main}
 
 \appendix
+
+%%
+%% Post-bibliography sections (do not count toward the page limit).
+
+\section*{Ethical Considerations}
+This work presents a cryptographic protocol for off-chain Bitcoin transfers.
+The protocol employs only standard primitives (Paillier encryption, Schnorr-based Sigma protocols, Shamir secret sharing) that have been publicly studied for over two decades.
+No user data was collected or processed; all experiments use synthetic cryptographic inputs on a locally controlled machine.
+The protocol does not introduce new mechanisms for bypassing existing blockchain compliance or anti-money-laundering frameworks; it operates within the same trust model as existing custody and multi-signature deployments.
+We see no direct ethical hazards beyond those already present in any privacy-enhancing cryptocurrency technology.
+
+\section*{Open Science Policy}
+% TODO: fill in artifact availability, code/data release, and reproducibility details.
 
 %%
 %% If your work has an appendix, this is the place to put it.

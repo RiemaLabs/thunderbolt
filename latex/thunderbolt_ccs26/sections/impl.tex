@@ -1,9 +1,0 @@
-\section{Implementation}\label{sec:impl}
-
-\tool is implemented in Go with about 26K lines of code and targets SSZ encoders/decoders used by Ethereum consensus clients across multiple languages. We provide adapters for Go and Python SSZ libraries (fastssz~\cite{fastssz} and py-ssz~\cite{pyssz}) and compare against production clients including Prysm~\cite{prysm}, Lighthouse~\cite{lighthouse}, Teku~\cite{teku}, Nimbus~\cite{nimbus}, and Lodestar~\cite{lodestar}. The implementation follows the workflow described in \autoref{sec:fuzzing}, connecting specification-guided input abstraction, a fuzzing harness, and the learning policy.
-
-We parse SSZ schema definitions and derive the semantic buckets defined in \autoref{sec:inpabs}. Concrete inputs are produced by applying the boundary mutations in \autoref{sec:concretization}, which keeps the generator aligned with the specification while still enabling non-canonical encodings that stress canonicalization logic.
-
-The execution harness runs candidates in-process against the target decoder (\icode{UnmarshalSSZ}) for throughput and applies differential oracles. We implement both a byte-level round-trip oracle and an SSZ hash-tree-root oracle~\cite{sszspec} to detect divergences that preserve semantic meaning but violate canonicalization. Following \autoref{sec:policy_action}, we use the KL divergence reward over batch-level execution signatures to guide exploration.
-
-Finally, we instantiate the policy in \autoref{sec:policy_action} to drive the exploration strategy used in \autoref{sec:eval} and its ablations.

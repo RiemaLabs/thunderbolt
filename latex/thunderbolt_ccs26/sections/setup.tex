@@ -11,6 +11,9 @@
 \usepackage{amsmath,amsthm}
 \usepackage{tikz}
 \usetikzlibrary{arrows.meta,positioning,backgrounds,calc}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage{placeins}  % \FloatBarrier — keep floats within their section
 \usepackage{pifont} % for \ding circled numbers in captions
 
 \setlist[itemize]{leftmargin=2em}
@@ -22,15 +25,16 @@
 \newtheorem{definition}[theorem]{Definition}
 \newtheorem{remark}[theorem]{Remark}
 
-%% Author comment commands
+%% Author comment commands (disabled for submission)
 \usepackage{xcolor}
-\newcommand{\DM}[1]{{\color{blue} DM: #1}}
-\newcommand{\HB}[1]{{\color{orange} HB: #1}}
+\newcommand{\DM}[1]{}
+\newcommand{\HB}[1]{}
 
 %% Protocol/system name
 \newcommand{\thunderbolt}{\textsc{Thunderbolt}\xspace}
 
 %% Crypto notation
+\newcommand{\negl}{\mathsf{negl}}         % negligible function
 \newcommand{\GG}{\mathbb{G}}              % EC group
 \newcommand{\ZZ}{\mathbb{Z}}              % integers
 \newcommand{\Enc}{\mathrm{Enc}}           % Paillier encryption

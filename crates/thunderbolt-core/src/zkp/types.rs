@@ -14,6 +14,7 @@ const CURVE_ORDER_BYTES: [u8; 32] = [
 pub enum ProofTag {
     Invoice,
     Transfer,
+    ShareEncryption,
 }
 
 impl ProofTag {
@@ -21,6 +22,7 @@ impl ProofTag {
         match self {
             ProofTag::Invoice => b"tb/invoice",
             ProofTag::Transfer => b"tb/xfer",
+            ProofTag::ShareEncryption => b"tb/share",
         }
     }
 }

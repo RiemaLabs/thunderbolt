@@ -1,0 +1,17 @@
+threshold committee benchmark (real implementation)
+iterations: 1
+x-axis: committee members
+lines: 0%, 16.7%, 33.3% malicious members
+threshold policy: t = ceil(2n/3)
+
+total transfer latency avg / p95 (ms)
+committee size   0% malicious         16.7% malicious      33.3% malicious
+----------------------------------------------------------------------------
+             6 2672.85/2672.85 2694.86/2694.86 2731.29/2731.29 
+
+committee completion avg / p95 (ms)
+committee size   0% malicious         16.7% malicious      33.3% malicious
+----------------------------------------------------------------------------
+             6  128.01/ 128.01  129.16/ 129.16  130.53/ 130.53 
+
+csv written to artifacts/smoke/threshold-committee-benchmark.csv

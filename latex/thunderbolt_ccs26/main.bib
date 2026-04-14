@@ -410,6 +410,16 @@
   doi     = {10.1007/s00145-006-0347-3}
 }
 
+@inproceedings{canetti2001uc,
+  author    = {Canetti, Ran},
+  title     = {Universally Composable Security: A New Paradigm for Cryptographic Protocols},
+  booktitle = {42nd {IEEE} Symposium on Foundations of Computer Science ({FOCS})},
+  pages     = {136--145},
+  year      = {2001},
+  publisher = {IEEE},
+  doi       = {10.1109/SFCS.2001.959888}
+}
+
 @inproceedings{canetti2020uc,
   title     = {{UC} Non-Interactive, Proactive, Threshold {ECDSA} with Identifiable Aborts},
   author    = {Canetti, Ran and Gennaro, Rosario and Goldfeder, Steven and Makriyannis, Nikolaos and Peled, Udi},
@@ -464,3 +474,188 @@
   doi       = {10.1007/978-3-030-03329-3_15}
 }
 
+% ── Statechains ──
+
+@misc{somsen2020statechains,
+  title        = {Statechains: Non-custodial Off-chain {Bitcoin} Transfer},
+  author       = {Somsen, Ruben},
+  howpublished = {White paper},
+  year         = {2020},
+  url          = {https://github.com/RubenSomsen/rubensomsen.github.io/blob/master/img/statechains.pdf}
+}
+
+@misc{mercurylayer,
+  title        = {Mercury Layer: Statechain Implementation with Blinded Signing},
+  author       = {{CommerceBlock}},
+  howpublished = {Project documentation},
+  year         = {2023},
+  url          = {https://mercurylayer.com/}
+}
+
+% ── Adaptor signatures ──
+
+@inproceedings{aumayr2021generalized,
+  title     = {Generalized Channels from Limited Blockchain Scripts and Adaptor Signatures},
+  author    = {Aumayr, Lukas and Ersoy, Oguzhan and Erwig, Andreas and Faust, Sebastian and Host{\'a}kov{\'a}, Kristina and Maffei, Matteo and Moreno-Sanchez, Pedro and Riahi, Siavash},
+  booktitle = {Advances in Cryptology --- {ASIACRYPT} 2021},
+  series    = {LNCS},
+  volume    = {13091},
+  pages     = {635--666},
+  year      = {2021},
+  publisher = {Springer},
+  doi       = {10.1007/978-3-030-92075-3_22}
+}
+
+@inproceedings{erwig2021two,
+  title     = {Two-Party Adaptor Signatures from Identification Schemes},
+  author    = {Erwig, Andreas and Faust, Sebastian and Host{\'a}kov{\'a}, Kristina and Maitra, Monosij and Riahi, Siavash},
+  booktitle = {Public-Key Cryptography --- {PKC} 2021},
+  series    = {LNCS},
+  volume    = {12710},
+  pages     = {451--480},
+  year      = {2021},
+  publisher = {Springer},
+  doi       = {10.1007/978-3-030-75245-3_17}
+}
+
+% ── Bitcoin protocols ──
+
+@misc{ark2023,
+  title        = {Ark: A Second-Layer Protocol for {Bitcoin}},
+  author       = {Burak},
+  howpublished = {White paper},
+  year         = {2023},
+  url          = {https://arkdev.info/}
+}
+
+@misc{linus2023bitvm,
+  title        = {{BitVM}: Compute Anything on {Bitcoin}},
+  author       = {Robin Linus},
+  howpublished = {White paper},
+  year         = {2023},
+  url          = {https://bitvm.org/bitvm.pdf}
+}
+
+@inproceedings{kalodner2018arbitrum,
+  title     = {Arbitrum: Scalable, Private Smart Contracts},
+  author    = {Kalodner, Harry and Goldfeder, Steven and Chen, Xiaoqi and Weinberg, S. Matthew and Felten, Edward W.},
+  booktitle = {27th USENIX Security Symposium},
+  pages     = {1353--1370},
+  year      = {2018},
+  publisher = {USENIX}
+}
+
+% ── Reviewer-relevant recent work ──
+
+@inproceedings{thyagarajan2022sleepy,
+  title     = {Sleepy Channels: Bi-directional Payment Channels without Watchtowers},
+  author    = {Aumayr, Lukas and Thyagarajan, Sri AravindaKrishnan and Malavolta, Giulio and Moreno-Sanchez, Pedro and Maffei, Matteo},
+  booktitle = {Proceedings of the 2022 ACM SIGSAC Conference on Computer and Communications Security (CCS)},
+  pages     = {2521--2535},
+  year      = {2022},
+  publisher = {ACM},
+  doi       = {10.1145/3548606.3559370}
+}
+
+@inproceedings{thyagarajan2024foundations,
+  title     = {Foundations of Adaptor Signatures},
+  author    = {Erwig, Andreas and Faust, Sebastian and Host{\'a}kov{\'a}, Kristina and Maitra, Monosij and Thyagarajan, Sri AravindaKrishnan},
+  booktitle = {Advances in Cryptology --- {EUROCRYPT} 2024},
+  series    = {LNCS},
+  volume    = {14654},
+  pages     = {155--184},
+  year      = {2024},
+  publisher = {Springer},
+  doi       = {10.1007/978-3-031-58723-8_6}
+}
+
+@inproceedings{thyagarajan2025vitarit,
+  title     = {Vitarit: Paying for Threshold Services on {Bitcoin} and Friends},
+  author    = {Thyagarajan, Sri AravindaKrishnan and Bhat, Adithya and Malavolta, Giulio and D{\"o}ttling, Nico and Kate, Aniket and Schr{\"o}der, Dominique},
+  booktitle = {2025 IEEE Symposium on Security and Privacy (S\&P)},
+  year      = {2025},
+  publisher = {IEEE}
+}
+
+@article{thyagarajan2025pcnsurvey,
+  title   = {Cryptographic Primitives in Script-based and Scriptless Payment Channel Networks: A Survey},
+  author  = {Thyagarajan, Sri AravindaKrishnan and Malavolta, Giulio},
+  journal = {ACM Computing Surveys},
+  year    = {2025},
+  doi     = {10.1145/3725846}
+}
+
+@inproceedings{tairi2023ledgerlocks,
+  title     = {{LedgerLocks}: A Security Framework for Blockchain Protocols Based on Adaptor Signatures},
+  author    = {Tairi, Erkan and Moreno-Sanchez, Pedro and Maffei, Matteo},
+  booktitle = {Proceedings of the 2023 ACM SIGSAC Conference on Computer and Communications Security (CCS)},
+  pages     = {881--895},
+  year      = {2023},
+  publisher = {ACM},
+  doi       = {10.1145/3576915.3623152}
+}
+
+@inproceedings{aumayr2024securing,
+  title     = {Securing Lightning Channels against Rational Miners},
+  author    = {Aumayr, Lukas and Mazaheri, Kasra and Maffei, Matteo and Moreno-Sanchez, Pedro},
+  booktitle = {Proceedings of the 2024 ACM SIGSAC Conference on Computer and Communications Security (CCS)},
+  year      = {2024},
+  publisher = {ACM},
+  doi       = {10.1145/3658644.3670373}
+}
+
+@inproceedings{aumayr2023donner,
+  title     = {Breaking and Fixing Virtual Channels: Domino Attack and Donner},
+  author    = {Aumayr, Lukas and Moreno-Sanchez, Pedro and Kate, Aniket and Maffei, Matteo},
+  booktitle = {30th Annual Network and Distributed System Security Symposium (NDSS)},
+  year      = {2023},
+  publisher = {Internet Society}
+}
+
+@inproceedings{das2025vss,
+  title     = {Verifiable Secret Sharing Simplified},
+  author    = {Das, Sourav and Ren, Ling},
+  booktitle = {2025 IEEE Symposium on Security and Privacy (S\&P)},
+  year      = {2025},
+  publisher = {IEEE}
+}
+
+@inproceedings{das2022async,
+  title     = {Practical Asynchronous Distributed Key Generation},
+  author    = {Das, Sourav and Yurek, Tom and Xiang, Zhuolun and Miller, Andrew and Kober, Lefteris and Ren, Ling},
+  booktitle = {2022 IEEE Symposium on Security and Privacy (S\&P)},
+  pages     = {2518--2534},
+  year      = {2022},
+  publisher = {IEEE},
+  doi       = {10.1109/SP46214.2022.9833584}
+}
+
+@inproceedings{chu2023practical,
+  title     = {Practical Schnorr Threshold Signatures Without the Algebraic Group Model},
+  author    = {Chu, Hien and Gerhart, Paul and Ruffing, Tim and Schr{\"o}der, Dominique},
+  booktitle = {Advances in Cryptology --- {CRYPTO} 2023},
+  series    = {LNCS},
+  volume    = {14081},
+  pages     = {743--773},
+  year      = {2023},
+  publisher = {Springer},
+  doi       = {10.1007/978-3-031-38557-5_24}
+}
+
+@inproceedings{ganesh2025ucnizk,
+  title     = {Universally Composable {NIZK} from Sigma Protocols via a New Straight-line Compiler},
+  author    = {Ganesh, Chaya and Jain, Aayush and Magri, Bernardo and Ostrovsky, Rafail},
+  booktitle = {Public-Key Cryptography --- {PKC} 2025},
+  year      = {2025},
+  publisher = {Springer}
+}
+
+% ── Mastering Bitcoin ──
+
+@book{antonopoulos2017mastering,
+  title     = {Mastering Bitcoin: Programming the Open Blockchain},
+  author    = {Antonopoulos, Andreas M.},
+  edition   = {2nd},
+  year      = {2017},
+  publisher = {O'Reilly Media}
+}
