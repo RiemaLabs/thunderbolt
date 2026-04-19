@@ -1,14 +1,20 @@
-\section{Preliminaries}\label{sec:preliminaries}
+\section{Background}\label{sec:background}
 
-We write $\lambda$ for the security parameter and $\negl(\lambda)$ for an unspecified negligible function of $\lambda$.
+This section reviews the cryptographic building blocks used by \thunderbolt. The on-chain lock key and all off-chain anchors live in an \emph{elliptic-curve group} (\autoref{sec:bg-ec}), and the lock key is additively split between a holder and a semi-trusted party via the algebraic structure of \emph{Schnorr signatures} (\autoref{sec:bg-schnorr}). Each transfer rotates both shares homomorphically through the \emph{Paillier cryptosystem} (\autoref{sec:bg-paillier}), and correctness of each rotation is certified by \emph{Sigma-protocol} NIZKs compiled via Fiat--Shamir (\autoref{sec:bg-sigma}). The core proof technique that binds an elliptic-curve commitment to a Paillier ciphertext under a single witness is \emph{verifiable encryption of discrete logarithms} (VEDL, \autoref{sec:bg-vedl}). Finally, the semi-trusted party is distributed into a threshold committee via \emph{verifiable encrypted secret sharing} (VESS, \autoref{sec:bg-vess}).
 
 \subsection{Elliptic-Curve Groups}\label{sec:bg-ec}
 
-Let $\GG$ be an elliptic-curve group of prime order $q$. We fix two independent generators of $\GG$: the standard secp256k1 base point $G$, used for the on-chain lock key $P = (x_s + y_s)\,G$, and a second nothing-up-my-sleeve (NUMS) generator $H$, used for all holder anchors $X_s = x_s\,H$ and invoice deltas $D_s = r_s\,H$. Independence of $G$ and $H$ (i.e., the discrete log of $H$ with respect to $G$ is unknown) is required so that an adversary who learns a holder secret $x_s$ cannot translate it into an opening of the lock key. A \emph{discrete-log pair} is a pair $(x, X)$ with $X = x\,H$ for some scalar $x \in \ZZ_q$. Given only $X$ and $H$, no efficient algorithm can recover $x$; this is the \emph{elliptic-curve discrete-logarithm problem} (ECDLP), on which the security of Bitcoin and of our proofs rests.
+Let $\GG$ be an elliptic-curve group of prime order $q$. We fix two independent generators of $\GG$: the standard secp256k1 base point $G$, used for the on-chain lock key $P = (x_s + y_s)\,G$, and a second nothing-up-my-sleeve (NUMS) generator $H$ (a point derived by a deterministic, publicly auditable process so that no one knows its discrete log with respect to $G$), used for all holder anchors $X_s = x_s\,H$ and invoice deltas $D_s = r_s\,H$. Independence of $G$ and $H$ (i.e., the discrete log of $H$ with respect to $G$ is unknown) is required so that the public anchor $X_s = x_s\,H$ does not reveal $x_s\,G$, which would allow anyone to compute $y_s\,G = P - x_s\,G$ and reduce the security of the committee share to a bare discrete-log instance. A \emph{discrete-log pair} is a pair $(x, X)$ with $X = x\,H$ for some scalar $x \in \ZZ_q$. Given only $X$ and $H$, no efficient algorithm can recover $x$; this is the \emph{elliptic-curve discrete-logarithm problem} (ECDLP), on which the security of Bitcoin and of our proofs rests.
+
+\subsection{Schnorr Signatures and Additive Key Splitting}\label{sec:bg-schnorr}
+
+A Schnorr signature~\cite{schnorr1991efficient} over a message $m$ under public key $P = x\,G$ is a pair $(R, \sigma)$ where $R = k\,G$ for a random nonce $k$, and $\sigma = k + e\,x$ with challenge $e = \Hash(R, P, m)$. Verification checks $\sigma\,G \stackrel{?}{=} R + e\,P$. Bitcoin's Taproot upgrade~\cite{bip340} adopts Schnorr signatures as the native signature scheme.
+
+A key property of Schnorr signatures is that the signing key can be \emph{additively split}: two parties holding shares $x$ and $y$ with $P = (x + y)\,G$ can jointly produce a valid signature under $P$ without either party learning the other's share. Each party samples a nonce ($k_1, k_2$), publishes its nonce point ($R_1 = k_1\,G$, $R_2 = k_2\,G$), computes the shared challenge $e = \Hash(R_1 + R_2,\, P,\, m)$, and responds with a partial signature ($\sigma_1 = k_1 + e\,x$, $\sigma_2 = k_2 + e\,y$). The combined signature $(R_1 + R_2,\; \sigma_1 + \sigma_2)$ is valid under $P$~\cite{lindell2017fast}. This additive structure is the foundation of \thunderbolt's key-sharing model: the lock key $P$ is split between a holder and a semi-trusted party, and ownership transfer rotates both shares without changing $P$.
 
 \subsection{The Paillier Cryptosystem}\label{sec:bg-paillier}
 
-The Paillier cryptosystem~\cite{paillier1999public} is an asymmetric encryption scheme whose plaintext space is $\ZZ_N$ for an RSA modulus $N = pq'$ (we write $q'$ to distinguish the Paillier factor from the curve order $q$). The public key is $(N, g)$ with $g \in \ZZ_{N^2}^*$ of order divisible by $N$. Encryption of a message $m \in \ZZ_N$ with randomness $\rho \in \ZZ_N^*$ is
+The Paillier cryptosystem~\cite{paillier1999public} is an asymmetric encryption scheme whose plaintext space is $\ZZ_N$ for an RSA modulus $N = p_1 p_2$ (two distinct primes). The public key is $(N, g)$ with $g \in \ZZ_{N^2}^*$ of order divisible by $N$. Encryption of a message $m \in \ZZ_N$ with randomness $\rho \in \ZZ_N^*$ is
 $$
 \Enc_{pk}(m;\rho) = g^m \rho^N \bmod N^2.
 $$
@@ -22,7 +28,7 @@ is a valid encryption of $m_1 + m_2 \bmod N$. We write this operation as $c_1 \o
 
 \subsection{Sigma Protocols and Fiat--Shamir}\label{sec:bg-sigma}
 
-A \emph{Sigma protocol}~\cite{cramer1997modular, damgard2002sigma} is a three-move honest-verifier zero-knowledge proof: the prover sends commitment $A$, receives challenge $c$, responds with $z$; the verifier checks a public equation on $(A, c, z)$. The \emph{Fiat--Shamir heuristic}~\cite{fiat1987prove} compiles it into a NIZK in the random-oracle model by setting $c = \Hash(\text{statement}, A)$; soundness follows from the forking lemma~\cite{pointcheval1996security}.
+A \emph{Sigma protocol}~\cite{cramer1997modular, damgard2002sigma} is a three-move honest-verifier zero-knowledge proof: the prover sends commitment $A$, receives challenge $c$, responds with $z$; the verifier checks a public equation on $(A, c, z)$. The \emph{Fiat--Shamir heuristic}~\cite{fiat1987prove} compiles it into a non-interactive zero-knowledge (NIZK) proof in the random-oracle model by setting $c = \Hash(\text{statement}, A)$; soundness follows from the forking lemma~\cite{pointcheval1996security}.
 
 \subsection{Verifiable Encryption of Discrete Logarithms}\label{sec:bg-vedl}
 
@@ -31,7 +37,7 @@ $$
 \mathcal{R}_{\mathrm{VE}} = \{(M, \mathit{ct};\; m, \rho) : M = mH \;\land\; \mathit{ct} = g^m \rho^N \bmod N^2\}.
 $$
 
-The key technique is a \emph{shared response}: the Sigma-protocol response $z$ simultaneously satisfies both the elliptic-curve verification equation ($zH \stackrel{?}{=} A_{\mathrm{EC}} + cM$) and the Paillier verification equation ($g^z\tau^N \stackrel{?}{=} A_{\mathrm{Pai}} \cdot \mathit{ct}^{\,c}$), where $c$ is the Fiat--Shamir challenge and the same $z$ forces the same underlying integer in both relations. This ``shared-$z$'' construction is the technical core of our proofs.
+The key technique is a \emph{shared response}: the prover commits to a single random nonce $\alpha$ and, after the Fiat--Shamir challenge $c$ is derived from \emph{all} statement components, responds with $z = \alpha + c \cdot m$. This single $z$ must simultaneously satisfy the elliptic-curve equation ($zH \stackrel{?}{=} A_{\mathrm{EC}} + cM$) and the Paillier equation ($g^z\tau^N \stackrel{?}{=} A_{\mathrm{Pai}} \cdot \mathit{ct}^{\,c}$). If the integer committed in the ciphertext differed from the discrete log of $M$, the two equations would be mutually inconsistent for the same $z$. This ``shared-$z$'' construction is the technical core of our proofs.
 
 \subsection{Verifiable Encrypted Secret Sharing (VESS)}\label{sec:bg-vess}
 

@@ -1,21 +1,41 @@
-\section{Construction}\label{sec:construction}
+\section{The \thunderbolt Protocol}\label{sec:construction}
 
-The VEDL + VESS composition identified in \autoref{sec:design-rationale} is realized by two NIZK proofs. The Invoice Consistency Proof (\autoref{sec:proof1}) binds the three per-step objects to a single integer; the Transfer Consistency Proof (\autoref{sec:proof2}) certifies that the sender holds the current owner credential. \autoref{sec:vess-committee} extends the single-committee construction to a threshold group via Simple VESS, and \autoref{sec:lifecycle} assembles the channel lifecycle.
+This section presents the \thunderbolt protocol in full. We begin with the design rationale (\autoref{sec:design-rationale}), explaining the role of the Thunderbolt Ledger, the choice of VEDL for cross-domain binding, and the necessity of the VEDL+VESS composition. We then fix notation and describe the complete protocol flow (\autoref{sec:lifecycle}), followed by the two core zero-knowledge proofs that enforce per-step correctness: the Invoice Consistency Proof (\autoref{sec:proof1}) and the Transfer Consistency Proof (\autoref{sec:proof2}). Their joint consequence (\autoref{sec:joint}) establishes the fixed-key invariant. Finally, we show how to distribute the semi-trusted party into a threshold committee via VESS (\autoref{sec:vess-committee}).
 
-Throughout, we use the notation of \autoref{sec:bg-ec}: $\GG$ is secp256k1 with prime order $q$, standard base point $G$ (used for the lock key $P$), and NUMS generator $H$ (used for all anchors and deltas). Let $(N_B, g_B)$ and $(N_C, g_C)$ be Paillier public keys for Bob and the Committee, respectively. All Paillier arithmetic is modulo $N_B^2$ or $N_C^2$ as appropriate. All elliptic-curve scalar equalities are taken modulo $q$. Let $\kappa$ denote the statistical security parameter (concretely, $\kappa = 128$); we set $\tilde{q} = q^2 \cdot 2^{\kappa}$ as the masking range for Sigma-protocol commitment scalars, which ensures statistical zero-knowledge with distance at most $2^{-\kappa}$.
+\subsection{Design Rationale}\label{sec:design-rationale}
 
-\subsection{Transfer Model}\label{sec:transfer-model}
+The introduction motivates the key-splitting insight and the two-phase transfer flow. This subsection explains the three design decisions that make the construction concrete: why the protocol needs a persistent ledger with per-channel binding, why VEDL is the right cross-domain proof technique, and why neither VEDL nor VESS alone suffices.
 
-A \thunderbolt state at step $s$ consists of a \emph{holder secret} $x_s$, a \emph{committee secret} $y_s$, and a \emph{public anchor} $X_s = x_s\,H$, subject to the fixed-key invariant
+\emph{The Thunderbolt Ledger and context identifiers.} Because neither the sender nor the recipient need be online at the same time, the protocol requires a persistent medium where invoices and credentials can be deposited and later retrieved. The \emph{Thunderbolt Ledger} (\autoref{sec:sm-participants}) serves this role. Each UTXO channel is bound to the ledger via a distinct \emph{context identifier} $\mathsf{ctx\_id}$ that enters every Fiat--Shamir challenge hash (e.g., $c = \Hash(\ldots, \mathsf{ctx\_id}, \ldots)$), cryptographically binding each proof to its specific channel and preventing cross-channel replay.
+
+\emph{VEDL for cross-domain binding.} The core challenge is binding the recipient's refresh value $r_s$ consistently across three distinct algebraic structures: an elliptic-curve point and two Paillier ciphertexts. A generic Sigma protocol could prove each relation independently, but independent proofs would not prevent the prover from using different values in different domains. Verifiable encryption of discrete logarithms~\cite{camenisch2003verifiable} (\autoref{sec:bg-vedl}) solves this with a single shared Sigma response $z$ that must simultaneously satisfy both an EC and a Paillier verification equation, forcing the same integer into both. We instantiate VEDL twice: the Invoice Consistency Proof extends it to a multi-receiver setting (one EC commitment and two Paillier ciphertexts bound by a single $z$); the Transfer Consistency Proof uses a standard single-receiver instance.
+
+\emph{VESS for threshold trust.} VEDL alone concentrates the semi-trusted party role in a single actor. VESS~\cite{shoup2024simple} (\autoref{sec:bg-vess}) removes this single point of failure: $r_s$ is verifiably encrypted as a $(t,n)$-Shamir sharing, so that any $t$ honest members can perform $y_{s+1} = y_s - r_s$ collectively, while no coalition of fewer than $t$ learns anything. This substitution is modular: VESS replaces the single ciphertext $\mathrm{ct}_C$ with a set of verifiably encrypted shares; the Transfer Consistency Proof is unchanged, and $\pi_{\mathrm{inv}}$ narrows to the two-receiver relation $(D_s, \mathrm{ct}_B)$ while a separate VESS consistency proof covers the committee shares.
+
+\emph{Necessity of the composition.} Neither primitive alone suffices. VEDL without VESS forces a single trusted third party. VESS without VEDL cannot bind the shared secret to the on-chain elliptic-curve anchor. Together, VEDL enforces per-step correctness and VESS distributes trust across a threshold group.
+
+\subsection{Protocol Description}\label{sec:lifecycle}
+
+Before formalizing the consistency proofs, we describe the complete protocol flow. A \thunderbolt channel passes through three phases: \textbf{Open}, \textbf{Transfer} (zero or more), and \textbf{Finalize}---illustrated end-to-end in \autoref{fig:overview}. At every step $s$, the protocol maintains a \emph{holder secret} $x_s$, a \emph{committee secret} $y_s$, and a \emph{public anchor} $X_s = x_s\,H$, subject to the fixed-key invariant
 \begin{equation}\label{eq:invariant}
 P = (x_s + y_s)\,G.
 \end{equation}
-Alice is the current holder; Bob is the next recipient.
 
-A transfer from Alice to Bob proceeds in two phases:
+\paragraph{Notation.} Throughout, we use the notation of \autoref{sec:bg-ec}: $\GG$ is secp256k1 with prime order $q$, standard base point $G$ (used for the lock key $P$), and NUMS generator $H$ (used for all anchors and deltas). Let $(N_B, g_B)$ and $(N_C, g_C)$ be Paillier public keys for Bob and the Committee, respectively. All Paillier arithmetic is modulo $N_B^2$ or $N_C^2$ as appropriate. All elliptic-curve scalar equalities are taken modulo $q$. Let $\kappa$ denote the statistical security parameter (concretely, $\kappa = 128$); we set $\tilde{q} = q^2 \cdot 2^{\kappa}$ as the masking range for Sigma-protocol commitment scalars, which ensures statistical zero-knowledge with distance at most $2^{-\kappa}$.
+
+\paragraph{Running example.} To ground the notation: suppose at step $s{=}2$ Alice holds secret $x_2$ with public anchor $X_2 = x_2\,H$, and the committee holds $y_2$ such that $(x_2 + y_2)\,G = P$. Bob picks a fresh $r_2$, publishes three invoice objects $(D_2 = r_2\,H,\; \mathrm{ct}_B = \Enc_{pk_B}(r_2),\; \mathrm{ct}_C = \Enc_{pk_C}(r_2))$ plus proof $\pi_{\mathrm{inv}}$. Alice folds: $T_3 = \Enc_{pk_B}(x_2) \oplus \mathrm{ct}_B = \Enc_{pk_B}(x_2 + r_2)$, updates $X_3 = X_2 + D_2$, and publishes $\pi_{\mathrm{xfer}}$. Bob decrypts $T_3$ to obtain $x_3 = x_2 + r_2$; the committee computes $y_3 = y_2 - r_2$. The lock key $P$ never changes.
+
+\paragraph{Open (on-chain).}
+The initial holder $\mathsf{H}_0$ and the Committee jointly derive $P = (x_0 + y_0)\,G$ and fund a Taproot UTXO~\cite{bip340} locked to $P$; in the threshold setting, at least $t$ committee members must acknowledge the opening. The initial anchor is $X_0 = x_0\,H$ and the initial holder ciphertext is $T_0 = \Enc_{pk_{\mathsf{H}_0}}(x_0)$. This corresponds to step~\ding{172} in \autoref{fig:overview}.
+
+\paragraph{Transfer (off-chain).}
+
+\input{figures/fig-proof-arch}
+
+Each ownership transition is a purely off-chain operation mediated by the Thunderbolt Ledger. Denote the current holder by Alice and the next recipient by Bob. A single transfer from Alice to Bob proceeds in two phases (steps~\ding{173}--\ding{175} in \autoref{fig:overview}):
 
 \begin{enumerate}
-  \item \textbf{Invoice phase (Bob).} Bob chooses a fresh refresh value $r_s \in \ZZ_q$ and publishes:
+  \item \textbf{Invoice phase (Bob).} Bob chooses a fresh refresh value $r_s \in \ZZ_q$ and publishes the following to the Thunderbolt Ledger:
   \begin{itemize}
     \item a public delta point $D_s = r_s\,H$,
     \item a ciphertext to himself, $\mathrm{ct}_B = \Enc_{pk_B}(r_s;\, \rho_B)$,
@@ -23,22 +43,28 @@ A transfer from Alice to Bob proceeds in two phases:
     \item a proof $\pi_{\mathrm{inv}}$ (the Invoice Consistency Proof) that all three objects encode the same $r_s$.
   \end{itemize}
 
-  \item \textbf{Consume phase (Alice).} Alice forms the next holder ciphertext
+  \item \textbf{Transfer phase (Alice).} Alice fetches the invoice from the Thunderbolt Ledger, verifies $\pi_{\mathrm{inv}}$, forms the next holder ciphertext
   $$
   T_{s+1} = \Enc_{pk_B}(x_s;\, \eta_s) \oplus \mathrm{ct}_B,
   $$
-  updates the public anchor to $X_{s+1} = X_s + D_s$, and publishes a proof $\pi_{\mathrm{xfer}}$ (the Transfer Consistency Proof) that she injected the actual current holder secret $x_s$ consistent with $X_s$.
+  updates the public anchor to $X_{s+1} = X_s + D_s$, and publishes $(T_{s+1}, X_{s+1}, \pi_{\mathrm{xfer}})$ to the Thunderbolt Ledger.
 \end{enumerate}
 
-After the transfer, Bob decrypts $T_{s+1}$ to obtain $x_s + r_s$ and sets $x_{s+1} \equiv x_s + r_s \pmod{q}$. The Committee recovers $r_s$ from $\mathrm{ct}_C$ and updates $y_{s+1} = y_s - r_s$. The fixed-key invariant~\eqref{eq:invariant} is preserved:
+After the transfer, Bob fetches $T_{s+1}$ from the ledger, decrypts it to obtain $x_s + r_s$, and sets $x_{s+1} \equiv x_s + r_s \pmod{q}$. The Committee fetches and verifies both $\pi_{\mathrm{inv}}$ and $\pi_{\mathrm{xfer}}$ against the current anchor $X_s$, then recovers $r_s$ from $\mathrm{ct}_C$ and updates $y_{s+1} = y_s - r_s$. No step requires Alice and Bob to be online simultaneously or touches the chain. The fixed-key invariant~\eqref{eq:invariant} is preserved:
 $$
 (x_{s+1} + y_{s+1})\,G = (x_s + r_s + y_s - r_s)\,G = (x_s + y_s)\,G = P.
 $$
 
+\paragraph{Finalize (on-chain).} To close the channel, the holder first proves knowledge of the current holder secret $x_s$ by presenting a Schnorr proof of knowledge of the discrete log of $X_s$ with respect to $H$. Each committee member verifies this proof against the current anchor before agreeing to participate. The holder and the Committee then jointly sign the closing transaction under $P$ via a standard two-party Schnorr signing protocol~\cite{lindell2017fast} (step~\ding{176} in \autoref{fig:overview}); in the threshold setting, at least $t$ committee members must participate in the signing. The chain sees exactly two transactions regardless of how many transfers occurred.
+
+By \autoref{thm:correct-step} and induction on $s$, the protocol preserves three invariants at every step: $(x_s + y_s)\,G = P$ (fixed key), $X_s = x_s\,H$ (anchor correctness), and $T_s = \Enc_{pk_{\mathsf{H}_s}}(x_s)$ (ciphertext correctness).
+
 \paragraph{Security assumptions.}
-Both proofs rely on ECDLP hardness in $\GG$, the DCR assumption~\cite{paillier1999public} for the Paillier moduli, and the random-oracle model~\cite{bellare1993random} for Fiat--Shamir. Under these, both are complete, specially sound, and HVZK as Sigma protocols, and NIZK after Fiat--Shamir; soundness follows from the forking lemma~\cite{pointcheval1996security}.
+Both proofs rely on ECDLP hardness in $\GG$, the DCR assumption~\cite{paillier1999public} for the Paillier moduli, and the random-oracle model~\cite{bellare1993random} for Fiat--Shamir. Under these, both are complete, specially sound, and honest-verifier zero-knowledge (HVZK) as Sigma protocols, and NIZK after Fiat--Shamir; soundness follows from the forking lemma~\cite{pointcheval1996security}.
 
 \subsection{Invoice Consistency Proof}\label{sec:proof1}
+
+The invoice phase requires Bob to publish three objects encoding the same refresh value $r_s$: an elliptic-curve commitment $D_s$, a Paillier ciphertext $\mathrm{ct}_B$ for himself, and a Paillier ciphertext $\mathrm{ct}_C$ for the Committee. The Invoice Consistency Proof $\pi_{\mathrm{inv}}$ is a NIZK that forces all three to encode the same integer, preventing Bob from breaking the fixed-key invariant by committing inconsistent values.
 
 \begin{definition}[Invoice Consistency Relation]\label{def:inv-relation}
 The relation $\mathcal{R}_{\mathrm{inv}}$ is defined as
@@ -53,8 +79,6 @@ $$
 \right\}.
 $$
 \end{definition}
-
-\paragraph{Security motivation.} Without this proof, a malicious Bob could commit different refresh values in $D_s$, $\mathrm{ct}_B$, and $\mathrm{ct}_C$, breaking the fixed-key invariant.
 
 \paragraph{Sigma protocol.} The prover (Bob) samples a commitment scalar $\alpha \gets \ZZ_{\tilde{q}}$ and commitment randomnesses $\beta_B \gets \ZZ_{N_B}^*$, $\beta_C \gets \ZZ_{N_C}^*$, and computes:
 \begin{align*}
@@ -98,31 +122,12 @@ The proof is $\pi_{\mathrm{inv}} = (A_D, A_B, A_C, z, \tau_B, \tau_C)$.
 The Invoice Consistency Proof is a NIZK for $\mathcal{R}_{\mathrm{inv}}$ in the random-oracle model. In particular, the shared response $z$ in all three verification equations forces a single integer $r_s$ to be the discrete log of $D_s$ and the Paillier plaintext of both $\mathrm{ct}_B$ and $\mathrm{ct}_C$.
 \end{theorem}
 
-\begin{proof}
-We establish the three standard properties.
-
-\emph{Completeness.}
-If the prover is honest, then $z = \alpha + c\,r_s$, $\tau_B = \beta_B \cdot \rho_B^c$, and $\tau_C = \beta_C \cdot \rho_C^c$. For the EC check: $z\,H = (\alpha + c\,r_s)\,H = \alpha\,H + c\,r_s\,H = A_D + c\,D_s$. For the Bob--Paillier check: $g_B^{z}\,\tau_B^{N_B} = g_B^{\alpha + c\,r_s}\,(\beta_B \cdot \rho_B^c)^{N_B} = (g_B^{\alpha}\,\beta_B^{N_B}) \cdot (g_B^{r_s}\,\rho_B^{N_B})^c = A_B \cdot \mathrm{ct}_B^c$. The Committee--Paillier check is analogous.
-
-\emph{Special soundness.}
-Given two accepting transcripts $(A_D, A_B, A_C,\; c, z, \tau_B, \tau_C)$ and $(A_D, A_B, A_C,\; c', z', \tau_B', \tau_C')$ with $c \neq c'$, define $\Delta c = c - c'$ and $\Delta z = z - z'$ (computed as integers; since $\alpha \gets \ZZ_{\tilde{q}}$ with $\tilde{q} = q^2 \cdot 2^\kappa$ and $c, c' \in \ZZ_q$, the response $z = \alpha + c\,r_s$ lies in $\ZZ_{\tilde{q}}$ without wrapping around). Because $\Delta z / \Delta c = r_s$ holds as an exact integer (the masking range ensures no modular cancellation), we extract:
-$r_s^* := \Delta z / \Delta c \in \ZZ$ (reducing modulo $q$ gives the EC scalar satisfying $r_s^*\,H = D_s$).
-From the Bob--Paillier equation: $g_B^{\Delta z} \cdot (\tau_B / \tau_B')^{N_B} = \mathrm{ct}_B^{\Delta c}$, from which we extract $\rho_B^* = (\tau_B / \tau_B')^{(\Delta c)^{-1}} \bmod N_B$ satisfying $\mathrm{ct}_B = g_B^{r_s^*} \cdot (\rho_B^*)^{N_B}$ (the same integer $r_s^*$ appears in the exponent, since the shared $\Delta z$ drives both equations). The Committee--Paillier extraction is identical, yielding $\rho_C^*$. Because a single $\Delta z$ drives all three extractions, the extracted witness $r_s^*$ is the same integer in all three relations, establishing $(D_s, \mathrm{ct}_B, \mathrm{ct}_C;\; r_s^*, \rho_B^*, \rho_C^*) \in \mathcal{R}_{\mathrm{inv}}$.
-
-\emph{Honest-verifier zero-knowledge.}
-The simulator $\mathcal{S}$, given the statement $(D_s, \mathrm{ct}_B, \mathrm{ct}_C)$, samples $z \gets \ZZ_{\tilde{q}}$, $\tau_B \gets \ZZ_{N_B}^*$, $\tau_C \gets \ZZ_{N_C}^*$, programs the random oracle to return $c$, and sets:
-$A_D = z\,H - c\,D_s$,\;
-$A_B = g_B^{z}\,\tau_B^{N_B} \cdot \mathrm{ct}_B^{-c} \bmod N_B^2$,\;
-$A_C = g_C^{z}\,\tau_C^{N_C} \cdot \mathrm{ct}_C^{-c} \bmod N_C^2$.
-The simulated transcript $(A_D, A_B, A_C, c, z, \tau_B, \tau_C)$ is statistically indistinguishable from an honest transcript (statistical distance at most $2^{-\kappa}$), since the masking range $\tilde{q}$ absorbs the shift $c \cdot r_s$.
-
-Soundness in the non-interactive (Fiat--Shamir compiled) setting follows from the forking lemma~\cite{pointcheval1996security} applied in the random-oracle model.
-\end{proof}
+The complete proof (completeness, special soundness, and honest-verifier zero-knowledge) is given in Appendix~\ref{app:proof-inv}.
 
 
 \subsection{Transfer Consistency Proof}\label{sec:proof2}
 
-The Transfer Consistency Proof assumes that the Invoice Consistency Proof has been verified, so the public inputs $D_s$ and $\mathrm{ct}_B$ are known to be consistent with a single $r_s$.
+In the transfer phase, Alice folds her current holder secret $x_s$ into the recipient's ciphertext $\mathrm{ct}_B$ to produce the next holder ciphertext $T_{s+1}$. The Transfer Consistency Proof $\pi_{\mathrm{xfer}}$ is a NIZK that forces the folded value to match the public anchor $X_s$, preventing Alice from injecting an arbitrary secret that would leave Bob with an unusable credential. This proof assumes the Invoice Consistency Proof has already been verified, so $D_s$ and $\mathrm{ct}_B$ are known to be consistent with a single $r_s$.
 
 \begin{definition}[Transfer Consistency Relation]\label{def:xfer-relation}
 The relation $\mathcal{R}_{\mathrm{xfer}}$ is defined as
@@ -136,8 +141,6 @@ $$
 \right\}.
 $$
 \end{definition}
-
-\paragraph{Security motivation.} Without this proof, Alice could inject an arbitrary $x'_s \neq x_s$ into $T_{s+1}$, leaving Bob with a ciphertext inconsistent with the public anchor.
 
 \paragraph{Sigma protocol.} The prover (Alice) samples a commitment scalar $\alpha \gets \ZZ_{\tilde{q}}$ and a Paillier commitment randomness $\beta \gets \ZZ_{N_B}^*$, and computes:
 \begin{align*}
@@ -181,23 +184,12 @@ This check is outside the zero-knowledge relation itself but is necessary for pr
 The Transfer Consistency Proof is a NIZK for $\mathcal{R}_{\mathrm{xfer}}$ in the random-oracle model. The shared response $z$ forces a single integer $x_s$ to be both the discrete log of $X_s$ and the Paillier plaintext of $T_{s+1} \ominus \mathrm{ct}_B$.
 \end{theorem}
 
-\begin{proof}
-Let $U = T_{s+1} \ominus \mathrm{ct}_B = T_{s+1} \cdot \mathrm{ct}_B^{-1} \bmod N_B^2$ for brevity.
-
-\emph{Completeness.}
-With $z = \alpha + c\,x_s$ and $\tau = \beta \cdot \eta_s^c$: $z\,H = \alpha\,H + c\,x_s\,H = A_X + c\,X_s$, and $g_B^{z}\,\tau^{N_B} = g_B^{\alpha}\,\beta^{N_B} \cdot (g_B^{x_s}\,\eta_s^{N_B})^c = A_T \cdot U^c$.
-
-\emph{Special soundness.}
-Given two accepting transcripts with challenges $c \neq c'$, define $\Delta c = c - c'$, $\Delta z = z - z'$ (as integers; the masking range $\tilde{q}$ ensures no wrap-around). We extract the witness as the exact integer $x_s^* := \Delta z / \Delta c \in \ZZ$ (reducing modulo $q$ gives the EC scalar satisfying $X_s = x_s^*\,H$). From the Paillier equation: $\eta_s^* = (\tau / \tau')^{(\Delta c)^{-1}} \bmod N_B$ satisfying $U = g_B^{x_s^*}\,(\eta_s^*)^{N_B} \bmod N_B^2$ (the same integer $x_s^*$ appears in the Paillier exponent because it is derived from the shared $\Delta z$). Together, $(X_s, U;\; x_s^*, \eta_s^*) \in \mathcal{R}_{\mathrm{xfer}}$.
-
-\emph{Honest-verifier zero-knowledge.}
-The simulator samples $z \gets \ZZ_{\tilde{q}}$, $\tau \gets \ZZ_{N_B}^*$, programs $c$ via the random oracle, and sets $A_X = z\,H - c\,X_s$ and $A_T = g_B^{z}\,\tau^{N_B} \cdot U^{-c} \bmod N_B^2$. The resulting transcript is statistically indistinguishable from an honest one (statistical distance at most $2^{-\kappa}$).
-
-As with the Invoice proof, non-interactive soundness follows from the forking lemma~\cite{pointcheval1996security}.
-\end{proof}
+The complete proof follows the same structure as \autoref{thm:proof1-sound} and is given in Appendix~\ref{app:proof-xfer}.
 
 
 \subsection{Joint Consequence: Correct Transfer Step}\label{sec:joint}
+
+The two proofs above each bind a single witness to one algebraic domain; together, they guarantee that every transfer step preserves the fixed-key invariant. The following theorem makes this precise.
 
 \begin{theorem}[Transfer Correctness]\label{thm:correct-step}
 If both $\pi_{\mathrm{inv}}$ and $\pi_{\mathrm{xfer}}$ verify, and the anchor transition $X_{s+1} = X_s + D_s$ holds, then there exist integers $x_s$ and $r_s$ such that
@@ -219,65 +211,19 @@ From the Invoice Consistency Proof (\autoref{thm:proof1-sound}), extract $r_s$ s
 
 \subsection{Threshold Committee via Simple VESS}\label{sec:vess-committee}
 
-The construction presented so far assumes a \emph{single} third party $\mathsf{C}$ that holds the committee share $y_s$ and receives the refresh ciphertext $\mathrm{ct}_C = \Enc_{pk_C}(r_s)$. This is a strong trust assumption: a compromised $\mathsf{C}$ can collude with any holder to recover the full lock key $x_s + y_s$ and steal the UTXO. In this subsection we show how to replace $\mathsf{C}$ with a threshold committee of $n$ members, of which any $t$ suffice to perform the compensating update, while no coalition of fewer than $t$ learns anything about $y_s$ or $r_s$. The key observation is that this upgrade is a \emph{modular substitution}: we replace the single Paillier ciphertext $\mathrm{ct}_C$ with a Simple VESS distribution~\cite{shoup2024simple}, and the Invoice and Transfer Consistency Proofs remain unchanged.
+The construction so far assumes a single third party $\mathsf{C}$. A compromised $\mathsf{C}$ can collude with any holder to recover $x_s + y_s$ and steal the UTXO. We replace $\mathsf{C}$ with a committee of $n$ members via Simple VESS~\cite{shoup2024simple}: at channel open, $y_0$ is distributed as a $(t,n)$-Shamir sharing with Feldman commitments~\cite{feldman1987practical}; at each transfer, Bob replaces $\mathrm{ct}_C$ with a VESS distribution of $r_s$ and attaches a consistency proof. This is a \emph{modular substitution}: the Transfer Consistency Proof remains unchanged, and $\pi_{\mathrm{inv}}$ narrows to the two-receiver relation $(D_s, \mathrm{ct}_B)$ while the committee-side binding is handled by the VESS consistency proof.
 
-\paragraph{Setup.}
-Let the committee consist of $n$ members $\mathsf{C}_1, \ldots, \mathsf{C}_n$, each holding a Paillier key pair $(pk_i, sk_i)$. At channel open, the initial committee share $y_0$ is distributed via a $(t, n)$-Shamir secret sharing: the dealer samples a degree-$(t{-}1)$ polynomial $g_0$ with $g_0(0) = y_0$ and sends share $y_0^{(i)} = g_0(i)$ to $\mathsf{C}_i$. The public verification key is the set of \emph{polynomial coefficient commitments} $\{F_j = a_j\,G\}_{j=0}^{t-1}$, where $g_0(X) = \sum_{j=0}^{t-1} a_j X^j$; this is the standard Feldman~\cite{feldman1987practical} commitment scheme used by Simple VESS. Any observer verifies $\mathsf{C}_i$'s share by checking $y_0^{(i)}\,G \stackrel{?}{=} \sum_{j=0}^{t-1} i^j\,F_j$; any $t$ consistent shares reconstruct $y_0$, and no set of fewer than $t$ shares reveals any information about $y_0$.
+\paragraph{Proof bridging.}
+In the threshold setting, $\pi_{\mathrm{inv}}$ covers only the two-receiver relation $(D_s, \mathrm{ct}_B)$. The committee-side binding comes from the VESS consistency proof, which guarantees that the encrypted shares encode a unique polynomial whose free-term commitment is $F_0$. The bridge is the public identity $F_0 = D_s$: $\pi_{\mathrm{inv}}$ certifies that $D_s$ commits to $r_s$, and VESS certifies that the shares are consistent evaluations of the same $r_s$.
 
-\paragraph{Invoice phase modification.}
-When Bob issues an invoice at step $s$, he replaces the single ciphertext $\mathrm{ct}_C$ with a VESS distribution of $r_s$: he samples a degree-$(t{-}1)$ polynomial $f$ with $f(0) = r_s$, encrypts each share $r_s^{(i)} = f(i)$ under $pk_i$, publishes polynomial commitments $\{F_j = a_j\,H\}_{j=0}^{t-1}$, and attaches the VESS consistency proof that the encrypted shares are evaluations of $f$ at points $1,\ldots,n$~\cite{shoup2024simple}.
-
-Because there is no longer a single committee ciphertext, the Invoice Consistency Proof $\pi_{\mathrm{inv}}$ in the threshold setting covers only the two-receiver relation $(D_s, \mathrm{ct}_B)$: it proves that $D_s$ and $\mathrm{ct}_B$ both encode the same $r_s$. The committee-side binding is handled separately by the VESS consistency equations, which guarantee that the encrypted shares correspond to a unique degree-$(t{-}1)$ polynomial whose free-term commitment is $F_0$. The bridge between the two proofs is the public identity $F_0 = D_s$: $\pi_{\mathrm{inv}}$ certifies that $D_s$ commits to $r_s$, and the VESS proof certifies that the shares encode a polynomial with free term committed to $F_0 = D_s$. Together they force every committee member's share to be a consistent evaluation of the same $r_s$'s sharing polynomial.
-
-\paragraph{Committee update.}
-Upon receiving the VESS distribution, each committee member $\mathsf{C}_i$ decrypts $\hat{r}_s^{(i)}$ to recover $r_s^{(i)}$ and updates its local share of the committee secret:
-$$
-y_{s+1}^{(i)} = y_s^{(i)} - r_s^{(i)}.
-$$
-This update is performed locally by each member without communication. No member learns $r_s$ itself; each member only sees its own share $r_s^{(i)}$.
-
-\paragraph{Reconstruction and finalization.}
-When the current holder wishes to finalize the channel (i.e., spend the UTXO on-chain), the protocol proceeds in two stages.
-First, any $t$ committee members reconstruct $y_s$ via Lagrange interpolation on their shares $\{y_s^{(i)}\}_{i \in S}$, $|S| \geq t$; this is an internal committee operation whose secrecy is protected by the $(t,n)$-threshold honesty assumption.
-Second, the committee (holding $y_s$) and the holder (holding $x_s$) run an \emph{additive two-party Schnorr} protocol: each party samples a fresh nonce ($k_1$ and $k_2$), publishes the corresponding nonce point ($R_1 = k_1 G$, $R_2 = k_2 G$), computes the combined challenge $e = \Hash(R_1{+}R_2,\, P,\, m)$, and responds with its partial response ($s_1 = k_1 + e\,x_s$, $s_2 = k_2 + e\,y_s$); the signature $(R_1{+}R_2,\; s_1{+}s_2)$ is valid under $P = (x_s + y_s)\,G$~\cite{lindell2017fast}.
-Neither party learns the other's key share: the holder sees only $R_2$ and $s_2$, from which $y_s$ is not recoverable without $k_2$.
-This two-party structure differs from FROST~\cite{komlo2021frost}, which distributes shares of a \emph{single} key among all signers; here the key is additively split between two independent roles (holder and committee), and FROST is used only if the committee itself requires distributed signing among its $n$ members.
-
-\paragraph{Correctness.}
-The share update preserves the Shamir structure. At step $s$, define the committee polynomial $g_s(\cdot)$ by $g_s(i) = y_s^{(i)}$. At step $s+1$:
-$$
-g_{s+1}(i) = y_s^{(i)} - r_s^{(i)} = g_s(i) - f(i),
-$$
-where $f$ is the degree-$(t{-}1)$ sharing polynomial for $r_s$. Since both $g_s$ and $f$ are degree-$(t{-}1)$ polynomials, $g_{s+1} = g_s - f$ is also degree-$(t{-}1)$, and its free term is $y_s - r_s = y_{s+1}$. Thus the shares $\{y_{s+1}^{(i)}\}$ form a valid $(t, n)$-Shamir sharing of $y_{s+1}$, and the fixed-key invariant $(x_{s+1} + y_{s+1})\,G = P$ is preserved.
+\paragraph{Committee update and finalization.}
+Each member $\mathsf{C}_i$ decrypts its share $r_s^{(i)}$ and updates locally: $y_{s+1}^{(i)} = y_s^{(i)} - r_s^{(i)}$. Since both the committee polynomial and the sharing polynomial for $r_s$ have degree $t{-}1$, their difference is also degree $t{-}1$ with free term $y_{s+1} = y_s - r_s$, preserving the Shamir structure and the fixed-key invariant. At finalization, any $t$ members reconstruct $y_s$ via Lagrange interpolation and jointly sign with the holder via the two-party Schnorr protocol of \autoref{sec:bg-schnorr}.
 
 \paragraph{Security.}
-The threshold committee instantiation inherits its security from two independent guarantees:
-
-\begin{itemize}
-  \item \textbf{Secrecy of $y_s$:} As long as fewer than $t$ committee members are corrupted, the adversary obtains fewer than $t$ shares of $y_s$ and learns nothing about the committee secret (by the information-theoretic security of Shamir sharing).
-  \item \textbf{Consistency of $r_s$:} The VESS verification equations ensure that a malicious Bob cannot distribute inconsistent shares; any observer can verify that the encrypted shares are consistent with a single degree-$(t{-}1)$ polynomial whose free term matches $D_s$. If the VESS verification passes but the shares are inconsistent, the observer detects this and rejects the invoice.
-\end{itemize}
-
-The resulting trust assumption is the standard $(t, n)$-threshold honesty assumption: at most $t - 1$ of the $n$ committee members may be corrupted. This is the same assumption used by every modern threshold signing deployment (e.g., FROST~\cite{komlo2021frost}, ROAST~\cite{ruffing2022roast}), and it replaces the single-point-of-failure assumption of the basic construction with a well-understood distributed trust model.
+As long as fewer than $t$ members are corrupted, the adversary learns nothing about $y_s$ or $r_s$ (by information-theoretic security of Shamir sharing), and VESS verification prevents a malicious Bob from distributing inconsistent shares. The resulting trust model is the standard $(t,n)$-threshold honesty assumption, identical to FROST~\cite{komlo2021frost} and ROAST~\cite{ruffing2022roast}.
 
 \begin{theorem}[VESS Modularity]\label{thm:vess-modular}
-Let $\Pi_{\mathrm{single}}$ denote the single-third-party \thunderbolt construction of \autoref{sec:transfer-model}--\autoref{sec:joint}, and let $\Pi_{\mathrm{thr}}$ denote the threshold-committee instantiation of this subsection. Then $\Pi_{\mathrm{thr}}$ preserves every property of $\Pi_{\mathrm{single}}$ (fixed-key invariance, anchor correctness, ciphertext binding, and soundness of the Invoice and Transfer Consistency Proofs) under the assumption that at most $t - 1$ of the $n$ committee members are corrupted and that the Simple VESS distribution of~\cite{shoup2024simple} is secure.
+The threshold-committee instantiation preserves every property of the single-third-party construction (fixed-key invariance, anchor correctness, ciphertext binding, and proof soundness) under the $(t,n)$-threshold honesty assumption and the security of Simple VESS~\cite{shoup2024simple}.
 \end{theorem}
 
-\begin{proof}
-The Transfer Consistency Proof $\pi_{\mathrm{xfer}}$ depends only on $D_s$, $\mathrm{ct}_B$, $X_s$, and $T_{s+1}$; none of these are affected by the VESS substitution, so $\pi_{\mathrm{xfer}}$ remains sound and zero-knowledge as before. In the threshold setting, $\pi_{\mathrm{inv}}$ is run on the two-receiver relation $(D_s, \mathrm{ct}_B)$, which is a strict sub-relation of $\mathcal{R}_{\mathrm{inv}}$; its soundness and ZK properties follow by the same shared-$z$ argument of \autoref{thm:proof1-sound}. The committee-side binding is provided instead by the VESS consistency proof: VESS verification guarantees that the encrypted shares are evaluations of a unique degree-$(t{-}1)$ polynomial $f$ with $f(0) = r_s$, where $r_s\,H = F_0 = D_s$ is the public free-term commitment. A malicious Bob who distributes inconsistent shares is detected by any observer, and a Bob who sets $F_0 \neq D_s$ is rejected by $\pi_{\mathrm{inv}}$. Correctness of the committee-side update follows from the Shamir-preservation argument above. Secrecy of $y_s$ and $r_s$ holds information-theoretically as long as fewer than $t$ members are corrupted.
-\end{proof}
-
-\subsection{Channel Lifecycle}\label{sec:lifecycle}
-
-A \thunderbolt channel passes through three phases: \textbf{Open}, \textbf{Transfer} (zero or more), and \textbf{Finalize}.
-
-\paragraph{Open (on-chain).} The initial holder $\mathsf{H}_0$ and the Committee derive $P = (x_0 + y_0)\,G$ and fund a Taproot UTXO~\cite{bip340} locked to $P$. The initial anchor is $X_0 = x_0\,H$ and the initial holder ciphertext is $T_0 = \Enc_{pk_{\mathsf{H}_0}}(x_0)$.
-
-\paragraph{Transfer.} Each ownership transition follows the invoice-and-consume protocol of \autoref{sec:transfer-model}. Bob publishes $(D_s, \mathrm{ct}_B, \mathrm{ct}_C, \pi_{\mathrm{inv}})$; Alice verifies $\pi_{\mathrm{inv}}$, computes $T_{s+1}$ and $X_{s+1}$, and publishes $(T_{s+1}, X_{s+1}, \pi_{\mathrm{xfer}})$; the Committee verifies both $\pi_{\mathrm{inv}}$ and $\pi_{\mathrm{xfer}}$ against the current anchor $X_s$, then decrypts $\mathrm{ct}_C$ and updates $y_{s+1} = y_s - r_s$; Bob decrypts $T_{s+1}$ to obtain $x_{s+1}$. No step requires Alice and Bob to be online simultaneously or touches the chain. \autoref{fig:transfer} illustrates the flow.
-
-\input{figures/fig-transfer}
-
-\paragraph{Finalize.} The current holder and Committee jointly sign the closing transaction under $P$ via a standard threshold Schnorr~\cite{komlo2021frost} or ECDSA~\cite{lindell2017fast} protocol.
-
-By \autoref{thm:correct-step} and induction on $s$, the protocol preserves three invariants at every step: $(x_s + y_s)\,G = P$ (fixed key), $X_s = x_s\,H$ (anchor correctness), and $T_s = \Enc_{pk_{\mathsf{H}_s}}(x_s)$ (ciphertext correctness).
+The complete proof is given in Appendix~\ref{app:proof-vess}.

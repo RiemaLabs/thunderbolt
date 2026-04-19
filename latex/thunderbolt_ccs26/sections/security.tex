@@ -1,19 +1,19 @@
 \section{Security Analysis}\label{sec:security}
 
-We formalize \thunderbolt's security in the UC framework~\cite{canetti2001uc}.
-A protocol \emph{UC-realizes} $\mathcal{F}$ if every PPT real-world adversary can be simulated by an ideal-world simulator interacting only with $\mathcal{F}$, with computationally indistinguishable effect on any environment $\mathcal{Z}$; this implies security under arbitrary composition.
+This section formalizes the security of \thunderbolt using the Universal Composability (UC) framework of Canetti~\cite{canetti2001uc}. UC analysis captures security via an \emph{ideal functionality} $\mathcal{F}$: a trusted machine that implements the desired behavior by definition. A real-world protocol is secure if no efficient adversary can cause any observable difference between interacting with the real protocol and interacting with $\mathcal{F}$, even when the protocol is composed with arbitrary other protocols. This composability guarantee is essential for \thunderbolt, whose off-chain transfers ultimately compose with on-chain Bitcoin transactions at channel open and finalize, and may further be embedded in multi-step workflows such as atomic swaps or custody pipelines.
+
+We define the ideal functionality $\mathcal{F}_{\thunderbolt}$ (\autoref{sec:ideal-func}), which captures the three security goals of \autoref{sec:sm-goals} by construction. We then show that the real protocol UC-realizes $\mathcal{F}_{\thunderbolt}$ via a simulation argument (\autoref{sec:uc-realization}), and analyze concrete attack vectors (\autoref{sec:attack-vectors}).
 
 \subsection{Hybrid Model}\label{sec:uc-hybrid}
 
 We analyze \thunderbolt in the $(\mathcal{F}_{\mathrm{RO}},\, \mathcal{F}_{\mathrm{PKI}})$-hybrid model.
 $\mathcal{F}_{\mathrm{RO}}$ is the standard random-oracle functionality~\cite{bellare1993random},
 used by the Fiat--Shamir compilation of both NIZK proofs.
-$\mathcal{F}_{\mathrm{PKI}}$ distributes Paillier public keys $(pk_B, pk_C)$ to all parties before the
-channel opens.
-The threshold committee's Shamir sharing is information-theoretically secure and requires no
-additional ideal functionality.
-We consider a static-corruption adversary that may corrupt any subset of past and future holders
-and at most $t-1$ of the $n$ committee members before the channel opens.
+$\mathcal{F}_{\mathrm{PKI}}$ distributes Paillier public keys to all parties before the
+channel opens: $pk_B$ for the recipient and $(pk_1, \ldots, pk_n)$ for the committee members (or a single $pk_C$ in the non-threshold setting).
+The Thunderbolt Ledger is modeled as an authenticated append-only bulletin board absorbed by $\mathcal{F}_{\thunderbolt}$'s message-delivery interface.
+The adversary model follows \autoref{sec:threat-model}: static corruption of any subset of holders
+and at most $t-1$ of the $n$ committee members.
 
 \subsection{Ideal Functionality $\mathcal{F}_{\thunderbolt}$}\label{sec:ideal-func}
 
@@ -54,12 +54,11 @@ set $\mathsf{fin} \leftarrow \top$ and send $(\mathsf{closing\text{-}tx},\, P,\,
 
 \medskip\noindent
 $\mathcal{F}_{\thunderbolt}$ enforces by construction:
-(i)~only the current owner can initiate a transfer;
-(ii)~the on-chain key $P$ is fixed at open time;
-(iii)~each invoice identifier $\iota$ is consumed at most once, preventing equivocation;
-(iv)~ownership delivery is deferred to adversarial scheduling, capturing the offline-recipient guarantee;
-and (v)~finalization requires $t$ honest committee members.
-These enforce \emph{ownership security} via (i) and (v), \emph{fixed-key integrity} via (ii), and \emph{transfer correctness} plus the offline-recipient guarantee via (iii) and (iv).
+only the current owner can initiate a transfer~(i);
+the on-chain key $P$ is fixed at open time~(ii);
+each invoice identifier $\iota$ is consumed at most once~(iii);
+ownership delivery is deferred to adversarial scheduling~(iv);
+and finalization requires $t$ honest committee members~(v).
 
 \subsection{UC Realization}\label{sec:uc-realization}
 
@@ -71,6 +70,8 @@ committee members are statically corrupted.
 \end{theorem}
 
 \begin{proof}[Proof sketch]
+The high-level idea is: if a corrupted party can produce accepting proofs in the real protocol, the simulator can rewind the random oracle to extract the underlying secrets, showing that the adversary must have known the legitimate credentials---and therefore could not have cheated beyond what $\mathcal{F}_{\thunderbolt}$ allows.
+
 We construct a simulator $\mathcal{S}$ and argue that no PPT environment $\mathcal{Z}$ can distinguish
 real from ideal execution with non-negligible probability.
 
@@ -79,10 +80,9 @@ $\mathcal{S}$ holds no witness $(x_s, \eta_s)$; it invokes the ZK simulators of 
 
 \emph{Extracting from corrupted senders.}
 If a corrupted party produces accepting proofs $(\pi_{\mathrm{inv}},\, \pi_{\mathrm{xfer}})$,
-$\mathcal{S}$ programs $\mathcal{F}_{\mathrm{RO}}$ to return two distinct challenges for the same commitment, yielding two accepting transcripts, and
-runs the special-soundness extractor of \autoref{thm:proof2-sound}, yielding $x_s^*$ with
-$X_s = x_s^*\,H$.
-By the ECDLP assumption, $x_s^* = x_s$, confirming the party holds the current-owner credential;
+$\mathcal{S}$ exploits its programming authority over $\mathcal{F}_{\mathrm{RO}}$: it records the corrupted party's commitment and programs $\mathcal{F}_{\mathrm{RO}}$ to deliver a second distinct challenge for the same commitment on a subsequent query, obtaining two accepting transcripts with different challenges.
+The special-soundness extractor of \autoref{thm:proof2-sound} then yields $x_s^*$ satisfying
+$X_s = x_s^*\,H$, confirming the party holds the current-owner credential;
 $\mathcal{S}$ then forwards $(\mathsf{transfer},\, \iota)$ to $\mathcal{F}_{\thunderbolt}$.
 A corrupted party unable to produce valid proofs is rejected by honest verifiers,
 and no transfer occurs in either world.
@@ -103,32 +103,18 @@ so $\mathcal{Z}$ cannot distinguish the two worlds with non-negligible advantage
 
 \subsection{Attack Vector Analysis}\label{sec:attack-vectors}
 
-We discuss three concrete attack patterns and identify the mechanisms
-by which $\mathcal{F}_{\thunderbolt}$ rules them out.
+We discuss four concrete attack patterns and identify the mechanisms
+that address them.
 
 \paragraph{Committee--holder collusion.}
 If $t$ committee members collude with the current holder $\mathsf{H}_s$, they can reconstruct $y_s$
-and unilaterally spend the UTXO, bypassing the protocol entirely.
-This is an inherent limitation of the $(t,n)$-threshold trust model: \thunderbolt provides security
-\emph{conditional on} $|\mathcal{I}| < t$, exactly as FROST~\cite{komlo2021frost} and
-ROAST~\cite{ruffing2022roast} do for threshold signing.
-
-More broadly, any \emph{past} holder $\mathsf{H}_{s'}$ who retains their secret $x_{s'}$ is equally
-dangerous: since $(x_{s'} + y_{s'})\,G = P$ for every step $s'$, a coalition of $t$ committee members
-who can reconstruct $y_{s'}$ from their share history can combine it with $x_{s'}$ to produce a
-valid on-chain signature.
-To close this window, committee members must \emph{securely delete} their refresh shares
-$r_s^{(i)}$ immediately after each step, preventing retrospective reconstruction of past committee
-secrets $y_{s'}$.
-Without this deletion discipline, the set of parties capable of mounting the attack grows by one at
-each transfer.
-
-In practice, committee selection should follow established principles from threshold custody
-deployments: \emph{diversity} across organizational and jurisdictional domains;
-\emph{stake or reputation} via on-chain bonds with slashing for detectable misbehavior;
-and \emph{rotation} via periodic re-election with VESS-based resharing (\autoref{sec:vess-committee}).
-For high-value UTXOs, a $3$-of-$5$ or $5$-of-$9$ committee drawn from reputable custodians provides
-a trust model comparable to existing Bitcoin multisig custody solutions~\cite{antonopoulos2017mastering}.
+and unilaterally spend the UTXO.
+This is an inherent limitation of the $(t,n)$-threshold trust model, identical to
+FROST~\cite{komlo2021frost} and ROAST~\cite{ruffing2022roast}.
+A \emph{past} holder $\mathsf{H}_{s'}$ is neutralized by two mechanisms:
+(1)~finalization requires a proof of knowledge of $x_s$ matching the \emph{current} anchor $X_s$, which a past holder cannot produce;
+(2)~fewer than $t$ corrupted members cannot reconstruct any past $y_{s'}$ from their Shamir shares.
+Committee selection should follow established threshold-custody principles: diversity across organizational domains, stake or reputation with slashing, and periodic rotation via VESS resharing.
 
 \paragraph{Double-spending and equivocation.}
 A malicious holder $\mathsf{H}_s$ might attempt to (a)~consume the same invoice twice,
@@ -144,11 +130,11 @@ committee co-signatures and the committee can refuse to sign while a transfer is
 All three cases correspond to $\mathcal{F}_{\thunderbolt}$ ignoring duplicate or out-of-order inputs
 via the single-consumption rule on invoice identifiers.
 
+\paragraph{Self-transfer loops.}
+A holder may issue an invoice to itself (e.g., $A \to B \to B \to C$). The protocol treats each step uniformly: the committee verifies proofs against the current anchor, advances its state, and updates its share. The self-transfer reduces to a holder-side key rotation and introduces no new attack surface, since exploiting any past secret still requires collusion with $t$ committee members.
+
 \paragraph{Denial-of-service by the committee.}
-If fewer than $t$ committee members are responsive, the channel is frozen.
-Liveness is not a protocol goal (\autoref{sec:sm-goals}).
-Practical mitigations include: \emph{redundancy} ($n \gg t$, e.g., $t{=}3, n{=}7$);
-an \emph{on-chain timeout escape hatch} where the funding UTXO includes a timelock branch allowing
-the holder to unilaterally sweep after a pre-agreed period (e.g., 30 days), mirroring
-Lightning's commitment timeout; and \emph{committee monitoring} with heartbeats and VESS
-resharing to replace non-responsive members.
+If fewer than $t$ committee members are responsive, the channel is frozen (\autoref{sec:sm-goals}).
+Mitigations include redundancy ($n \gg t$),
+an on-chain timeout escape hatch (a timelock branch allowing the holder to unilaterally sweep after a pre-agreed period),
+and committee monitoring with heartbeats and VESS resharing to replace non-responsive members.

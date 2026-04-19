@@ -20,7 +20,7 @@ pub struct ScalabilityBenchmarkConfig {
 impl Default for ScalabilityBenchmarkConfig {
     fn default() -> Self {
         Self {
-            chain_lengths: vec![1, 10, 100, 500, 1000],
+            chain_lengths: vec![1, 10, 50, 100, 500, 1000],
         }
     }
 }

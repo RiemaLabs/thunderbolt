@@ -1,0 +1,8 @@
+cargo::rerun-if-changed=/Users/hongbowen/code/thunderbolt-lib/benchmarks/sp1-transfer-benchmark/program/src
+cargo::rerun-if-changed=/Users/hongbowen/code/thunderbolt-lib/benchmarks/sp1-transfer-benchmark/program/Cargo.toml
+cargo:rerun-if-changed=/Users/hongbowen/code/thunderbolt-lib/benchmarks/sp1-transfer-benchmark/Cargo.lock
+cargo:rerun-if-changed=/Users/hongbowen/code/thunderbolt-lib/benchmarks/sp1-transfer-benchmark/lib
+cargo:warning=docker: rustc +succinct --version: "rustc 1.93.0-dev\n"
+cargo:warning=docker: rustc_bin: "/root/.sp1/toolchains/YIHU58e2iW/bin/rustc"
+cargo:rustc-env=SP1_ELF_transfer-compare-program=/Users/hongbowen/code/thunderbolt-lib/benchmarks/sp1-transfer-benchmark/target/elf-compilation/docker/riscv64im-succinct-zkvm-elf/release/transfer-compare-program
+cargo:warning=transfer-compare-program built at 2026-04-19 03:13:25

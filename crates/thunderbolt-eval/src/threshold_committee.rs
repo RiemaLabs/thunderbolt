@@ -17,17 +17,49 @@ use thunderbolt_core::zkp::{
 };
 use thunderbolt_core::{Result, ThunderboltError};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommitteeShape {
+    pub threshold: usize,
+    pub committee_size: usize,
+}
+
+impl CommitteeShape {
+    pub fn new(threshold: usize, committee_size: usize) -> Result<Self> {
+        if threshold == 0 || committee_size < threshold {
+            return Err(ThunderboltError::InvalidParameter(format!(
+                "invalid committee shape: threshold={threshold}, committee_size={committee_size}"
+            )));
+        }
+        Ok(Self {
+            threshold,
+            committee_size,
+        })
+    }
+
+    pub fn label(&self) -> String {
+        format!("{}-of-{}", self.threshold, self.committee_size)
+    }
+
+    pub fn slack_members(&self) -> usize {
+        self.committee_size - self.threshold
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ThresholdCommitteeBenchmarkConfig {
     pub iterations: usize,
-    pub committee_sizes: Vec<usize>,
+    pub committee_shapes: Vec<CommitteeShape>,
+    pub baseline_rtt: Duration,
+    pub fanout: usize,
 }
 
 impl Default for ThresholdCommitteeBenchmarkConfig {
     fn default() -> Self {
         Self {
-            iterations: 5,
-            committee_sizes: default_committee_sizes(),
+            iterations: 3,
+            committee_shapes: default_committee_shapes(),
+            baseline_rtt: Duration::from_millis(160),
+            fanout: 4,
         }
     }
 }
@@ -42,49 +74,26 @@ pub struct DurationSummary {
     pub max: Duration,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct MaliciousSeries {
-    pub label: &'static str,
-    pub numerator: usize,
-    pub denominator: usize,
-}
-
-#[derive(Clone, Debug)]
-pub struct ThresholdStageBreakdown {
-    pub vess_distribution: DurationSummary,
-    pub distribution_verify: DurationSummary,
-    pub transfer_prove_verify: DurationSummary,
-    pub bob_decrypt: DurationSummary,
-    pub committee_apply: DurationSummary,
-    pub reconstruction: DurationSummary,
-}
-
 #[derive(Clone, Debug)]
 pub struct ThresholdCommitteePoint {
-    pub committee_size: usize,
-    pub threshold: usize,
-    pub malicious_label: &'static str,
-    pub malicious_members: usize,
-    pub honest_members: usize,
+    pub committee_shape: CommitteeShape,
+    pub delayed_members: usize,
+    pub delayed_fraction: f64,
     pub total_latency: DurationSummary,
     pub committee_completion: DurationSummary,
-    pub stage_breakdown: ThresholdStageBreakdown,
 }
 
 #[derive(Clone, Debug)]
 pub struct ThresholdCommitteeBenchmarkReport {
     pub iterations: usize,
-    pub committee_sizes: Vec<usize>,
-    pub series: Vec<MaliciousSeries>,
+    pub committee_shapes: Vec<CommitteeShape>,
+    pub baseline_rtt: Duration,
+    pub fanout: usize,
     pub points: Vec<ThresholdCommitteePoint>,
 }
 
 fn millis(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1_000.0
-}
-
-fn fraction(series: MaliciousSeries) -> f64 {
-    series.numerator as f64 / series.denominator as f64
 }
 
 fn scalar_from_u64(value: u64) -> Result<Scalar> {
@@ -138,56 +147,65 @@ fn benchmark_anchor_base() -> Scalar {
     scalar_from_u64(42).expect("fixed benchmark anchor base scalar must be valid")
 }
 
-fn default_committee_sizes() -> Vec<usize> {
-    vec![6, 12, 18]
-}
-
-fn default_malicious_series() -> Vec<MaliciousSeries> {
+fn default_committee_shapes() -> Vec<CommitteeShape> {
     vec![
-        MaliciousSeries {
-            label: "0%",
-            numerator: 0,
-            denominator: 1,
-        },
-        MaliciousSeries {
-            label: "16.7%",
-            numerator: 1,
-            denominator: 6,
-        },
-        MaliciousSeries {
-            label: "33.3%",
-            numerator: 1,
-            denominator: 3,
-        },
+        CommitteeShape::new(67, 100).expect("67-of-100 must be valid"),
+        CommitteeShape::new(34, 50).expect("34-of-50 must be valid"),
+        CommitteeShape::new(11, 15).expect("11-of-15 must be valid"),
+        CommitteeShape::new(3, 5).expect("3-of-5 must be valid"),
     ]
 }
 
-fn threshold_for_committee_size(committee_size: usize) -> usize {
-    (2 * committee_size).div_ceil(3)
+fn splitmix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9E3779B97F4A7C15);
+    let mut z = value;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^ (z >> 31)
 }
 
-fn malicious_members_for_series(committee_size: usize, series: MaliciousSeries) -> usize {
-    (committee_size * series.numerator) / series.denominator
+/// Returns a multiplicative jitter factor in [0.8, 1.2] (±20% variance)
+/// using a deterministic PRNG seeded by committee shape, iteration, and member id.
+fn member_jitter_factor(
+    committee_shape: CommitteeShape,
+    iteration: usize,
+    member_id: u32,
+) -> f64 {
+    let seed = ((committee_shape.threshold as u64) << 48)
+        ^ ((committee_shape.committee_size as u64) << 32)
+        ^ ((iteration as u64) << 8)
+        ^ u64::from(member_id);
+    let raw = splitmix64(seed) as f64 / u64::MAX as f64;
+    0.8 + 0.4 * raw
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MemberResponse {
+    member_id: u32,
+    base_completion: Duration,
+}
+
+#[derive(Debug)]
+struct IterationPrepared {
+    committee: ThresholdCommittee,
+    expected_committee_secret: Scalar,
+    joint_lock_before: secp::Point,
+    next_holder_secret: Scalar,
+    fixed_prefix: Duration,
+    base_responses: Vec<MemberResponse>,
 }
 
 #[derive(Clone, Debug)]
 struct IterationStages {
-    vess_distribution: Duration,
-    distribution_verify: Duration,
-    transfer_prove_verify: Duration,
-    bob_decrypt: Duration,
-    committee_apply: Duration,
-    reconstruction: Duration,
     committee_completion: Duration,
     total: Duration,
 }
 
-fn committee_size_iteration(
-    committee_size: usize,
-    threshold: usize,
-    malicious_members: usize,
+fn prepare_committee_shape_iteration(
+    committee_shape: CommitteeShape,
     iteration: usize,
-) -> Result<IterationStages> {
+    config: &ThresholdCommitteeBenchmarkConfig,
+) -> Result<IterationPrepared> {
     let anchor_base = benchmark_anchor_base().base_point_mul();
     let refresh = scalar_from_u64(101 + (iteration as u64 % 97))?;
     let holder_secret = scalar_from_u64(11 + iteration as u64)?;
@@ -197,15 +215,18 @@ fn committee_size_iteration(
     let bob_account = PaillierAccountLocal::new().ok_or_else(|| {
         ThunderboltError::CryptographicError("failed to initialize Bob's Paillier account".to_string())
     })?;
-    let mut committee = ThresholdCommittee::new(threshold, committee_size, anchor_base, committee_secret)?;
-
-    let total_start = Instant::now();
+    let mut committee = ThresholdCommittee::new(
+        committee_shape.threshold,
+        committee_shape.committee_size,
+        anchor_base,
+        committee_secret,
+    )?;
 
     // Stage 1: VESS distribution (Bob creates encrypted shares + proofs)
     let vess_start = Instant::now();
     let invoice_context = ProofContext::invoice(
-        format!("ctx-{committee_size}-{iteration}").into_bytes(),
-        format!("invoice-{committee_size}-{iteration}").into_bytes(),
+        format!("ctx-{}-{iteration}", committee_shape.label()).into_bytes(),
+        format!("invoice-{}-{iteration}", committee_shape.label()).into_bytes(),
     );
     let bob_nonce = random_nonce_in_group(bob_account.public_key());
     let refresh_bn = thunderbolt_core::zkp::types::scalar_to_big_number(refresh);
@@ -228,7 +249,7 @@ fn committee_size_iteration(
     let refresh_distribution = create_threshold_refresh_distribution(
         invoice_context.clone(),
         anchor_base,
-        threshold,
+        committee_shape.threshold,
         refresh,
         &committee.member_public_keys(),
     )?;
@@ -254,9 +275,9 @@ fn committee_size_iteration(
         })?;
     let transfer_statement = TransferStatement {
         context: ProofContext::transfer(
-            format!("ctx-{committee_size}-{iteration}").into_bytes(),
+            format!("ctx-{}-{iteration}", committee_shape.label()).into_bytes(),
             (iteration + 1) as u64,
-            format!("invoice-{committee_size}-{iteration}").into_bytes(),
+            format!("invoice-{}-{iteration}", committee_shape.label()).into_bytes(),
         ),
         anchor_base,
         bob_key: bob_account.public_key().clone(),
@@ -281,61 +302,95 @@ fn committee_size_iteration(
     )?)?;
     let bob_decrypt = decrypt_start.elapsed();
 
-    // Stage 5: Committee apply refresh shares
-    let honest_members = committee_size.saturating_sub(malicious_members);
-    if honest_members < threshold {
+    // Stage 5: apply all refresh shares once; delay behavior is injected later in the benchmark harness.
+    // Model fanout: Bob sends shares in waves of `fanout` members, each wave taking one RTT.
+    // Each honest member's response has ±20% multiplicative variance for realism.
+    let mut base_responses = Vec::with_capacity(committee_shape.committee_size);
+    for member_id in committee.member_ids() {
+        let member_start = Instant::now();
+        committee.apply_refresh_share(&refresh_distribution, member_id)?;
+        let local_apply = member_start.elapsed();
+        let batch_index = member_id as usize / config.fanout;
+        let batch_delay = config.baseline_rtt * batch_index as u32;
+        let deterministic_base = config.baseline_rtt + batch_delay + local_apply;
+        let jitter_factor = member_jitter_factor(committee_shape, iteration, member_id);
+        let base_completion =
+            Duration::from_secs_f64(deterministic_base.as_secs_f64() * jitter_factor);
+        base_responses.push(MemberResponse {
+            member_id,
+            base_completion,
+        });
+    }
+    base_responses.sort_by_key(|response| response.base_completion);
+
+    Ok(IterationPrepared {
+        committee,
+        expected_committee_secret: sub_scalars(committee_secret, refresh)?,
+        joint_lock_before,
+        next_holder_secret,
+        fixed_prefix: vess_distribution + distribution_verify + transfer_prove_verify + bob_decrypt,
+        base_responses,
+    })
+}
+
+fn stages_from_prepared_iteration(
+    prepared: &IterationPrepared,
+    committee_shape: CommitteeShape,
+    delayed_members: usize,
+) -> Result<IterationStages> {
+    let n = committee_shape.committee_size;
+    let non_responsive_ids: Vec<u32> = if delayed_members == 0 {
+        Vec::new()
+    } else {
+        (0..delayed_members)
+            .map(|i| ((i * n) / delayed_members) as u32)
+            .collect()
+    };
+
+    let mut responses: Vec<MemberResponse> = prepared
+        .base_responses
+        .iter()
+        .filter(|r| !non_responsive_ids.contains(&r.member_id))
+        .cloned()
+        .collect();
+    responses.sort_by_key(|response| response.base_completion);
+
+    if responses.len() < committee_shape.threshold {
         return Err(ThunderboltError::ThresholdNotMet {
-            required: threshold as u32,
-            actual: honest_members as u32,
+            required: committee_shape.threshold as u32,
+            actual: responses.len() as u32,
         });
     }
 
-    let committee_apply_start = Instant::now();
-    let honest_member_ids = committee
-        .member_ids()
-        .into_iter()
-        .take(honest_members)
-        .collect::<Vec<_>>();
-    let mut per_member_durations = Vec::with_capacity(honest_members);
-    for member_id in &honest_member_ids {
-        let member_start = Instant::now();
-        committee.apply_refresh_share(&refresh_distribution, *member_id)?;
-        per_member_durations.push(member_start.elapsed());
-    }
-    per_member_durations.sort_unstable();
-    let committee_completion = per_member_durations[threshold - 1];
-    let committee_apply = committee_apply_start.elapsed();
+    let committee_completion = responses[committee_shape.threshold - 1].base_completion;
 
-    // Stage 6: Reconstruction
     let reconstruct_start = Instant::now();
-    let reconstructed_committee_secret = committee.reconstruct_secret(&honest_member_ids[..threshold])?;
+    let reconstructed_committee_secret = prepared.committee.reconstruct_secret(
+        &responses
+            .iter()
+            .take(committee_shape.threshold)
+            .map(|response| response.member_id)
+            .collect::<Vec<_>>(),
+    )?;
     let reconstruction = reconstruct_start.elapsed();
 
-    let expected_committee_secret = sub_scalars(committee_secret, refresh)?;
-    if reconstructed_committee_secret != expected_committee_secret {
+    if reconstructed_committee_secret != prepared.expected_committee_secret {
         return Err(ThunderboltError::InvalidStateTransition(
             "threshold reconstruction did not match the expected committee secret after refresh".to_string(),
         ));
     }
 
-    let joint_lock_after = add_scalars(next_holder_secret, reconstructed_committee_secret)?.base_point_mul();
-    if joint_lock_before != joint_lock_after {
+    let joint_lock_after =
+        add_scalars(prepared.next_holder_secret, reconstructed_committee_secret)?.base_point_mul();
+    if prepared.joint_lock_before != joint_lock_after {
         return Err(ThunderboltError::InvalidStateTransition(
             "joint on-chain lock key changed after threshold committee refresh".to_string(),
         ));
     }
 
-    let total = total_start.elapsed();
-
     Ok(IterationStages {
-        vess_distribution,
-        distribution_verify,
-        transfer_prove_verify,
-        bob_decrypt,
-        committee_apply,
-        reconstruction,
         committee_completion,
-        total,
+        total: prepared.fixed_prefix + committee_completion + reconstruction,
     })
 }
 
@@ -348,64 +403,58 @@ pub fn run_threshold_committee_suite(
         ));
     }
 
-    let series = default_malicious_series();
-    let mut points = Vec::new();
-    let committee_sizes = if config.committee_sizes.is_empty() {
-        default_committee_sizes()
+    let committee_shapes = if config.committee_shapes.is_empty() {
+        default_committee_shapes()
     } else {
-        config.committee_sizes.clone()
+        config.committee_shapes.clone()
     };
 
-    for committee_size in &committee_sizes {
-        let threshold = threshold_for_committee_size(*committee_size);
-        for malicious_series in &series {
-            let malicious_members = malicious_members_for_series(*committee_size, *malicious_series);
-            let mut committee_completion_samples = Vec::with_capacity(config.iterations);
-            let mut total_latency_samples = Vec::with_capacity(config.iterations);
-            let mut vess_dist_samples = Vec::with_capacity(config.iterations);
-            let mut dist_verify_samples = Vec::with_capacity(config.iterations);
-            let mut transfer_pv_samples = Vec::with_capacity(config.iterations);
-            let mut bob_decrypt_samples = Vec::with_capacity(config.iterations);
-            let mut committee_apply_samples = Vec::with_capacity(config.iterations);
-            let mut reconstruction_samples = Vec::with_capacity(config.iterations);
+    #[derive(Default)]
+    struct PointSamples {
+        committee_completion: Vec<Duration>,
+        total_latency: Vec<Duration>,
+    }
 
-            for iteration in 0..config.iterations {
+    let mut points = Vec::new();
+    for committee_shape in &committee_shapes {
+        let mut point_samples = (0..=committee_shape.slack_members())
+            .map(|_| PointSamples {
+                committee_completion: Vec::with_capacity(config.iterations),
+                total_latency: Vec::with_capacity(config.iterations),
+            })
+            .collect::<Vec<_>>();
+
+        for iteration in 0..config.iterations {
+            let prepared = prepare_committee_shape_iteration(*committee_shape, iteration, &config)?;
+            for (delayed_members, samples) in point_samples.iter_mut().enumerate() {
                 let stages =
-                    committee_size_iteration(*committee_size, threshold, malicious_members, iteration)?;
-                committee_completion_samples.push(stages.committee_completion);
-                total_latency_samples.push(stages.total);
-                vess_dist_samples.push(stages.vess_distribution);
-                dist_verify_samples.push(stages.distribution_verify);
-                transfer_pv_samples.push(stages.transfer_prove_verify);
-                bob_decrypt_samples.push(stages.bob_decrypt);
-                committee_apply_samples.push(stages.committee_apply);
-                reconstruction_samples.push(stages.reconstruction);
+                    stages_from_prepared_iteration(&prepared, *committee_shape, delayed_members)?;
+                samples.committee_completion.push(stages.committee_completion);
+                samples.total_latency.push(stages.total);
             }
+        }
 
+        for (delayed_members, samples) in point_samples.into_iter().enumerate() {
+            let delayed_fraction = if committee_shape.slack_members() == 0 {
+                0.0
+            } else {
+                delayed_members as f64 / committee_shape.slack_members() as f64
+            };
             points.push(ThresholdCommitteePoint {
-                committee_size: *committee_size,
-                threshold,
-                malicious_label: malicious_series.label,
-                malicious_members,
-                honest_members: committee_size - malicious_members,
-                total_latency: summarize(&total_latency_samples)?,
-                committee_completion: summarize(&committee_completion_samples)?,
-                stage_breakdown: ThresholdStageBreakdown {
-                    vess_distribution: summarize(&vess_dist_samples)?,
-                    distribution_verify: summarize(&dist_verify_samples)?,
-                    transfer_prove_verify: summarize(&transfer_pv_samples)?,
-                    bob_decrypt: summarize(&bob_decrypt_samples)?,
-                    committee_apply: summarize(&committee_apply_samples)?,
-                    reconstruction: summarize(&reconstruction_samples)?,
-                },
+                committee_shape: *committee_shape,
+                delayed_members,
+                delayed_fraction,
+                total_latency: summarize(&samples.total_latency)?,
+                committee_completion: summarize(&samples.committee_completion)?,
             });
         }
     }
 
     Ok(ThresholdCommitteeBenchmarkReport {
         iterations: config.iterations,
-        committee_sizes,
-        series,
+        committee_shapes,
+        baseline_rtt: config.baseline_rtt,
+        fanout: config.fanout,
         points,
     })
 }
@@ -413,26 +462,20 @@ pub fn run_threshold_committee_suite(
 impl ThresholdCommitteeBenchmarkReport {
     pub fn to_csv_string(&self) -> String {
         let mut csv = String::from(
-            "committee_size,threshold,malicious_label,malicious_fraction,malicious_members,honest_members,total_latency_avg_ms,total_latency_p50_ms,total_latency_p95_ms,total_latency_p99_ms,total_latency_min_ms,total_latency_max_ms,committee_completion_avg_ms,committee_completion_p50_ms,committee_completion_p95_ms,committee_completion_p99_ms,committee_completion_min_ms,committee_completion_max_ms,iterations\n",
+            "committee_label,committee_size,threshold,slack_members,non_responsive_members,non_responsive_fraction,baseline_rtt_ms,fanout,total_latency_avg_ms,total_latency_p50_ms,total_latency_p95_ms,total_latency_p99_ms,total_latency_min_ms,total_latency_max_ms,committee_completion_avg_ms,committee_completion_p50_ms,committee_completion_p95_ms,committee_completion_p99_ms,committee_completion_min_ms,committee_completion_max_ms,iterations\n",
         );
 
-        let mut points = self.points.iter().collect::<Vec<_>>();
-        points.sort_by_key(|point| (point.committee_size, point.malicious_members));
-
-        for point in points {
-            let malicious_series = self
-                .series
-                .iter()
-                .find(|series| series.label == point.malicious_label)
-                .expect("benchmark point should always map back to its malicious-fraction series");
+        for point in &self.points {
             csv.push_str(&format!(
-                "{},{},{},{:.4},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{}\n",
-                point.committee_size,
-                point.threshold,
-                point.malicious_label,
-                fraction(*malicious_series),
-                point.malicious_members,
-                point.honest_members,
+                "{},{},{},{},{},{:.4},{:.3},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{}\n",
+                point.committee_shape.label(),
+                point.committee_shape.committee_size,
+                point.committee_shape.threshold,
+                point.committee_shape.slack_members(),
+                point.delayed_members,
+                point.delayed_fraction,
+                millis(self.baseline_rtt),
+                self.fanout,
                 millis(point.total_latency.average),
                 millis(point.total_latency.p50),
                 millis(point.total_latency.p95),
@@ -474,102 +517,40 @@ impl ThresholdCommitteeBenchmarkReport {
 
 impl fmt::Display for ThresholdCommitteeBenchmarkReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "threshold committee benchmark (real implementation)")?;
+        writeln!(f, "threshold committee delay benchmark (real implementation)")?;
         writeln!(f, "iterations: {}", self.iterations)?;
-        writeln!(f, "x-axis: committee members")?;
-        writeln!(f, "lines: 0%, 16.7%, 33.3% malicious members")?;
-        writeln!(f, "threshold policy: t = ceil(2n/3)")?;
-        writeln!(f)?;
-        writeln!(f, "total transfer latency avg / p95 (ms)")?;
+        writeln!(f, "x-axis: delayed fraction f / (n - t)")?;
         writeln!(
             f,
-            "committee size   0% malicious         16.7% malicious      33.3% malicious"
-        )?;
-        writeln!(
-            f,
-            "----------------------------------------------------------------------------"
-        )?;
-        for committee_size in &self.committee_sizes {
-            write!(f, "{committee_size:>14} ")?;
-            for malicious_series in &self.series {
-                let point = self
-                    .points
-                    .iter()
-                    .find(|point| {
-                        point.committee_size == *committee_size && point.malicious_label == malicious_series.label
-                    })
-                    .expect("all committee sizes and malicious series should have a benchmark point");
-                write!(
-                    f,
-                    "{:>7.2}/{:>7.2} ",
-                    millis(point.total_latency.average),
-                    millis(point.total_latency.p95),
-                )?;
-            }
-            writeln!(f)?;
-        }
-
-        writeln!(f)?;
-        writeln!(f, "committee completion avg / p95 (ms)")?;
-        writeln!(
-            f,
-            "committee size   0% malicious         16.7% malicious      33.3% malicious"
-        )?;
-        writeln!(
-            f,
-            "----------------------------------------------------------------------------"
-        )?;
-        for committee_size in &self.committee_sizes {
-            write!(f, "{committee_size:>14} ")?;
-            for malicious_series in &self.series {
-                let point = self
-                    .points
-                    .iter()
-                    .find(|point| {
-                        point.committee_size == *committee_size && point.malicious_label == malicious_series.label
-                    })
-                    .expect("all committee sizes and malicious series should have a benchmark point");
-                write!(
-                    f,
-                    "{:>7.2}/{:>7.2} ",
-                    millis(point.committee_completion.average),
-                    millis(point.committee_completion.p95),
-                )?;
-            }
-            writeln!(f)?;
-        }
-
-        // Stage breakdown table (0% malicious only, for clarity)
-        writeln!(f)?;
-        writeln!(f, "stage breakdown avg (ms), 0% malicious")?;
-        writeln!(
-            f,
-            "committee size   VESS dist   dist verify   xfer p+v   bob dec   cmte apply   reconstr"
-        )?;
-        writeln!(
-            f,
-            "------------------------------------------------------------------------------------"
-        )?;
-        for committee_size in &self.committee_sizes {
-            let point = self
-                .points
+            "committee setups: {}",
+            self.committee_shapes
                 .iter()
-                .find(|point| point.committee_size == *committee_size && point.malicious_label == "0%")
-                .expect("all committee sizes should have a 0% malicious benchmark point");
-            let bd = &point.stage_breakdown;
+                .map(CommitteeShape::label)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )?;
+        writeln!(f, "baseline RTT (ms): {:.1}", millis(self.baseline_rtt))?;
+        writeln!(f, "fanout: {}", self.fanout)?;
+        writeln!(f, "response jitter: +/-20%")?;
+        writeln!(f)?;
+        writeln!(f, "shape             f/(n-t)   delayed   total avg/p95 (ms)   committee avg/p95 (ms)")?;
+        writeln!(
+            f,
+            "--------------------------------------------------------------------------------"
+        )?;
+        for point in &self.points {
             writeln!(
                 f,
-                "{:>14} {:>9.1} {:>13.1} {:>10.1} {:>9.1} {:>12.1} {:>10.1}",
-                committee_size,
-                millis(bd.vess_distribution.average),
-                millis(bd.distribution_verify.average),
-                millis(bd.transfer_prove_verify.average),
-                millis(bd.bob_decrypt.average),
-                millis(bd.committee_apply.average),
-                millis(bd.reconstruction.average),
+                "{:>10} {:>11.3} {:>9} {:>9.2}/{:>7.2} {:>12.2}/{:>7.2}",
+                point.committee_shape.label(),
+                point.delayed_fraction,
+                point.delayed_members,
+                millis(point.total_latency.average),
+                millis(point.total_latency.p95),
+                millis(point.committee_completion.average),
+                millis(point.committee_completion.p95),
             )?;
         }
-
         Ok(())
     }
 }
@@ -579,20 +560,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn threshold_policy_is_two_thirds_rounded_up() {
-        assert_eq!(threshold_for_committee_size(6), 4);
-        assert_eq!(threshold_for_committee_size(12), 8);
-        assert_eq!(threshold_for_committee_size(18), 12);
+    fn committee_shape_validates_bounds() {
+        assert!(CommitteeShape::new(3, 5).is_ok());
+        assert!(CommitteeShape::new(0, 5).is_err());
+        assert!(CommitteeShape::new(6, 5).is_err());
     }
 
     #[test]
-    fn malicious_series_matches_requested_fractions() {
-        let series = default_malicious_series();
-        assert_eq!(malicious_members_for_series(6, series[0]), 0);
-        assert_eq!(malicious_members_for_series(6, series[1]), 1);
-        assert_eq!(malicious_members_for_series(6, series[2]), 2);
-        assert_eq!(malicious_members_for_series(12, series[1]), 2);
-        assert_eq!(malicious_members_for_series(12, series[2]), 4);
+    fn default_committee_shapes_follow_requested_roast_setups() {
+        let shapes = default_committee_shapes();
+        let labels = shapes.iter().map(CommitteeShape::label).collect::<Vec<_>>();
+        assert_eq!(labels, vec!["67-of-100", "34-of-50", "11-of-15", "3-of-5"]);
     }
 
     fn dummy_summary(ms: u64) -> DurationSummary {
@@ -607,32 +585,23 @@ mod tests {
     }
 
     #[test]
-    fn csv_export_contains_all_series() {
+    fn csv_export_contains_shape_and_delayed_fraction() {
         let report = ThresholdCommitteeBenchmarkReport {
             iterations: 1,
-            committee_sizes: vec![6],
-            series: default_malicious_series(),
+            committee_shapes: vec![CommitteeShape::new(3, 5).unwrap()],
+            baseline_rtt: Duration::from_millis(160),
+            fanout: 4,
             points: vec![ThresholdCommitteePoint {
-                committee_size: 6,
-                threshold: 4,
-                malicious_label: "16.7%",
-                malicious_members: 1,
-                honest_members: 5,
-                total_latency: dummy_summary(2700),
-                committee_completion: dummy_summary(130),
-                stage_breakdown: ThresholdStageBreakdown {
-                    vess_distribution: dummy_summary(1500),
-                    distribution_verify: dummy_summary(400),
-                    transfer_prove_verify: dummy_summary(500),
-                    bob_decrypt: dummy_summary(30),
-                    committee_apply: dummy_summary(240),
-                    reconstruction: dummy_summary(30),
-                },
+                committee_shape: CommitteeShape::new(3, 5).unwrap(),
+                delayed_members: 1,
+                delayed_fraction: 0.5,
+                total_latency: dummy_summary(800),
+                committee_completion: dummy_summary(320),
             }],
         };
 
         let csv = report.to_csv_string();
-        assert!(csv.starts_with("committee_size,threshold"));
-        assert!(csv.contains("16.7%,0.1667,1,5,2700.000"));
+        assert!(csv.starts_with("committee_label,committee_size,threshold"));
+        assert!(csv.contains("3-of-5,5,3,2,1,0.5000,160.000,4,800.000"));
     }
 }

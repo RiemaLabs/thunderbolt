@@ -1,4 +1,3 @@
-use bitcoin::key::rand::thread_rng;
 use libpaillier::{unknown_order::BigNumber, Ciphertext, EncryptionKey, Nonce};
 use secp::Point;
 
@@ -7,7 +6,10 @@ use crate::paillier::{
     random_nonce_in_group, validate_ciphertext, validate_nonce, validate_plaintext,
 };
 use crate::zkp::transcript::ProofTranscript;
-use crate::zkp::types::{scalar_to_big_number, IntegerResponse, ProofContext, ProofTag};
+use crate::zkp::types::{
+    random_commitment_scalar, reduce_big_number_mod_curve_order, scalar_to_big_number, IntegerResponse, ProofContext,
+    ProofTag,
+};
 use crate::{Result, ThunderboltError};
 
 #[derive(Clone, Debug)]
@@ -81,14 +83,16 @@ pub fn prove_share_encryption(
         ));
     }
 
-    let alpha = secp::Scalar::random(&mut thread_rng());
-    let alpha_bn = scalar_to_big_number(alpha);
+    let alpha_bn = random_commitment_scalar();
+    let alpha_scalar = reduce_big_number_mod_curve_order(&alpha_bn)?
+        .not_zero()
+        .map_err(|_| ThunderboltError::CryptographicError("commitment scalar reduced to zero mod q".to_string()))?;
     let beta = random_nonce_in_group(&statement.recipient_key);
-    let a_point = statement.anchor_base * alpha;
+    let a_point = statement.anchor_base * alpha_scalar;
     let a_ciphertext = compose_ciphertext(&statement.recipient_key, &alpha_bn, &beta)?;
 
     let challenge = share_challenge(statement, &a_point, &a_ciphertext);
-    let response = IntegerResponse::from_linear_relation(alpha, challenge.integer(), witness.secret)?;
+    let response = IntegerResponse::from_linear_relation(&alpha_bn, challenge.integer(), witness.secret)?;
     let tau = combine_response_nonce(&statement.recipient_key, &beta, &witness.nonce, challenge.integer())?;
 
     Ok(ShareEncryptionProof {

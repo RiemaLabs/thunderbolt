@@ -1,0 +1,23 @@
+{
+  "iterations": 5,
+  "paillier_bits": 256,
+  "execute": null,
+  "prove": {
+    "total_secs": 272.785685042,
+    "average_secs": 54.557137008400005,
+    "min_secs": 52.660283875,
+    "max_secs": 56.320994708
+  },
+  "verify": {
+    "total_secs": 0.33558525,
+    "average_secs": 0.06711705,
+    "min_secs": 0.0659255,
+    "max_secs": 0.068471584
+  },
+  "total": {
+    "total_secs": 276.168135875,
+    "average_secs": 55.233627175,
+    "min_secs": 53.337081791,
+    "max_secs": 56.982910584
+  }
+}

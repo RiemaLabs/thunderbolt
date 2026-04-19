@@ -1,16 +1,18 @@
-\section{System Model and Design Rationale}\label{sec:sysmodel}
+\section{Threat Model}\label{sec:threat-model}
 
-A \thunderbolt channel involves three parties (a sequence of holders, a threshold committee, and the Bitcoin Chain) operating under an additive key-sharing invariant. We specify their roles and trust assumptions (\autoref{sec:sm-participants}), state the security goals (\autoref{sec:sm-goals}), and explain why the VEDL + VESS composition is both necessary and sufficient (\autoref{sec:design-rationale}).
+A \thunderbolt channel involves three roles (a sequence of holders, a semi-trusted party, and the Bitcoin Chain as a passive settlement layer) communicating through a shared append-only ledger (the \emph{Thunderbolt Ledger}), all operating under an additive key-sharing invariant. We specify the participants and communication model (\autoref{sec:sm-participants}) and state the security goals (\autoref{sec:sm-goals}).
 
-\subsection{Participants and Trust Assumptions}\label{sec:sm-participants}
+\subsection{Parties, Communication, and Trust}\label{sec:sm-participants}
 
 A \thunderbolt channel has three participant roles:
 
 \begin{itemize}
   \item The \textbf{Holder} (initially $\mathsf{H}_0$) is the party that currently owns the UTXO off-chain. Over the lifetime of the channel, the holder role is handed from one user to the next: $\mathsf{H}_0 \to \mathsf{H}_1 \to \cdots$, where each $\mathsf{H}_s$ is an independent user.
-  \item The \textbf{Committee} $\mathsf{C} = \{\mathsf{C}_1, \ldots, \mathsf{C}_n\}$ is a fixed (but possibly threshold) group that maintains the complementary share of the lock key. $\mathsf{C}$ never owns the UTXO and never learns the holder secret; its sole role is to preserve the fixed-key invariant via the compensating update.
+  \item The \textbf{Semi-trusted party} $\mathsf{C}$ maintains the complementary share of the lock key. $\mathsf{C}$ never owns the UTXO and never learns the holder secret; its sole role is to preserve the fixed-key invariant via the compensating update. In practice, $\mathsf{C}$ is instantiated as a threshold committee $\{\mathsf{C}_1, \ldots, \mathsf{C}_n\}$ to distribute trust (\autoref{sec:vess-committee}).
   \item The \textbf{Bitcoin Chain} plays the role of a passive verifier: it sees exactly two transactions over the channel's lifetime (Setup and Finalize), regardless of how many holder transitions occur in between.
 \end{itemize}
+
+All off-chain communication is mediated by the \textbf{Thunderbolt Ledger}, a shared append-only bulletin board visible to all participants. Each UTXO channel is independently bound to the ledger via a distinct context identifier, so multiple UTXOs can be transferred in parallel without interference. The ledger itself is not a trusted party: it provides availability and ordering but cannot forge, suppress, or alter entries. Concretely, any authenticated broadcast medium (a smart-contract log, a federated bulletin board, or a dedicated server with append-only semantics) can instantiate the Thunderbolt Ledger.
 
 We consider a static-corruption adversary $\mathcal{A}$ that may corrupt any subset of holders (past or future) and at most $t - 1$ of the $n$ committee members before the channel opens. The adversary is probabilistic polynomial-time (PPT) and interacts with the protocol in the random-oracle model, which \autoref{sec:security} instantiates as the $(\mathcal{F}_{\mathrm{RO}},\mathcal{F}_{\mathrm{PKI}})$-hybrid. This trust model is identical to that of standard threshold-signing deployments (FROST~\cite{komlo2021frost}, ROAST~\cite{ruffing2022roast}).
 
@@ -25,13 +27,3 @@ We consider a static-corruption adversary $\mathcal{A}$ that may corrupt any sub
 \end{enumerate}
 
 \thunderbolt provides no liveness guarantee (fewer than $t$ responsive members freezes the channel) and does not hide the transfer graph.
-
-\subsection{Design Rationale}\label{sec:design-rationale}
-
-A correct transfer step must produce three cryptographic objects simultaneously: a Paillier ciphertext of $x_{s+1} = x_s + r_s$ under Bob's key, a Paillier ciphertext of the refresh $r_s$ under the committee's key, and a public anchor delta $D_s = r_s\,H$ on the elliptic curve. All three must be \emph{bound to the same integer}; otherwise a dishonest party can break the fixed-key invariant $(x_s + y_s)\,G = P$.
-
-\emph{VEDL for per-step correctness.} Verifiable encryption of discrete logarithms~\cite{camenisch2003verifiable} (\autoref{sec:bg-vedl}) provides this binding. Its shared Sigma response $z$ forces the Paillier plaintext and the elliptic-curve discrete log to be the same integer. We instantiate VEDL in two ways: the Transfer Consistency Proof uses a single-receiver instance; the Invoice Consistency Proof extends VEDL to a multi-receiver setting with a single shared $z$ binding three objects simultaneously.
-
-\emph{VESS for threshold trust.} VEDL alone concentrates the committee role in a single actor. VESS~\cite{shoup2024simple} (\autoref{sec:bg-vess}) removes this single point of failure: the refresh $r_s$ is verifiably encrypted as a $(t,n)$-Shamir sharing, so that any $t$ honest members can perform $y_{s+1} = y_s - r_s$ collectively, while no coalition of fewer than $t$ learns anything. This substitution is modular: VESS replaces the single ciphertext $\mathrm{ct}_C$ with a set of verifiably encrypted shares, and neither proof changes form.
-
-\emph{Necessity of the composition.} Neither primitive alone suffices. VEDL without VESS forces a single trusted third party. VESS without VEDL cannot bind the shared secret to the on-chain elliptic-curve anchor. Together, VEDL enforces per-step correctness and VESS distributes the committee role across a threshold group.

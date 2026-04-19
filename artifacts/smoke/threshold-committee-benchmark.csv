@@ -1,4 +1,0 @@
-committee_size,threshold,malicious_label,malicious_fraction,malicious_members,honest_members,total_latency_avg_ms,total_latency_p50_ms,total_latency_p95_ms,total_latency_p99_ms,total_latency_min_ms,total_latency_max_ms,committee_completion_avg_ms,committee_completion_p50_ms,committee_completion_p95_ms,committee_completion_p99_ms,committee_completion_min_ms,committee_completion_max_ms,iterations
-6,4,0%,0.0000,0,6,2672.850,2672.850,2672.850,2672.850,2672.850,2672.850,128.014,128.014,128.014,128.014,128.014,128.014,1
-6,4,16.7%,0.1667,1,5,2694.863,2694.863,2694.863,2694.863,2694.863,2694.863,129.162,129.162,129.162,129.162,129.162,129.162,1
-6,4,33.3%,0.3333,2,4,2731.290,2731.290,2731.290,2731.290,2731.290,2731.290,130.527,130.527,130.527,130.527,130.527,130.527,1

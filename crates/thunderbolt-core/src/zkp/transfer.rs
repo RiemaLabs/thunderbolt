@@ -1,4 +1,3 @@
-use bitcoin::key::rand::thread_rng;
 use libpaillier::{unknown_order::BigNumber, Ciphertext, EncryptionKey, Nonce};
 use secp::{MaybePoint, Point, Scalar};
 
@@ -8,7 +7,10 @@ use crate::paillier::{
     validate_plaintext,
 };
 use crate::zkp::transcript::ProofTranscript;
-use crate::zkp::types::{scalar_to_big_number, IntegerResponse, ProofContext, ProofTag};
+use crate::zkp::types::{
+    random_commitment_scalar, reduce_big_number_mod_curve_order, scalar_to_big_number, IntegerResponse, ProofContext,
+    ProofTag,
+};
 use crate::{Result, ThunderboltError};
 
 #[derive(Clone, Debug)]
@@ -81,15 +83,17 @@ pub fn prove_transfer(statement: &TransferStatement, witness: &TransferWitness) 
         ));
     }
 
-    let alpha = Scalar::random(&mut thread_rng());
-    let alpha_bn = scalar_to_big_number(alpha);
+    let alpha_bn = random_commitment_scalar();
+    let alpha_scalar = reduce_big_number_mod_curve_order(&alpha_bn)?
+        .not_zero()
+        .map_err(|_| ThunderboltError::CryptographicError("commitment scalar reduced to zero mod q".to_string()))?;
     let beta = random_nonce_in_group(&statement.bob_key);
 
-    let a_anchor = statement.anchor_base * alpha;
+    let a_anchor = statement.anchor_base * alpha_scalar;
     let a_ciphertext = compose_ciphertext(&statement.bob_key, &alpha_bn, &beta)?;
 
     let challenge = transfer_challenge(statement, &a_anchor, &a_ciphertext);
-    let response = IntegerResponse::from_linear_relation(alpha, challenge.integer(), witness.holder_secret)?;
+    let response = IntegerResponse::from_linear_relation(&alpha_bn, challenge.integer(), witness.holder_secret)?;
     let tau = combine_response_nonce(&statement.bob_key, &beta, &witness.holder_nonce, challenge.integer())?;
 
     Ok(TransferProof {

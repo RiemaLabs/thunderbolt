@@ -1,24 +1,23 @@
 \section{Evaluation}\label{sec:eval}
 
-We address four research questions:
+We address three research questions:
 \begin{itemize}
-  \item \textbf{RQ1}~(\autoref{sec:eval-micro}): How fast is a single off-chain transfer, and where is the time spent?
-  \item \textbf{RQ2}~(\autoref{sec:eval-scalability}): Does per-transfer cost remain constant as the proof chain grows?
-  \item \textbf{RQ3}~(\autoref{sec:eval-threshold}): How does the threshold-committee path scale with committee size and fault tolerance?
-  \item \textbf{RQ4}~(\autoref{sec:eval-comparison}): How does \thunderbolt's Sigma-protocol construction compare with general-purpose SNARK backends?
+  \item \textbf{RQ1}~(\autoref{sec:eval-micro}): How fast is a single off-chain transfer, and does per-transfer cost remain constant as the transfer count grows?
+  \item \textbf{RQ2}~(\autoref{sec:eval-threshold}): How does the threshold-committee path scale with committee size and fault tolerance?
+  \item \textbf{RQ3}~(\autoref{sec:eval-comparison}): How does \thunderbolt's Sigma-protocol construction compare with general-purpose SNARK backends?
 \end{itemize}
 
 \paragraph{Experimental setup.}
-All benchmarks were run on a single machine with an Apple~M3~Max processor (14-core, 10 performance + 4 efficiency), 36\,GB unified memory, macOS~15.2, compiled with \texttt{rustc}~1.90.0 in release mode with LTO enabled.
+All benchmarks were run on a single laptop with an Apple~M3~Max processor (14-core, 10 performance + 4 efficiency), 36\,GB unified memory, macOS~15.2, compiled with \texttt{rustc}~1.90.0 in release mode with LTO enabled.
 The \thunderbolt implementation uses the \texttt{rust-paillier} crate for Paillier operations with a 3072-bit modulus ($|N| = 3072$, so all Paillier arithmetic operates over 6144-bit integers in $\ZZ_{N^2}$) and the \texttt{k256} crate for secp256k1 elliptic-curve arithmetic.
 The single-committee microbenchmarks report the average, minimum, and maximum over 100 iterations with a 3-iteration warmup discarded.
 Bob's per-member VESS share proofs are generated in parallel using \texttt{rayon}; all other steps are sequential as they would be on a single machine.
-The threshold-committee benchmark executes the full per-transfer threshold path over 5 iterations.
+The threshold-committee benchmark uses the same four committee shapes as ROAST~\cite{ruffing2022roast} (3-of-5, 11-of-15, 34-of-50, 67-of-100) with 3 iterations, a 160\,ms baseline RTT, $\pm 20\%$ multiplicative jitter per honest member, and a network fanout of 4 (shares are delivered in waves of 4 members, each wave separated by one baseline RTT). Non-responsive members are modeled as silent: they never reply, forcing the protocol to reach threshold from the remaining honest members alone.
 
 % ----------------------------------------------------------------
-\subsection{RQ1: Single-Transfer Latency}\label{sec:eval-micro}
+\subsection{RQ1: Transfer Latency and Scalability}\label{sec:eval-micro}
 
-\noindent\textit{How fast is a single \thunderbolt off-chain transfer, and where is the time spent?}
+\noindent\textit{How fast is a single \thunderbolt off-chain transfer, where is the time spent, and does per-transfer cost remain constant as the transfer count grows?}
 
 \medskip
 A single off-chain transfer executes nine stages: invoice setup, invoice prove, invoice verify, transfer setup, transfer prove, anchor verify, transfer verify, Bob decrypt, and committee update. \autoref{tab:stages} reports measured wall-clock time for each stage.
@@ -26,251 +25,121 @@ A single off-chain transfer executes nine stages: invoice setup, invoice prove, 
 \begin{table}[h]
 \centering
 \small
-\begin{tabular}{@{}lrrr@{}}
+\begin{tabular}{@{}lrrr|r@{}}
 \toprule
-\textbf{Stage} & \textbf{Avg (ms)} & \textbf{Min (ms)} & \textbf{Max (ms)} \\
+\textbf{Stage} & \textbf{Avg (ms)} & \textbf{Min (ms)} & \textbf{Max (ms)} & \textbf{Share} \\
 \midrule
-Invoice setup       & 121.4 & 118.4 & 145.4 \\
-Invoice prove       & 316.3 & 308.8 & 353.0 \\
-Invoice verify      & 201.4 & 197.1 & 237.4 \\
-Transfer setup      &  65.4 &  63.8 &  73.3 \\
-Transfer prove      & 165.3 & 161.1 & 240.7 \\
-Anchor verify       & $<\!0.01$ & $<\!0.01$ & $<\!0.01$ \\
-Transfer verify     & 113.1 & 110.3 & 121.2 \\
-Bob decrypt         &  31.2 &  30.1 &  36.2 \\
-Committee update    &  31.1 &  30.2 &  37.2 \\
+Invoice setup       & 119.0 & 115.9 & 152.9 & \multirow{2}{*}{18.0\%} \\
+Transfer setup      &  64.5 &  63.0 &  81.6 & \\
+\addlinespace
+Invoice prove       & 309.0 & 301.6 & 339.8 & \multirow{2}{*}{46.0\%} \\
+Transfer prove      & 161.5 & 157.0 & 169.4 & \\
+\addlinespace
+Invoice verify      & 196.3 & 191.8 & 217.6 & \multirow{3}{*}{30.0\%} \\
+Anchor verify       & $<\!0.01$ & $<\!0.01$ & $<\!0.01$ & \\
+Transfer verify     & 110.6 & 108.0 & 114.8 & \\
+\addlinespace
+Bob decrypt         &  30.4 &  29.6 &  33.3 & \multirow{2}{*}{6.0\%} \\
+Committee update    &  30.4 &  29.5 &  31.9 & \\
 \midrule
-\textbf{Total (off-chain)} & \textbf{1045.1} & \textbf{1028.7} & \textbf{1117.7} \\
+\textbf{Total (off-chain)} & \textbf{1021.8} & \textbf{998.6} & \textbf{1073.3} & \textbf{100\%} \\
 \bottomrule
 \end{tabular}
-\caption{Per-stage wall-clock time for a single \thunderbolt off-chain transfer (100 iterations, 3072-bit Paillier modulus, secp256k1).}
+\caption{Per-stage latency and category share for a single off-chain transfer (100 iterations, 3072-bit Paillier, secp256k1).}
 \label{tab:stages}
 \end{table}
 
-\paragraph{Cost breakdown.} The total off-chain transfer completes in \textbf{$\approx\!1.05$\,s} on average. \autoref{tab:breakdown} groups the nine stages by functional role.
-
-\begin{table}[h]
-\centering
-\small
-\begin{tabular}{@{}lrr@{}}
-\toprule
-\textbf{Category} & \textbf{Time (ms)} & \textbf{Share (\%)} \\
-\midrule
-ZKP proving (Invoice + Transfer) & 481.6 & 46.1 \\
-ZKP verification (Invoice + Transfer) & 314.5 & 30.1 \\
-Setup (Invoice + Transfer) & 186.8 & 17.9 \\
-Auxiliary (anchor, decrypt, committee) &  62.3 & 6.0 \\
-\midrule
-\textbf{Total} & \textbf{1045.2} & \textbf{100} \\
-\bottomrule
-\end{tabular}
-\caption{Cost breakdown by functional category.}
-\label{tab:breakdown}
-\end{table}
-
-ZKP proving dominates at 46\%: Invoice Prove (316\,ms) needs three Paillier exponentiations over 6144-bit integers, Transfer Prove (165\,ms) two; EC operations are $\approx\!10^3\times$ faster and negligible. This Paillier-heavy profile explains the circuit-backend overhead (\autoref{sec:eval-comparison}).
+\paragraph{Cost breakdown.} The total off-chain transfer completes in \textbf{$\approx\!1.02$\,s} on average. The right side of \autoref{tab:stages} groups the nine stages by functional role. Invoice Prove (309\,ms) and Transfer Prove (162\,ms) dominate at 46\% combined; both are bottlenecked by modular exponentiations over 6144-bit Paillier integers ($\ZZ_{N^2}$), while the elliptic-curve operations are negligible by comparison. This Paillier-heavy profile explains the circuit-backend overhead (\autoref{sec:eval-comparison}).
 
 \paragraph{Proof size.} $\pi_{\mathrm{inv}}$ totals $\approx\!2.3$\,KB (three commitments, one shared response, two randomness responses at $|N|=3072$); $\pi_{\mathrm{xfer}}$ totals $\approx\!1.5$\,KB; combined $\approx\!3.8$\,KB per step.
 
-\FloatBarrier
-% ----------------------------------------------------------------
-\subsection{RQ2: Scalability Over Many Transfers}\label{sec:eval-scalability}
-
-\noindent\textit{Does per-transfer cost remain constant as the channel's proof chain grows?}
-
-\medskip
-We execute a single-committee channel for $m \in \{1, 10, 50, 100, 500, 1000\}$ sequential transfers and measure every transfer's wall-clock latency.
-
-\begin{figure}[h]
-\centering
-\begin{tikzpicture}
-\begin{axis}[
-  width=\columnwidth, height=5.5cm,
-  xlabel={Chain depth $m$ (transfers)},
-  ylabel={Per-transfer latency (ms)},
-  xmode=log,
-  log basis x=10,
-  xtick={1,10,50,100,500,1000},
-  xticklabels={1,10,50,100,500,1000},
-  ymin=1000, ymax=1150,
-  legend style={at={(0.03,0.97)}, anchor=north west, font=\small},
-  grid=major,
-  grid style={dashed, gray!40},
-  mark options={solid, scale=1.2},
-]
-\addplot[mark=*, blue, thick] coordinates {(1,1046.5) (10,1051.7) (50,1054.2) (100,1068.1) (500,1074.8) (1000,1061.9)};
-\addplot[mark=square*, red!70!black, thick] coordinates {(1,1046.5) (10,1053.8) (50,1059.5) (100,1086.9) (500,1087.8) (1000,1084.8)};
-\legend{Average, p95}
-\end{axis}
-\end{tikzpicture}
-\caption{Per-transfer latency vs.\ chain depth for sequential transfers in a single-committee channel. Both average and p95 remain flat, confirming $O(1)$ per-transfer cost.}
-\label{fig:scalability}
-\end{figure}
-
-\begin{table}[h]
-\centering
-\small
-\begin{tabular}{@{}rrrrrr@{}}
-\toprule
-\textbf{$m$} & \textbf{Avg (ms)} & \textbf{p50 (ms)} & \textbf{p95 (ms)} & \textbf{Total (s)} & \textbf{Proofs (KB)} \\
-\midrule
-1    & 1046.5 & 1046.5 & 1046.5 &    1.0 &    3.8 \\
-10   & 1051.7 & 1050.3 & 1053.8 &   10.5 &   38.0 \\
-50   & 1054.2 & 1053.0 & 1059.5 &   52.7 &  190.2 \\
-100  & 1068.1 & 1071.0 & 1086.9 &  106.8 &  380.4 \\
-500  & 1074.8 & 1072.4 & 1087.8 &  537.4 & 1901.9 \\
-1000 & 1061.9 & 1059.5 & 1084.8 & 1061.9 & 3803.7 \\
-\bottomrule
-\end{tabular}
-\caption{Scalability benchmark: per-transfer cost and cumulative proof storage for chains of length $m$.}
-\label{tab:scalability}
-\end{table}
-
-\paragraph{Per-transfer cost is constant.} \autoref{fig:scalability} and \autoref{tab:scalability} confirm that the $m$-th transfer takes the same $\approx\!1.05$--$1.08$\,s as the first. Each transfer depends only on the current state $(X_s, T_s, y_s)$; no party re-verifies the full proof chain. The p95 latency stays below 1.09\,s at all chain depths.
-
-\paragraph{Linear state growth.} Storage grows at $3.8$\,KB/step ($380$\,KB at $m{=}100$, $3.7$\,MB at $m{=}1000$); the full chain is needed only for dispute resolution, and older proofs can be discarded after the committee signs a checkpoint on $(X_s, T_s)$.
+\paragraph{Scalability over many transfers.} Because each transfer depends only on the current state $(X_s, T_s, y_s)$ and no party re-verifies prior transfers, per-transfer cost is $O(1)$: running 1\,000 sequential transfers on a single-committee channel confirms that every transfer takes the same $\approx\!1.01$--$1.04$\,s, with a constant proof size of 3.8\,KB per step.
 
 \FloatBarrier
 % ----------------------------------------------------------------
-\subsection{RQ3: Threshold Committee Scalability}\label{sec:eval-threshold}
+\subsection{RQ2: Threshold Committee Scalability}\label{sec:eval-threshold}
 
 \noindent\textit{How does the threshold-committee transfer path scale with committee size and fault tolerance?}
 
 \medskip
-We benchmark the full threshold-committee transfer path of \autoref{sec:vess-committee}.
-The threshold is $t = \lceil 2n/3 \rceil$; we evaluate three committee sizes (4-of-6, 8-of-12, 12-of-18) and three malicious-member fractions (0\%, 16.7\%, 33.3\%).
-Malicious members are modeled as non-participating during the committee-update phase.
-Bob generates all per-member VESS proofs in parallel (one CPU thread per member).
+We benchmark the full threshold-committee transfer path of \autoref{sec:vess-committee} under the four committee configurations and network model described in the experimental setup.
+For each configuration, we measure the \emph{committee communication latency}, defined as the wall-clock time from when Bob begins delivering shares until $t$ members have responded, under three adversarial scenarios: 0, $\lceil n/6 \rceil$, and $\lceil n/3 \rceil$ non-responsive members (capped at $n{-}t$, the maximum tolerable), uniformly distributed across the committee.
+Non-responsive members model malicious or crashed participants that never reply, forcing the protocol to reach threshold from the remaining honest members alone.
 
 \begin{figure}[h]
 \centering
 \begin{tikzpicture}
 \begin{axis}[
-  width=\columnwidth, height=5.5cm,
+  width=\columnwidth, height=6cm,
   xlabel={Committee size $n$},
-  ylabel={Total latency (ms)},
-  xtick={6,12,18},
-  ymin=0, ymax=6500,
-  legend style={at={(0.03,0.97)}, anchor=north west, font=\small},
-  grid=major,
-  grid style={dashed, gray!40},
-  cycle list name=color list,
-  mark options={solid, scale=1.2},
-]
-\addplot[mark=*, blue, thick] coordinates {(6,2333.9) (12,3777.0) (18,5471.7)};
-\addplot[mark=square*, red, thick] coordinates {(6,2214.6) (12,3503.3) (18,5040.1)};
-\addplot[mark=triangle*, brown, thick] coordinates {(6,2061.1) (12,3262.1) (18,4657.1)};
-\legend{0\% malicious, 16.7\% malicious, 33.3\% malicious}
-\end{axis}
-\end{tikzpicture}
-\caption{End-to-end threshold transfer latency for the full implemented threshold path, excluding one-time committee setup (5 iterations, release mode, parallel VESS generation).}
-\label{fig:threshold-total}
-\end{figure}
-
-\begin{figure}[h]
-\centering
-\begin{tikzpicture}
-\begin{axis}[
-  width=\columnwidth, height=5.5cm,
-  xlabel={Committee size $n$},
-  ylabel={Committee completion (ms)},
-  xtick={6,12,18},
-  ymin=100, ymax=170,
+  ylabel={Committee communication latency (s)},
+  xmin=0, xmax=105,
+  ymin=0, ymax=5.0,
+  xtick={5,15,50,100},
   legend style={at={(0.03,0.97)}, anchor=north west, font=\small},
   grid=major,
   grid style={dashed, gray!40},
   mark options={solid, scale=1.2},
 ]
-\addplot[mark=*, blue, thick] coordinates {(6,131.9) (12,131.7) (18,132.2)};
-\addplot[mark=square*, red, thick] coordinates {(6,131.5) (12,131.8) (18,133.7)};
-\addplot[mark=triangle*, brown, thick] coordinates {(6,134.3) (12,135.1) (18,138.2)};
-\legend{0\% malicious, 16.7\% malicious, 33.3\% malicious}
+\addplot[mark=*, blue, thick] coordinates {(5,0.314) (15,0.646) (50,1.577) (100,2.957)};
+\addlegendentry{0 non-responsive}
+\addplot[mark=square*, red, thick] coordinates {(5,0.314) (15,0.772) (50,1.799) (100,3.455)};
+\addlegendentry{$\lceil n/6 \rceil$ non-responsive}
+\addplot[mark=triangle*, brown, thick] coordinates {(5,0.436) (15,0.808) (50,2.219) (100,4.497)};
+\addlegendentry{$\lceil n/3 \rceil$ non-responsive}
+\addplot[dashed, black, thick, no markers] coordinates {(0,0.160) (105,0.160)};
+\addlegendentry{Baseline RTT}
 \end{axis}
 \end{tikzpicture}
-\caption{Committee-completion latency: time until the $t$-th honest member finishes decrypting and applying its refresh share (5 iterations, release mode).}
-\label{fig:threshold-committee}
+\caption{Committee communication latency vs.\ committee size under 0, $\lceil n/6 \rceil$, and $\lceil n/3 \rceil$ non-responsive members (fanout\,=\,4, $\pm 20\%$ jitter, 3 iterations, 160\,ms baseline RTT).}
+\label{fig:threshold-delay}
 \end{figure}
 
-\paragraph{Scaling with committee size.}
-The total threshold-transfer latency scales roughly linearly with $n$: from 2.33\,s at $n=6$ to 5.47\,s at $n=18$ (\autoref{fig:threshold-total}).
-The per-member marginal cost is $\approx\!262$\,ms, dominated by sequential distribution verification and the benchmark's sequential committee-apply loop.
+\paragraph{Committee communication scales linearly.}
+Committee communication latency grows linearly with $n$: from 0.31\,s at $n{=}5$ to 2.96\,s at $n{=}100$ with no adversary (\autoref{fig:threshold-delay}). The slope is governed by the fanout constraint: with waves of 4 members per baseline RTT, a 100-member committee requires $\lceil 100/4 \rceil = 25$ delivery waves, contributing $\approx\!24 \times 160\,\mathrm{ms} = 3.84$\,s of serialized network delay before the last batch begins processing.
 
-\paragraph{Effect of malicious fraction.}
-For fixed $n$, the three malicious-fraction curves are close (\autoref{fig:threshold-total}), with the 33.3\% malicious curve \emph{faster} than the 0\% curve.
-This counterintuitive result arises because malicious members are absent from the committee-apply loop: with fewer participating members, the sequential apply total is shorter.
-Bob's upfront VESS generation (which depends on $n$, not on the honest count) is unaffected.
+\paragraph{Resilience to non-responsive members.}
+When $\lceil n/3 \rceil$ members are non-responsive (the maximum fault tolerance), the protocol must collect $t$ responses from the remaining honest members alone. At $n{=}100$, committee communication latency rises from 2.96\,s to 4.50\,s, a $52\%$ increase (\autoref{fig:threshold-delay}). At $n{=}50$, the overhead is $41\%$ (1.58\,s to 2.22\,s). These increases reflect the fanout cost of reaching more distant honest members: with $\lceil n/3 \rceil$ members silent and uniformly distributed, the protocol must wait for honest members in later delivery batches that would otherwise be unnecessary. Crucially, all configurations complete successfully and preserve the fixed-key invariant at every adversary level, and the $\lceil n/6 \rceil$ curve shows a moderate intermediate overhead (17\% at $n{=}100$), demonstrating graceful degradation.
 
-Under Simple VESS's $(t,n)$-honesty assumption, active corruption of the apply phase is equivalent to non-participation: a malicious member can silently corrupt its own local share, but as long as $t$ honest members apply correctly, reconstruction succeeds using only those honest shares. The malicious member's corrupted share is simply excluded from the Lagrange interpolation subset. Benchmarking the absent-member scenario therefore covers the worst-case performance impact that any coalition of fewer than $t$ corrupted members can cause.
-
-\paragraph{Committee-side critical path.}
-The committee-completion latency stays near 131--138\,ms across all configurations (\autoref{fig:threshold-committee}) and is nearly independent of $n$.
-Each honest member performs a single share decryption and local update independently; the critical path is the $t$-th honest completion.
-In a real deployment, committee members work in parallel on separate machines, so the $\approx\!132$\,ms per-member latency is the true committee bottleneck, not the sequential apply total reported in the stage breakdown.
-
-\paragraph{Stage breakdown.}
-\autoref{tab:threshold-breakdown} decomposes the threshold-transfer latency for the 0\% malicious case.
-With parallel VESS generation, the VESS distribution stage is no longer the bottleneck: it takes 444\,ms at $n=6$ (previously 1520\,ms sequentially).
-The benchmark's sequential distribution-verification total (709--1915\,ms) is the largest reported stage, but in practice each committee member verifies only its own share ($\approx\!118$\,ms), so the real-world per-transfer overhead is again close to a single member's latency.
-
-\begin{table}[h]
-\centering
-\small
-\begin{tabular}{@{}lrrr@{}}
-\toprule
-\textbf{Stage} & \textbf{$n\!=\!6$ (ms)} & \textbf{$n\!=\!12$ (ms)} & \textbf{$n\!=\!18$ (ms)} \\
-\midrule
-VESS distribution (parallel) &  444.5 &  485.9 &  747.7 \\
-Distribution verify (seq.)   &  709.6 & 1310.6 & 1915.7 \\
-Transfer prove+verify        &  343.4 &  342.0 &  341.2 \\
-Bob decrypt                  &   31.1 &   31.0 &   31.1 \\
-Committee apply (seq.\ total)&  791.2 & 1580.1 & 2394.9 \\
-Reconstruction               &   14.0 &   27.3 &   41.0 \\
-\midrule
-\textbf{Total}               & \textbf{2333.8} & \textbf{3776.9} & \textbf{5471.6} \\
-\bottomrule
-\end{tabular}
-\caption{Stage breakdown of threshold-transfer latency (0\% malicious, 5~iterations). ``Sequential'' stages are parallelizable in a real deployment; the real-world critical-path latency per stage is $\approx\!118$\,ms (verify) and $\approx\!132$\,ms (apply).}
-\label{tab:threshold-breakdown}
-\end{table}
+\paragraph{End-to-end transfer latency.}
+The full threshold transfer (VESS share generation, distribution verification, transfer prove/verify, Bob decrypt, and committee communication) takes 1.72\,s at $n{=}5$ and 15.98\,s at $n{=}100$ with no adversary. VESS share generation dominates: Bob must compute $n$ independent Paillier encryptions and NIZK proofs, which accounts for over 80\% of the total at $n{=}100$. Committee communication, by contrast, is a bounded fraction of the end-to-end cost that degrades gracefully under adversarial conditions.
 
 \FloatBarrier
 % ----------------------------------------------------------------
-\subsection{RQ4: Comparison with SNARK Backends}\label{sec:eval-comparison}
+\subsection{RQ3: Comparison with SNARK Backends}\label{sec:eval-comparison}
 
 \noindent\textit{How does \thunderbolt's Sigma-protocol construction compare with general-purpose SNARK backends on the same relations?}
 
 \medskip
 \paragraph{Sigma protocols vs.\ general-purpose SNARKs.}
 An alternative realization would encode our relations as arithmetic circuits for a SNARK backend (Groth16~\cite{groth16}, Plonk~\cite{gabizon2019plonk}, or a zkVM such as SP1~\cite{sp1} or RISC Zero~\cite{risczero}).
-The Invoice and Transfer relations are dominated by Paillier modular exponentiation in $\ZZ_{N^2}$ for a 3072-bit $N$, which in a circuit requires bit-decomposition of 6144-bit integers and thousands of field operations per exponentiation. Each Paillier ciphertext verification alone consumes $10^5$--$10^6$ R1CS constraints; EC scalar multiplication adds $10^3$--$10^4$ more, placing the Invoice proof above $10^6$ constraints in total. At published Groth16 proving rates of $10^4$--$10^5$ constraints/s on commodity hardware, this yields a projected $60$--$300$\,s proving time, $125$--$625\times$ slower than our 482\,ms native prove. Even a simplified SP1 zkVM encoding of the same transfer relation on \texttt{u64} arithmetic takes ${\sim}8$\,s to prove (${\sim}17\times$ overhead), with the full 6144-bit version expected to be substantially worse.
+The Invoice and Transfer relations are dominated by Paillier modular exponentiation in $\ZZ_{N^2}$ for a 3072-bit $N$, so a generic SNARK backend must handle repeated non-native arithmetic over 6144-bit values, bit decomposition and modular reduction for ciphertext equations, and wiring the same witness consistently across both Paillier checks and the secp256k1 verification equation.
+
+\paragraph{Why we do not implement a full Groth16 backend.}
+A faithful Groth16 realization of \thunderbolt would therefore require a large custom circuit for non-native big-integer arithmetic, careful constraint engineering for modular exponentiation in $\ZZ_{N^2}$, and a per-circuit trusted setup. This is a substantial implementation burden before any performance optimization, and the resulting prover would still inherit the high cost of circuit-based proving on large-modulus arithmetic. We therefore do not implement a full Groth16 backend. This engineering gap is itself informative: \thunderbolt's statements are native algebraic relations, and forcing them into a generic SNARK circuit already erases one of the main advantages of our construction.
+
+\paragraph{Reduced-parameter SP1 measurement.}
+We instead measure the closest implemented general-purpose backend: an SP1 zkVM proof of the same invoice/transfer Paillier verification structure under a reduced 256-bit Paillier modulus. This is far smaller than the 3072-bit modulus used by \thunderbolt, but the proving cost is already high: averaged over five runs, SP1 takes 54.6\,s to prove and 67\,ms to verify, compared with 471\,ms and 307\,ms for our native Sigma proofs. That is a $116\times$ proving slowdown even at the reduced parameter. Larger Paillier moduli were not feasible on our laptop setup because local proving exceeded the available memory budget; increasing the modulus would also further increase proving time.
 
 Our direct Sigma-protocol construction requires no circuit: each proof consists of a constant number of native group operations.
-Concretely, proving both proofs takes $\approx\!482$\,ms and verifying both takes $\approx\!315$\,ms, with no trusted setup and no circuit-level tooling.
+Concretely, proving both proofs takes $\approx\!471$\,ms and verifying both takes $\approx\!307$\,ms.
 \autoref{tab:snark} summarizes the comparison.
 
 \begin{table}[h]
 \centering
 \small
-\begin{tabular}{@{}lrrrl@{}}
+\begin{tabular}{@{}lrrr@{}}
 \toprule
-\textbf{Backend} & \textbf{Prove} & \textbf{Verify} & \textbf{Slowdown} & \textbf{Setup} \\
+\textbf{Backend} & \textbf{Prove} & \textbf{Verify} & \textbf{Slowdown} \\
 \midrule
-\thunderbolt (Sigma)   & 482\,ms    & 315\,ms        & $1\times$          & None \\
-SP1 zkVM$^*$           & ${\sim}8$\,s     & ${\sim}1.2$\,s & ${\sim}17\times$   & None \\
-Groth16$^*$            & 60--300\,s & ${\sim}3$\,ms  & 125--625$\times$   & Trusted \\
+\thunderbolt (Sigma)         & 471\,ms  & 307\,ms & $1\times$   \\
+SP1 zkVM (256-bit Paillier)  & 54.6\,s  & 67\,ms  & $116\times$ \\
 \bottomrule
 \end{tabular}
-\caption{Prove/verify cost per transfer. $^*$Conservative lower bounds; measured results will replace these estimates in the final version.}
+\caption{Measured prove/verify cost per transfer. The SP1 row uses a reduced 256-bit Paillier modulus; larger moduli were not feasible within the available memory budget of our laptop setup.}
 \label{tab:snark}
 \end{table}
 
-Groth16 proofs are smaller (288~bytes vs.\ our $\approx\!3.8$\,KB) but require a per-circuit trusted setup and a projected $125$--$625\times$ proving overhead. Our relations are algebraic (DL + Paillier equalities with a shared witness); Sigma protocols handle such relations natively, without circuit encoding. \thunderbolt trades a modestly larger proof for orders-of-magnitude lower proving cost and no trusted setup.
+Even after shrinking the Paillier modulus far below the deployed setting, the general-purpose zkVM backend remains over two orders of magnitude slower to prove. Together with the implementation complexity and trusted setup requirements of a full Groth16 circuit, this supports our design choice: \thunderbolt's algebraic relations are better handled natively by Sigma protocols than by generic SNARK backends.
 
 \FloatBarrier
-% ----------------------------------------------------------------
-\subsection{Limitations}\label{sec:eval-limits}
-
-Our benchmarks measure cryptographic computation on a single machine; a deployed channel involves network communication with variable RTT and geographic distribution.
-In a threshold setting, the committee-apply stage executes on separate machines: for a committee of $n = 6$ with 50\,ms average RTT, network overhead adds $\approx\!100$\,ms (one round-trip for share distribution and one for acknowledgement), a $\sim\!4$\% increase over the 2.3\,s computational cost for the parallel execution path.
-The SNARK numbers in \autoref{tab:snark} are conservative lower bounds (SP1 uses simplified \texttt{u64} arithmetic; Groth16 is projected from published constraint rates); measured results on full relations will appear in the final version.
-Finally, statechains~\cite{somsen2020statechains} share \thunderbolt's goal of off-chain UTXO transfer; a direct performance comparison is left to future work.

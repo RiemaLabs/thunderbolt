@@ -110,7 +110,7 @@
 %%
 %% end of the preamble, start of the body of the document source.
 \begin{document}
-\sloppy
+\emergencystretch=1em
 
 %%
 %% The "title" command has an optional parameter,
@@ -291,7 +291,7 @@
 %%
 %% Acknowledgements (not anonymized in camera-ready; suppressed in review mode).
 \begin{acks}
-This paper was edited for grammar and style using Claude claude-opus-4-6 (Anthropic).
+This paper was edited for grammar and style using Claude Opus 4.6 (Anthropic).
 \end{acks}
 
 %%
@@ -299,8 +299,6 @@ This paper was edited for grammar and style using Claude claude-opus-4-6 (Anthro
 %% the bibliography file.
 \bibliographystyle{ACM-Reference-Format}
 \bibliography{main}
-
-\appendix
 
 %%
 %% Post-bibliography sections (do not count toward the page limit).
@@ -314,6 +312,10 @@ We see no direct ethical hazards beyond those already present in any privacy-enh
 
 \section*{Open Science Policy}
 % TODO: fill in artifact availability, code/data release, and reproducibility details.
+
+\appendix
+
+\input{sections/appendix-proofs}
 
 %%
 %% If your work has an appendix, this is the place to put it.
