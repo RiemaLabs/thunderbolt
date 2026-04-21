@@ -1,7 +1,0 @@
-cargo:rerun-if-changed=go
-Building Go library at /Users/hongbowen/code/thunderbolt-lib/benchmarks/sp1-transfer-benchmark/script/target/release/build/sp1-recursion-gnark-ffi-f695ff72e1960aa7/out/libsp1gnark.a
-Go library built
-cargo:rustc-link-search=native=/Users/hongbowen/code/thunderbolt-lib/benchmarks/sp1-transfer-benchmark/script/target/release/build/sp1-recursion-gnark-ffi-f695ff72e1960aa7/out
-cargo:rustc-link-lib=static=sp1gnark
-cargo:rustc-link-lib=framework=CoreFoundation
-cargo:rustc-link-lib=framework=Security

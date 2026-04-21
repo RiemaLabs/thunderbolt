@@ -1,5 +1,0 @@
-cargo:rerun-if-changed=proto/worker.proto
-cargo:rerun-if-changed=proto/cluster.proto
-cargo:rerun-if-changed=proto/
-cargo:rerun-if-env-changed=BUILD_GIT_SHA
-cargo:rustc-env=BUILD_VERSION=unknown 2026-04-19T10:00:31

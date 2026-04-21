@@ -66,8 +66,8 @@ latex/
 .claude/
 autoresearch-results.tsv
 artifacts/threshold-committee-benchmark-new.csv
-benchmarks/sp1-transfer-benchmark/target/
-benchmarks/groth16-transfer-benchmark/target/
+benchmarks/sp1-transfer-benchmark/**/target/
+benchmarks/groth16-transfer-benchmark/**/target/
 benchmarks/.tools/
 
 ## LaTeX build artifacts
