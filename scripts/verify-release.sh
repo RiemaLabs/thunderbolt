@@ -110,13 +110,13 @@ if [[ "${binary_archive_count}" != 1 ]]; then
     exit 1
 fi
 binary_archive="$(find "${release_dir}" -maxdepth 1 -type f -name '*.tar.gz' ! -name '*-source.tar.gz' -print)"
-archive_root="$(tar -tzf "${binary_archive}" | awk -F/ 'NF > 0 { print $1; exit }')"
+archive_entries="$(tar -tzf "${binary_archive}")"
+archive_root="$(awk -F/ 'NF > 0 && !found { print $1; found = 1 }' <<< "${archive_entries}")"
 if [[ -z "${archive_root}" ]]; then
     echo "binary archive is empty" >&2
     exit 1
 fi
-archive_entries="$(tar -tzf "${binary_archive}")"
-if ! printf '%s\n' "${archive_entries}" | awk -F/ -v root="${archive_root}" '$1 != root { exit 1 }'; then
+if ! awk -F/ -v root="${archive_root}" '$1 != root { exit 1 }' <<< "${archive_entries}"; then
     echo "binary archive contains more than one top-level directory" >&2
     exit 1
 fi
@@ -127,7 +127,7 @@ for required in \
     "${archive_root}/systemd/README.md" \
     "${archive_root}/BINARY-MANIFEST" \
     "${archive_root}/BUILD-METADATA"; do
-    if ! printf '%s\n' "${archive_entries}" | grep -Fqx "${required}"; then
+    if ! grep -Fqx "${required}" <<< "${archive_entries}"; then
         echo "binary archive is missing required entry: ${required}" >&2
         exit 1
     fi
@@ -137,7 +137,7 @@ while read -r package binary extra; do
         continue
     fi
     required="${archive_root}/bin/${binary}"
-    if ! printf '%s\n' "${archive_entries}" | grep -Fqx "${required}"; then
+    if ! grep -Fqx "${required}" <<< "${archive_entries}"; then
         echo "binary archive is missing release-manifest entry: ${required}" >&2
         exit 1
     fi
@@ -146,7 +146,7 @@ if ! cmp -s "${binary_manifest}" <(tar -xOzf "${binary_archive}" "${archive_root
     echo "binary archive manifest does not match release/default-binaries.txt" >&2
     exit 1
 fi
-binary_entry_count="$(printf '%s\n' "${archive_entries}" | awk -v prefix="${archive_root}/bin/" 'index($0, prefix) == 1 && $0 != prefix { count++ } END { print count + 0 }')"
+binary_entry_count="$(awk -v prefix="${archive_root}/bin/" 'index($0, prefix) == 1 && $0 != prefix { count++ } END { print count + 0 }' <<< "${archive_entries}")"
 expected_binary_count="$(awk '/^[[:space:]]*#/ || NF == 0 { next } { count++ } END { print count + 0 }' "${binary_manifest}")"
 if [[ "${binary_entry_count}" != "${expected_binary_count}" ]]; then
     echo "binary archive executable count does not match release/default-binaries.txt" >&2
