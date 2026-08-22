@@ -18,6 +18,7 @@ secp = { version = "0.5.0", features = ["secp256k1"] }
 sha2 = "0.10.8"
 thiserror = "2.0.12"
 thunderbolt-core = { path = "../thunderbolt-core" }
+thunderbolt-keystore = { path = "../thunderbolt-keystore" }
 thunderbolt-protocol = { path = "../thunderbolt-protocol" }
 thunderbolt-wire = { path = "../thunderbolt-wire" }
 zeroize = "1.8.2"
@@ -25,3 +26,5 @@ zeroize = "1.8.2"
 [dev-dependencies]
 hex = "0.4"
 proptest = "1.7.0"
+static_assertions = "1.1.0"
+tempfile = "3.27.0"

@@ -77,6 +77,8 @@ The configuration library fills omitted limit, metrics, backup, TLS, and develop
 
 The Holder and committee libraries do not change this rule. No current configuration value can turn `thunderboltd` into a Holder or committee process.
 
+The node library can accept an injected Trusted Verifier, but `thunderboltd` has no verifier configuration. Setting deployment and committee fields does not enable production event verification.
+
 `node.listen_address` and `node.listen_port`
 : Reserved listener for future protocol traffic. It must not overlap the administrative or metrics endpoint. The current daemon serves only the administrative loopback address and port.
 
@@ -90,6 +92,8 @@ The Holder and committee libraries do not change this rule. No current configura
 
 `deployment.id`
 : A stable 1 to 64 byte ASCII identifier bound into every proof context. Every Holder, committee member, verifier, and Ledger replica in one deployment must use the same value.
+
+The stable version 2 binding also needs authenticated protocol-suite, Bitcoin-genesis, committee-descriptor, funding-outpoint, and anchor-suite values. The current TOML schema does not configure or activate that binding.
 
 ### `paths`
 

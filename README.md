@@ -4,7 +4,7 @@ Bitcoin Thunderbolt is the open source Rust implementation of Thunderbolt, a pro
 
 The paper "Thunderbolt: Fast Asynchronous Off-Chain Bitcoin Transfers" has been accepted to ACM CCS 2026. The paper was accepted, not this software product.
 
-> Release status: `v1.0.0-rc.1`. Mainnet is disabled. This release includes the cryptographic core, versioned public messages, a deterministic Ledger state machine, durable SQLite storage, and libraries for Holder state, one-share committee state, trusted Invoice and Transfer verification, encrypted local secrets, and Bitcoin Core access. These libraries are not wired into `thunderboltd`. The runnable daemon remains a single reference Ledger with a control CLI. There is no complete Open-to-Finalize deployment, Byzantine-fault-tolerant Ledger, or mainnet support. Do not use it with real funds.
+> Release status: `v1.0.0-rc.1`. Mainnet is disabled. This release includes the cryptographic core, versioned public messages, a deterministic Ledger state machine, atomic verified SQLite appends, and libraries for Holder state, one-share committee state, trusted Invoice and Transfer verification, encrypted local secrets, and Bitcoin Core access. The runnable `thunderboltd` remains a single reference Ledger and does not configure a production verifier. There is no complete Open-to-Finalize deployment, Byzantine-fault-tolerant Ledger, or mainnet support. Do not use it with real funds.
 
 ## Why Thunderbolt
 
@@ -45,17 +45,21 @@ thunderboltd, Ledger role
 durable SQLite event log and channel snapshots
 ```
 
-`thunderbolt-cli` is a stateless operator tool. It reads the configured endpoint and bearer-token file, then calls the daemon's JSON API. `thunderboltd` accepts only `node.role = "ledger"` in this release. It does not construct a Holder engine, committee engine, Trusted Verifier, Keystore, or Bitcoin Core client.
+`thunderbolt-cli` is a stateless operator tool. It reads the configured endpoint and bearer-token file, then calls the daemon's JSON API. `thunderboltd` accepts only `node.role = "ledger"` in this release. It does not construct a Holder engine, committee engine, Keystore, or Bitcoin Core client. The node library can accept an injected Trusted Verifier for Invoice and Transfer, but the shipped daemon has no configuration or CLI path that supplies one.
 
 The repository now contains several libraries intended for those future role processes:
 
 | Library | Current boundary |
 | --- | --- |
-| `thunderbolt-holder` | Creates and tracks v1 Holder and Recipient credentials, single-committee invoices, and transfers behind a transactional vault trait. It has no threshold-Invoice path, networking, or daemon adapter. |
-| `thunderbolt-committee` | Models one independently stored committee share, verifies committed refresh inputs, and guards signing-session nonce state. It has no DKG, audited FROST signer, or signature aggregator. |
-| `thunderbolt-verifier` | Verifies bounded Invoice and Transfer artifacts against trusted deployment and Ledger state. It is not called by the current Ledger API and does not verify Open or Finalize. |
-| `thunderbolt-keystore` | Provides an encrypted, owner-only local vault with authenticated backup and restore. The daemon does not open it. |
-| `thunderbolt-bitcoin` | Provides a bounded Bitcoin Core RPC client, network checks, reorganization-aware cursors, and funding and closing validators. It has no wallet or signing API and is not connected to the daemon. |
+| `thunderbolt-holder` | Creates and tracks v1 single-committee and threshold Invoice packages, Holder credentials, and Transfers behind a transactional vault trait. The threshold path binds the Recipient share to the VESS distribution but does not claim the paper's exact `R_inv^thr` transcript. It has no networking or daemon adapter. |
+| `thunderbolt-committee` | Models one independently stored committee share, verifies the bound Recipient share, distribution, committed Transfer, and Ledger receipt boundary, then records replay-safe updates. It has no DKG, concrete quorum-receipt verifier, audited FROST signer, or signature aggregator. |
+| `thunderbolt-verifier` | Verifies bounded Invoice and Transfer artifacts against trusted deployment and Ledger state. `thunderbolt-node` can inject it into the atomic append path. It does not verify Open, Finalize, actor signatures, or Bitcoin state. |
+| `thunderbolt-keystore` | Provides an encrypted, transactional multi-record vault with revision checks, idempotent receipts, permanent nonce tombstones, and authenticated Holder backup and restore. Committee restore is forbidden, and committee open requires an externally anchored minimum revision. The daemon does not open this vault. |
+| `thunderbolt-bitcoin` | Provides a bounded Bitcoin Core RPC client, network checks, reorganization-aware cursors, and funding and closing validators. It passed the official Bitcoin Core v31.1.0 live regtest, reorganization, and restart gate. It has no wallet or signing API and is not connected to the daemon. |
+
+`thunderbolt-wire` also exposes a stable version 2 channel binding over the Bitcoin network and genesis, complete funding outpoint, deployment, committee descriptor and epoch, protocol suite, and anchor parameter suite. Version 1 messages and Ledger events have not migrated to it, and version 2 does not yet define an actor-signed proposal envelope.
+
+`thunderbolt-storage` and `thunderbolt-node` now verify evidence-free Invoice and Transfer proposals inside the same SQLite write transaction that selects the authoritative snapshot, pending Invoice, and Ledger time. The transaction persists the entry, evidence, snapshot, and retry mapping atomically. The shipped daemon still starts without a Trusted Verifier, so normal event submission remains unavailable.
 
 See [Architecture](docs/architecture.md) for component boundaries and the current implementation gap.
 
@@ -74,8 +78,8 @@ Steps 2 through 4 may repeat without touching the Bitcoin Chain.
 The repository pins its Rust toolchain in [`rust-toolchain`](rust-toolchain).
 
 ```bash
-cargo build --workspace --release
-cargo test --workspace
+cargo build --locked --release
+cargo test --workspace --all-features --locked --lib --bins --tests
 ```
 
 The existing workspace contains:
@@ -83,17 +87,17 @@ The existing workspace contains:
 ```text
 crates/
   thunderbolt-bitcoin/ Validated Bitcoin Core RPC and chain tracking library
-  thunderbolt-holder/ Local Holder and Recipient state engine
+  thunderbolt-holder/ Local Holder, Recipient, and threshold-Invoice engine
   thunderbolt-committee/ One-share committee member engine
   thunderbolt-verifier/ Trusted Invoice and Transfer verification bridge
-  thunderbolt-keystore/ Encrypted participant secret vault
+  thunderbolt-keystore/ Transactional encrypted participant vault
   thunderbolt-core/    Proofs, Paillier operations, and public threshold
                        distribution primitives
   thunderbolt-protocol/ Deterministic Ledger entries and channel reducer
-  thunderbolt-wire/    Bounded, versioned public proof-message encoding
-  thunderbolt-storage/ Durable SQLite Ledger entries and channel snapshots
+  thunderbolt-wire/    Version 1 proof messages and stable version 2 bindings
+  thunderbolt-storage/ Atomic verified SQLite Ledger persistence
   thunderbolt-config/  Strict configuration and local token authorization
-  thunderbolt-node/    Loopback JSON API and Ledger service runtime
+  thunderbolt-node/    Loopback Ledger API and Trusted Verifier injection
   thunderboltd/        Reference Ledger daemon
   thunderbolt-cli/     Operator control client
   bitcoin-utils/       Research-only legacy Bitcoin account utilities
@@ -102,17 +106,14 @@ research/benchmarks/   Lightning, Groth16, and SP1 comparison harnesses
 research/artifacts/    Published benchmark outputs and reproduction scripts
 ```
 
-The research harness is useful for regression testing, but it is not a deployable multi-process network.
-The old static two-key Taproot transaction prototype and the single-process
-committee fixture are disabled in normal builds. Research tests must opt into
-the `legacy-research` and `insecure-regression` features explicitly.
+The default release build excludes `bitcoin-utils`, `thunderbolt-eval`, the old static two-key Taproot prototype, and the single-process committee fixture. Full workspace regression tests enable the research features explicitly so that those artifacts remain checked without entering release binaries.
 
 ## Quickstart
 
 Build the release binaries, then initialize a no-clobber regtest instance:
 
 ```bash
-cargo build --workspace --release
+cargo build --locked --release --package thunderboltd --package thunderbolt-cli
 
 ./target/release/thunderboltd \
   --config ./thunderbolt.toml \
@@ -153,6 +154,8 @@ make regtest-down
 
 The container does not run Bitcoin Core, Holder software, or committee nodes. It exercises the Ledger API and storage path only.
 
+The Bitcoin backend has also passed the opt-in live gate against the official Bitcoin Core v31.1.0 release, including network and genesis checks, the exact 100-confirmation coinbase boundary, a one-block reorganization, and a graceful same-datadir restart. The harness is ignored and environment-gated, so this is measured release evidence rather than an automatic CI result. See [Testing](docs/testing.md).
+
 For a hardened service wrapper and signet example, see [`thunderboltd.service`](deploy/systemd/thunderboltd.service), [`thunderbolt.sysusers`](deploy/systemd/thunderbolt.sysusers), and the [systemd configuration](deploy/systemd/thunderbolt.toml). These assets package the same reference Ledger and do not turn it into a production protocol deployment.
 
 ## Security and limitations
@@ -167,10 +170,13 @@ Important limits:
 - The base design does not promise transaction unlinkability.
 - A production Ledger must satisfy the paper's persistence, ordering, inclusion, and data-availability guarantees under the stated committee fault bound.
 - Safe operation also depends on durable encrypted state, correct backups, Bitcoin reorganization handling, nonce safety, authenticated transport, and operator discipline. These controls are release gates, not assumptions that may be skipped.
-- The current daemon uses authenticated loopback HTTP. The configured Unix socket path is reserved but not listened on. Remote control, metrics, role-specific Holder and committee services, and Bitcoin settlement remain target work.
+- The current daemon uses authenticated loopback HTTP. The configured Unix socket path is reserved but not listened on. It has no configured production verifier, actor signatures, quorum-receipt implementation, role-specific Holder or committee services, or Bitcoin settlement path.
 - The manual database backup is verified but not encrypted by the daemon. Protect it at the filesystem or volume layer.
 - The RC wire codec enforces a 2048-bit Paillier modulus, while the accepted paper evaluates 3072-bit Paillier. The production parameter and wire version must be reconciled before mainnet approval.
 - The Open ceremony still needs a reviewed DKG or provisioning protocol. Finalize still needs an `R_own` proof and audited combined-key Holder plus FROST signing under the fixed key `P`.
+- Version 1 remains the active message and Ledger contract. The stable version 2 binding has not yet been adopted across those layers, and the reducer still permits only one pending Invoice.
+
+The focused security milestone review found no unresolved Critical or High defect within the landed library boundaries at `17fc4c1`. This is not a system audit or production approval. See [Security milestone](docs/security-milestone-2026-08-21.md).
 
 Read [Security](docs/security.md), [Threat model](docs/threat-model.md), and [SECURITY.md](SECURITY.md) before testing a deployment. Report suspected vulnerabilities privately. Do not open a public issue for a security report.
 
@@ -186,6 +192,8 @@ Read [Security](docs/security.md), [Threat model](docs/threat-model.md), and [SE
 | [API](docs/api.md) | Control API, Ledger events, idempotency, and versioning |
 | [Release process](docs/release-process.md) | RC policy, verification, signing, and promotion gates |
 | [Production roadmap](docs/roadmap.md) | Protocol v2, multi-process regtest, cryptographic, and Ledger gates |
+| [Testing](docs/testing.md) | Automated checks and the measured Bitcoin Core v31.1.0 live gate |
+| [Security milestone](docs/security-milestone-2026-08-21.md) | Scoped review result, resolved items, and remaining production blockers |
 | [Publication checklist](docs/publication-checklist.md) | Legal, security, history, and repository publication gates |
 | [History sanitization](docs/history-sanitization.md) | Known historical secrets and generated build artifacts that must be removed before publication |
 | [Core ZKP](CORE_ZKP.md) | Mathematical specification of the proof construction |

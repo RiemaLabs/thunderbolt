@@ -5,6 +5,9 @@ Review date: 2026-08-21
 Scope: `thunderbolt-committee` production code. The `insecure-regtest` dealer and
 test-only in-memory vault are excluded from production conclusions.
 
+The encrypted-keystore adapter's buffer ownership, checkpoint, and nonce flows
+are reviewed separately in `KEYSTORE_ADAPTER.md`.
+
 ## Result
 
 The committee runtime adds no secret-dependent indexing, sorting, division,

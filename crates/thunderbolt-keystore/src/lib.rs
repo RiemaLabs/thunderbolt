@@ -21,6 +21,7 @@ mod secret;
 use std::path::{Path, PathBuf};
 use std::{collections::BTreeMap, mem};
 
+use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
@@ -33,7 +34,7 @@ pub use secret::{
 };
 
 use crate::fs::{acquire_lock, atomic_create, atomic_replace, read_secure, FileIdentity, LockGuard};
-use crate::record_format::{decode, derive_key, encode, new_salt};
+use crate::record_format::{checkpoint as checkpoint_for_blob, decode, derive_key, encode, new_salt};
 use crate::secret::{mutation_digest, RecordStore, StagedMutation, TransactionReceipt};
 
 /// Minimum accepted Argon2id memory cost, in KiB.
@@ -50,6 +51,9 @@ pub const MAX_ARGON2_PARALLELISM: u32 = 8;
 pub const MIN_PASSWORD_BYTES: usize = 12;
 /// Maximum accepted password length.
 pub const MAX_PASSWORD_BYTES: usize = 1024;
+/// Maximum raw deployment identifier width accepted by the shared digest mapping.
+pub const MAX_DEPLOYMENT_ID_BYTES: usize = 64;
+const DEPLOYMENT_ID_DOMAIN: &[u8] = b"bitcoin-thunderbolt/keystore-deployment-id/v1";
 
 /// Bounded Argon2id cost parameters stored in the authenticated vault header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,6 +226,24 @@ impl DeploymentId {
         Ok(Self(bytes))
     }
 
+    /// Derives the shared vault deployment digest from a public network and
+    /// the protocol's bounded raw deployment identifier.
+    ///
+    /// Holder and committee adapters must use this mapping rather than
+    /// role-specific hashing or direct raw-byte comparison.
+    pub fn derive(network: Network, raw_deployment_id: impl AsRef<[u8]>) -> Result<Self> {
+        let raw_deployment_id = raw_deployment_id.as_ref();
+        if raw_deployment_id.is_empty() || raw_deployment_id.len() > MAX_DEPLOYMENT_ID_BYTES {
+            return Err(KeystoreError::InvalidVaultIdentity);
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(DEPLOYMENT_ID_DOMAIN);
+        hasher.update([network.tag()]);
+        hasher.update((raw_deployment_id.len() as u64).to_be_bytes());
+        hasher.update(raw_deployment_id);
+        Self::new(hasher.finalize().into())
+    }
+
     /// Returns the canonical digest bytes.
     #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 32] {
@@ -339,6 +361,160 @@ impl VaultIdentity {
     }
 }
 
+/// Public digest of one exact authenticated encrypted vault file.
+///
+/// The digest intentionally commits to the randomized ciphertext, not decrypted
+/// values. It therefore reveals no additional plaintext and distinguishes two
+/// independently written forks even when they have the same numeric revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VaultStateDigest([u8; 32]);
+
+impl VaultStateDigest {
+    /// Constructs a digest from canonical bytes.
+    #[must_use]
+    pub const fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Returns the canonical digest bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// Exact rollback checkpoint for one authenticated encrypted vault state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VaultCheckpoint {
+    revision: VaultRevision,
+    state_digest: VaultStateDigest,
+}
+
+impl VaultCheckpoint {
+    /// Constructs a checkpoint from its numeric revision and exact state digest.
+    #[must_use]
+    pub const fn new(revision: VaultRevision, state_digest: VaultStateDigest) -> Self {
+        Self { revision, state_digest }
+    }
+
+    /// Returns the authenticated numeric revision.
+    #[must_use]
+    pub const fn revision(self) -> VaultRevision {
+        self.revision
+    }
+
+    /// Returns the exact encrypted-state digest.
+    #[must_use]
+    pub const fn state_digest(self) -> VaultStateDigest {
+        self.state_digest
+    }
+}
+
+/// Result of an atomic rollback-checkpoint compare-and-swap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointCasOutcome {
+    /// `expected` matched and `next` was durably installed.
+    Advanced,
+    /// `next` was already the exact durable checkpoint.
+    AlreadyCurrent,
+    /// Neither `expected` nor `next` matched the durable checkpoint.
+    Conflict(Option<VaultCheckpoint>),
+}
+
+/// Failure while authenticating a recovery handle against an independent store.
+#[derive(Debug)]
+pub enum CheckpointAnchorError<E> {
+    /// Local vault authentication or filesystem operation failed.
+    Keystore(KeystoreError),
+    /// The independent checkpoint backend failed.
+    Store(E),
+    /// The exact identity has no independently anchored checkpoint.
+    Missing,
+    /// The encrypted file and independently anchored checkpoint differ.
+    Mismatch {
+        /// Checkpoint of the authenticated encrypted file.
+        actual: VaultCheckpoint,
+        /// Checkpoint loaded from the independent store.
+        anchored: VaultCheckpoint,
+    },
+}
+
+impl<E> std::fmt::Display for CheckpointAnchorError<E>
+where
+    E: std::fmt::Display,
+{
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Keystore(error) => error.fmt(formatter),
+            Self::Store(error) => error.fmt(formatter),
+            Self::Missing => formatter.write_str("vault identity has no independent checkpoint"),
+            Self::Mismatch { .. } => formatter.write_str("vault does not match the independent checkpoint"),
+        }
+    }
+}
+
+impl<E> std::error::Error for CheckpointAnchorError<E>
+where
+    E: std::error::Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Keystore(error) => Some(error),
+            Self::Store(error) => Some(error),
+            Self::Missing | Self::Mismatch { .. } => None,
+        }
+    }
+}
+
+/// Independent checkpoint anchor used to detect authenticated vault rollback.
+///
+/// A production implementation must live in a trust and failure domain that is
+/// independent from the vault file and its backups, such as an authenticated
+/// remote ledger, HSM-backed monotonic service, or equivalent operator-owned
+/// control plane. A second file beside the vault is not independent and must
+/// not be used as a production floor store.
+///
+/// Implementations must key every operation by the complete [`VaultIdentity`]
+/// tuple: network, participant role, node ID, deployment ID, positive committee
+/// epoch, and exact committee-descriptor digest. The backing service must
+/// authenticate that namespace so a caller cannot substitute another
+/// deployment or participant identity.
+///
+/// `compare_and_swap_checkpoint` must be atomic. Initialization is the exact
+/// transition `None -> revision 0`. Every later transition must advance by
+/// exactly one revision and must match the complete expected checkpoint. An
+/// exact `next` checkpoint is an idempotent success even after an ambiguous
+/// backend result. Equal revisions with different digests, stale expected
+/// checkpoints, skipped revisions, and regressions must return `Conflict`.
+/// Success may be returned only after `next` is durable. After a backend error,
+/// callers must read back and reconcile the exact checkpoint before releasing
+/// any signature share, nonce commitment, credential acknowledgement, or other
+/// external effect.
+///
+/// This crate deliberately provides no production local-file implementation.
+pub trait RollbackFloorStore: Send + Sync {
+    /// Backend error that never formats passwords, keys, secret records, or
+    /// authentication credentials.
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Loads the authenticated durable checkpoint for the exact identity.
+    ///
+    /// `None` means the identity has not yet been provisioned in the independent
+    /// store; it does not authorize an unanchored production vault open.
+    fn load_checkpoint(&self, identity: VaultIdentity) -> std::result::Result<Option<VaultCheckpoint>, Self::Error>;
+
+    /// Atomically installs the exact next checkpoint for this identity.
+    ///
+    /// Implementations must satisfy the atomic, idempotent, and durability
+    /// contract described on [`RollbackFloorStore`].
+    fn compare_and_swap_checkpoint(
+        &self,
+        identity: VaultIdentity,
+        expected: Option<VaultCheckpoint>,
+        next: VaultCheckpoint,
+    ) -> std::result::Result<CheckpointCasOutcome, Self::Error>;
+}
+
 /// An open, exclusively locked participant vault.
 ///
 /// The vault and every contained record intentionally implement neither
@@ -352,11 +528,39 @@ pub struct Vault {
     key: Zeroizing<[u8; 32]>,
     store: RecordStore,
     file_identity: FileIdentity,
+    checkpoint: VaultCheckpoint,
     poisoned: bool,
 }
 
-impl Vault {
-    /// Creates and exclusively locks a new empty vault without overwriting a path.
+/// Authenticated but not yet externally anchored vault state.
+///
+/// This restricted handle exposes no secret records or mutation methods. A
+/// caller must first durably install its exact checkpoint in an independent
+/// [`RollbackFloorStore`], then consume the handle with [`RecoveryVault::anchor`].
+/// It intentionally implements neither `Debug` nor `Clone`.
+///
+/// ```compile_fail
+/// use thunderbolt_keystore::{RecordKey, RecoveryVault};
+/// fn secrets_are_unavailable(recovery: &RecoveryVault, key: &RecordKey) {
+///     let _ = recovery.get(key);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use thunderbolt_keystore::{RecoveryVault, TransactionId, VaultRevision};
+/// fn mutations_are_unavailable(recovery: &mut RecoveryVault) {
+///     let _ = recovery.transact(VaultRevision::new(0), TransactionId::new([1; 32]), |_| Ok(()));
+/// }
+/// ```
+pub struct RecoveryVault {
+    vault: Vault,
+}
+
+impl RecoveryVault {
+    /// Creates and locks a new revision-zero vault without overwriting a path.
+    ///
+    /// The returned handle remains unusable until its checkpoint wins the
+    /// external `None -> revision 0` compare-and-swap.
     pub fn create(
         path: impl AsRef<Path>,
         identity: VaultIdentity,
@@ -370,100 +574,127 @@ impl Vault {
         let key = derive_key(password, &salt, params)?;
         let store = RecordStore::default();
         let encoded = encode(identity, params, salt, &key, &store)?;
+        let checkpoint = checkpoint_for_blob(&encoded, store.revision);
         let file_identity = atomic_create(&path, &encoded)?;
         Ok(Self {
-            path,
-            _lock: lock,
-            identity,
-            params,
-            salt,
-            key,
-            store,
-            file_identity,
-            poisoned: false,
+            vault: Vault {
+                path,
+                _lock: lock,
+                identity,
+                params,
+                salt,
+                key,
+                store,
+                file_identity,
+                checkpoint,
+                poisoned: false,
+            },
         })
     }
 
-    /// Opens a Holder vault and exclusively locks it.
+    /// Opens and authenticates a vault without exposing its secret records.
     ///
-    /// Committee-member vaults require [`Vault::open_with_minimum_revision`]
-    /// so an older authenticated file cannot silently resurrect signing state.
+    /// Use this only for initial checkpoint provisioning or ambiguous-write
+    /// reconciliation. Production work requires [`RecoveryVault::anchor`].
     pub fn open(path: impl AsRef<Path>, expected: VaultIdentity, password: Password) -> Result<Self> {
-        if expected.role() == VaultRole::CommitteeMember {
-            return Err(KeystoreError::RollbackFloorRequired);
-        }
-        Self::open_checked(path.as_ref(), expected, password, None)
-    }
-
-    /// Opens a vault only if its authenticated revision meets an external floor.
-    ///
-    /// A committee operator must durably advance this floor outside the vault
-    /// after every nonce, share, or signing-state commit. Supplying a stale or
-    /// unauthenticated floor defeats rollback protection. Committee floors must
-    /// be positive so an empty bootstrap vault cannot later be treated as safe.
-    pub fn open_with_minimum_revision(
-        path: impl AsRef<Path>,
-        expected: VaultIdentity,
-        password: Password,
-        minimum_revision: VaultRevision,
-    ) -> Result<Self> {
-        if minimum_revision.get() == 0 {
-            return Err(KeystoreError::RollbackFloorRequired);
-        }
-        Self::open_checked(path.as_ref(), expected, password, Some(minimum_revision))
-    }
-
-    fn open_checked(
-        path: &Path,
-        expected: VaultIdentity,
-        password: Password,
-        minimum_revision: Option<VaultRevision>,
-    ) -> Result<Self> {
-        let path = path.to_path_buf();
+        let path = path.as_ref().to_path_buf();
         let lock = acquire_lock(&path)?;
         let (encoded, file_identity) = read_secure(&path)?;
         let loaded = decode(&encoded, expected, password)?;
-        if minimum_revision.is_some_and(|floor| loaded.store.revision < floor.get()) {
-            return Err(KeystoreError::RollbackDetected);
-        }
+        let checkpoint = checkpoint_for_blob(&encoded, loaded.store.revision);
         Ok(Self {
-            path,
-            _lock: lock,
-            identity: loaded.identity,
-            params: loaded.params,
-            salt: loaded.salt,
-            key: loaded.key,
-            store: loaded.store,
-            file_identity,
-            poisoned: false,
+            vault: Vault {
+                path,
+                _lock: lock,
+                identity: loaded.identity,
+                params: loaded.params,
+                salt: loaded.salt,
+                key: loaded.key,
+                store: loaded.store,
+                file_identity,
+                checkpoint,
+                poisoned: false,
+            },
         })
     }
 
-    /// Authenticates a Holder backup at an external revision floor and restores it.
+    /// Returns the authenticated identity without exposing secret records.
+    #[must_use]
+    pub const fn identity(&self) -> VaultIdentity {
+        self.vault.identity
+    }
+
+    /// Returns the exact checkpoint that must be reconciled externally.
+    #[must_use]
+    pub const fn checkpoint(&self) -> VaultCheckpoint {
+        self.vault.checkpoint
+    }
+
+    /// Consumes this restricted handle after an independent exact-store match.
+    pub fn anchor<S>(self, checkpoint_store: &S) -> std::result::Result<Vault, CheckpointAnchorError<S::Error>>
+    where
+        S: RollbackFloorStore,
+    {
+        let anchored = checkpoint_store
+            .load_checkpoint(self.vault.identity)
+            .map_err(CheckpointAnchorError::Store)?
+            .ok_or(CheckpointAnchorError::Missing)?;
+        if self.vault.checkpoint != anchored {
+            return Err(CheckpointAnchorError::Mismatch {
+                actual: self.vault.checkpoint,
+                anchored,
+            });
+        }
+        Ok(self.vault)
+    }
+}
+
+impl Vault {
+    /// Opens a production vault only at the exact externally anchored checkpoint.
+    pub fn open_anchored<S>(
+        path: impl AsRef<Path>,
+        expected: VaultIdentity,
+        password: Password,
+        checkpoint_store: &S,
+    ) -> std::result::Result<Self, CheckpointAnchorError<S::Error>>
+    where
+        S: RollbackFloorStore,
+    {
+        let recovery = RecoveryVault::open(path, expected, password).map_err(CheckpointAnchorError::Keystore)?;
+        recovery.anchor(checkpoint_store)
+    }
+
+    /// Authenticates and restores an exact externally anchored backup.
     ///
-    /// Committee-member restore is deliberately forbidden: accepting an older
-    /// authenticated backup could resurrect a consumed signing nonce. Committee
-    /// recovery requires an external monotonic checkpoint and reconciliation,
-    /// which this local keystore cannot establish by itself.
-    pub fn restore(
+    /// The original authenticated bytes are preserved, so a current backup has
+    /// the same checkpoint as the live vault. Stale or forked backups fail before
+    /// any secret record is exposed.
+    pub fn restore<S>(
         backup_path: impl AsRef<Path>,
         target_path: impl AsRef<Path>,
         expected: VaultIdentity,
         password: Password,
-        minimum_revision: VaultRevision,
-    ) -> Result<Self> {
-        if expected.role() == VaultRole::CommitteeMember {
-            return Err(KeystoreError::SigningStateRestoreForbidden);
-        }
+        checkpoint_store: &S,
+    ) -> std::result::Result<Self, CheckpointAnchorError<S::Error>>
+    where
+        S: RollbackFloorStore,
+    {
         let target_path = target_path.as_ref().to_path_buf();
-        let lock = acquire_lock(&target_path)?;
-        let (backup, _) = read_secure(backup_path.as_ref())?;
-        let loaded = decode(&backup, expected, password)?;
-        if loaded.store.revision < minimum_revision.get() {
-            return Err(KeystoreError::RollbackDetected);
+        let lock = acquire_lock(&target_path).map_err(CheckpointAnchorError::Keystore)?;
+        let (backup, _) = read_secure(backup_path.as_ref()).map_err(CheckpointAnchorError::Keystore)?;
+        let loaded = decode(&backup, expected, password).map_err(CheckpointAnchorError::Keystore)?;
+        let checkpoint = checkpoint_for_blob(&backup, loaded.store.revision);
+        let anchored = checkpoint_store
+            .load_checkpoint(loaded.identity)
+            .map_err(CheckpointAnchorError::Store)?
+            .ok_or(CheckpointAnchorError::Missing)?;
+        if checkpoint != anchored {
+            return Err(CheckpointAnchorError::Mismatch {
+                actual: checkpoint,
+                anchored,
+            });
         }
-        let restored = encode(loaded.identity, loaded.params, loaded.salt, &loaded.key, &loaded.store)?;
-        let file_identity = atomic_create(&target_path, &restored)?;
+        let file_identity = atomic_create(&target_path, &backup).map_err(CheckpointAnchorError::Keystore)?;
         Ok(Self {
             path: target_path,
             _lock: lock,
@@ -473,6 +704,7 @@ impl Vault {
             key: loaded.key,
             store: loaded.store,
             file_identity,
+            checkpoint,
             poisoned: false,
         })
     }
@@ -492,8 +724,19 @@ impl Vault {
     /// Writes an authenticated, owner-only backup without overwriting a target.
     pub fn backup_to(&self, target: impl AsRef<Path>) -> Result<()> {
         self.ensure_healthy()?;
-        let encoded = encode(self.identity, self.params, self.salt, &self.key, &self.store)?;
+        let (encoded, current_identity) = read_secure(&self.path)?;
+        if current_identity != self.file_identity
+            || checkpoint_for_blob(&encoded, self.store.revision) != self.checkpoint
+        {
+            return Err(KeystoreError::FileReplaced);
+        }
         atomic_create(target.as_ref(), &encoded).map(|_| ())
+    }
+
+    /// Returns the exact externally anchorable checkpoint of the live file.
+    pub fn checkpoint(&self) -> Result<VaultCheckpoint> {
+        self.ensure_healthy()?;
+        Ok(self.checkpoint)
     }
 
     /// Returns the authenticated current vault revision.
@@ -573,7 +816,9 @@ impl Vault {
             self.store.receipts.remove(&transaction_id);
             self.store.revision = old_revision;
             self.store.rollback(journal);
-            self.poison();
+            if matches!(&error, KeystoreError::AmbiguousWrite { .. }) {
+                self.poison();
+            }
             return Err(error);
         }
         Ok(CommitOutcome::Applied(VaultRevision::new(next_revision)))
@@ -620,7 +865,9 @@ impl Vault {
         if let Err(error) = self.persist() {
             self.store.revision = old_revision;
             self.store.receipts.append(&mut removed);
-            self.poison();
+            if matches!(&error, KeystoreError::AmbiguousWrite { .. }) {
+                self.poison();
+            }
             return Err(error);
         }
         Ok(VaultRevision::new(next_revision))
@@ -703,7 +950,14 @@ impl Vault {
 
     fn persist(&mut self) -> Result<()> {
         let encoded = encode(self.identity, self.params, self.salt, &self.key, &self.store)?;
-        self.file_identity = atomic_replace(&self.path, &encoded, self.file_identity)?;
+        let candidate = checkpoint_for_blob(&encoded, self.store.revision);
+        self.file_identity = atomic_replace(&self.path, &encoded, self.file_identity).map_err(|source| {
+            KeystoreError::AmbiguousWrite {
+                candidate,
+                source: Box::new(source),
+            }
+        })?;
+        self.checkpoint = candidate;
         Ok(())
     }
 
@@ -754,7 +1008,9 @@ impl Vault {
         if let Err(error) = self.persist() {
             self.store.revision = old_revision;
             self.store.rollback(journal);
-            self.poison();
+            if matches!(&error, KeystoreError::AmbiguousWrite { .. }) {
+                self.poison();
+            }
             return Err(error);
         }
         Ok(VaultRevision::new(next_revision))
@@ -776,15 +1032,39 @@ impl Vault {
 
 #[cfg(test)]
 mod poison_tests {
+    use std::convert::Infallible;
     use std::error::Error;
 
     use tempfile::TempDir;
 
     use super::{
-        BitcoinSeed, CommitteeDescriptorDigest, DeploymentBinding, DeploymentId, ExpectedRecord, KdfParams,
-        KeystoreError, Network, NodeId, Password, RecordKey, SecretValue, TransactionId, Vault, VaultIdentity,
-        VaultRevision, VaultRole, MIN_ARGON2_ITERATIONS, MIN_ARGON2_MEMORY_KIB,
+        BitcoinSeed, CheckpointCasOutcome, CommitteeDescriptorDigest, DeploymentBinding, DeploymentId, ExpectedRecord,
+        KdfParams, KeystoreError, Network, NodeId, Password, RecordKey, RecoveryVault, RollbackFloorStore, SecretValue,
+        TransactionId, Vault, VaultCheckpoint, VaultIdentity, VaultRevision, VaultRole, MIN_ARGON2_ITERATIONS,
+        MIN_ARGON2_MEMORY_KIB,
     };
+
+    struct ExactCheckpointStore {
+        identity: VaultIdentity,
+        checkpoint: VaultCheckpoint,
+    }
+
+    impl RollbackFloorStore for ExactCheckpointStore {
+        type Error = Infallible;
+
+        fn load_checkpoint(&self, identity: VaultIdentity) -> Result<Option<VaultCheckpoint>, Self::Error> {
+            Ok((identity == self.identity).then_some(self.checkpoint))
+        }
+
+        fn compare_and_swap_checkpoint(
+            &self,
+            _identity: VaultIdentity,
+            _expected: Option<VaultCheckpoint>,
+            _next: VaultCheckpoint,
+        ) -> Result<CheckpointCasOutcome, Self::Error> {
+            Ok(CheckpointCasOutcome::Conflict(Some(self.checkpoint)))
+        }
+    }
 
     fn identity() -> Result<VaultIdentity, Box<dyn Error>> {
         let binding = DeploymentBinding::new(
@@ -804,18 +1084,39 @@ mod poison_tests {
         Password::from_bytes(b"fault injection password".to_vec())
     }
 
+    fn create_vault(
+        path: &std::path::Path,
+        identity: VaultIdentity,
+        password: Password,
+        params: KdfParams,
+    ) -> super::Result<Vault> {
+        let recovery = RecoveryVault::create(path, identity, password, params)?;
+        let checkpoint = recovery.checkpoint();
+        let checkpoint_store = ExactCheckpointStore { identity, checkpoint };
+        recovery
+            .anchor(&checkpoint_store)
+            .map_err(|_| KeystoreError::CheckpointMismatch)
+    }
+
+    fn ambiguous_candidate(error: KeystoreError) -> Result<VaultCheckpoint, Box<dyn Error>> {
+        match error {
+            KeystoreError::AmbiguousWrite { candidate, .. } => Ok(candidate),
+            other => Err(format!("expected ambiguous write, got {other}").into()),
+        }
+    }
+
     #[test]
     fn post_rename_error_poison_requires_reopen() -> Result<(), Box<dyn Error>> {
         let directory = TempDir::new()?;
         let path = directory.path().join("poison.vault");
         let params = KdfParams::new(MIN_ARGON2_MEMORY_KIB, MIN_ARGON2_ITERATIONS, 1)?;
-        let mut vault = Vault::create(&path, identity()?, password()?, params)?;
+        let mut vault = create_vault(&path, identity()?, password()?, params)?;
 
         crate::fs::inject_failure_after_rename_once();
-        assert!(matches!(
-            vault.set_bitcoin_seed(BitcoinSeed::from_bytes(vec![0xa7; 32])?),
-            Err(KeystoreError::Io(_))
-        ));
+        let error = vault
+            .set_bitcoin_seed(BitcoinSeed::from_bytes(vec![0xa7; 32])?)
+            .expect_err("injected post-rename failure must be returned");
+        let candidate = ambiguous_candidate(error)?;
         assert!(matches!(vault.revision(), Err(KeystoreError::Poisoned)));
         assert!(matches!(vault.bitcoin_seed(), Err(KeystoreError::Poisoned)));
         assert!(matches!(
@@ -824,7 +1125,13 @@ mod poison_tests {
         ));
         drop(vault);
 
-        let reopened = Vault::open(&path, identity()?, password()?)?;
+        let recovery = RecoveryVault::open(&path, identity()?, password()?)?;
+        assert_eq!(recovery.checkpoint(), candidate);
+        let checkpoint_store = ExactCheckpointStore {
+            identity: identity()?,
+            checkpoint: candidate,
+        };
+        let reopened = recovery.anchor(&checkpoint_store)?;
         let stored = reopened.bitcoin_seed()?.ok_or("missing durably renamed record")?;
         assert_eq!(stored.expose_secret(), [0xa7; 32]);
         Ok(())
@@ -837,11 +1144,12 @@ mod poison_tests {
         let params = KdfParams::new(MIN_ARGON2_MEMORY_KIB, MIN_ARGON2_ITERATIONS, 1)?;
         let first = RecordKey::channel(b"rollback-channel".to_vec())?;
         let second = RecordKey::invoice(b"rollback-invoice".to_vec())?;
-        let mut vault = Vault::create(&path, identity()?, password()?, params)?;
+        let mut vault = create_vault(&path, identity()?, password()?, params)?;
+        let prior = vault.checkpoint()?;
 
         crate::fs::inject_failure_before_rename_once();
-        assert!(matches!(
-            vault.transact(VaultRevision::new(0), TransactionId::new([0xb1; 32]), |transaction| {
+        let error = vault
+            .transact(VaultRevision::new(0), TransactionId::new([0xb1; 32]), |transaction| {
                 transaction.compare_and_swap(
                     first.clone(),
                     ExpectedRecord::Absent,
@@ -852,13 +1160,21 @@ mod poison_tests {
                     ExpectedRecord::Absent,
                     SecretValue::from_bytes(vec![0xb3; 32])?,
                 )
-            }),
-            Err(KeystoreError::Io(_))
-        ));
+            })
+            .expect_err("injected pre-rename failure must be returned");
+        let candidate = ambiguous_candidate(error)?;
+        assert_ne!(candidate, prior);
         assert!(matches!(vault.get(&first), Err(KeystoreError::Poisoned)));
         drop(vault);
 
-        let reopened = Vault::open(&path, identity()?, password()?)?;
+        let recovery = RecoveryVault::open(&path, identity()?, password()?)?;
+        assert_eq!(recovery.checkpoint(), prior);
+        assert_ne!(recovery.checkpoint(), candidate);
+        let checkpoint_store = ExactCheckpointStore {
+            identity: identity()?,
+            checkpoint: prior,
+        };
+        let reopened = recovery.anchor(&checkpoint_store)?;
         assert_eq!(reopened.revision()?, VaultRevision::new(0));
         assert!(reopened.get(&first)?.is_none());
         assert!(reopened.get(&second)?.is_none());

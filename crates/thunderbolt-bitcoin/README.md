@@ -26,3 +26,9 @@ Applications should construct [`RpcConfig`](https://docs.rs/thunderbolt-bitcoin/
 choose a credential provider, and call `BitcoinCoreClient::connect`. Connection
 does not succeed until both the chain name and genesis block match the selected
 network.
+
+The backend passed the measured live gate against the official Bitcoin Core
+v31.1.0 release, including exact coinbase maturity, a one-block reorganization,
+and a graceful same-datadir restart. The harness is ignored and requires
+explicit environment variables, so it is not an automatic CI result and does
+not download or pin Bitcoin Core. See [Testing](../../docs/testing.md).

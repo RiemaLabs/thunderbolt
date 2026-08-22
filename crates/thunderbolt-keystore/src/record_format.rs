@@ -1,6 +1,7 @@
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::secret::{
@@ -9,7 +10,7 @@ use crate::secret::{
 };
 use crate::{
     CommitteeDescriptorDigest, DeploymentBinding, DeploymentId, KdfParams, KeystoreError, Network, NodeId, Password,
-    Result, VaultIdentity, VaultRole,
+    Result, VaultCheckpoint, VaultIdentity, VaultRevision, VaultRole, VaultStateDigest,
 };
 
 const MAGIC: &[u8; 8] = b"THBKVLT2";
@@ -21,6 +22,7 @@ const TAG_BYTES: usize = 16;
 const HEADER_BYTES: usize = 8 + 2 + 1 + 1 + 32 + 32 + 8 + 32 + 4 + 4 + 4 + SALT_BYTES + NONCE_BYTES + 8 + 4 + 4 + 4;
 pub(crate) const MAX_VAULT_FILE_BYTES: usize = 12 * 1024 * 1024;
 const AAD_DOMAIN: &[u8] = b"bitcoin-thunderbolt/keystore/aad/v2";
+const CHECKPOINT_DOMAIN: &[u8] = b"bitcoin-thunderbolt/keystore/checkpoint/v1";
 
 pub(crate) struct LoadedVault {
     pub(crate) identity: VaultIdentity,
@@ -145,6 +147,17 @@ pub(crate) fn decode(blob: &[u8], expected: VaultIdentity, password: Password) -
         key,
         store,
     })
+}
+
+pub(crate) fn checkpoint(blob: &[u8], revision: u64) -> VaultCheckpoint {
+    let mut hasher = Sha256::new();
+    hasher.update(CHECKPOINT_DOMAIN);
+    hasher.update((blob.len() as u64).to_be_bytes());
+    hasher.update(blob);
+    VaultCheckpoint::new(
+        VaultRevision::new(revision),
+        VaultStateDigest::new(hasher.finalize().into()),
+    )
 }
 
 fn encryptable_store_header(store: &RecordStore) -> Result<(u32, u32)> {

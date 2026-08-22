@@ -1,3 +1,4 @@
+use std::convert::Infallible;
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -6,10 +7,11 @@ use static_assertions::assert_not_impl_any;
 use subtle::ConstantTimeEq;
 use tempfile::TempDir;
 use thunderbolt_keystore::{
-    BitcoinSeed, CommitOutcome, CommitteeDescriptorDigest, CommitteeMemberShare, CommitteeSessionNonce,
-    DeploymentBinding, DeploymentId, ExpectedRecord, HolderCredential, KdfParams, KeystoreError, Network, NodeId,
-    PaillierKeyBytes, Password, RecordKey, RecordNamespace, RecordStatus, SecretValue, TransactionId, Vault,
-    VaultIdentity, VaultRevision, VaultRole, MAX_RECORD_KEY_BYTES, MAX_RECORD_VALUE_BYTES, MAX_TRANSACTION_MUTATIONS,
+    BitcoinSeed, CheckpointAnchorError, CheckpointCasOutcome, CommitOutcome, CommitteeDescriptorDigest,
+    CommitteeMemberShare, CommitteeSessionNonce, DeploymentBinding, DeploymentId, ExpectedRecord, HolderCredential,
+    KdfParams, KeystoreError, Network, NodeId, PaillierKeyBytes, Password, RecordKey, RecordNamespace, RecordStatus,
+    RecoveryVault, RollbackFloorStore, SecretValue, TransactionId, Vault, VaultCheckpoint, VaultIdentity,
+    VaultRevision, VaultRole, MAX_RECORD_KEY_BYTES, MAX_RECORD_VALUE_BYTES, MAX_TRANSACTION_MUTATIONS,
     MIN_ARGON2_ITERATIONS, MIN_ARGON2_MEMORY_KIB,
 };
 
@@ -26,6 +28,29 @@ assert_not_impl_any!(SecretValue: Clone, std::fmt::Debug);
 assert_not_impl_any!(RecordKey: std::fmt::Debug);
 assert_not_impl_any!(TransactionId: std::fmt::Debug);
 assert_not_impl_any!(Vault: Clone, std::fmt::Debug);
+assert_not_impl_any!(RecoveryVault: Clone, std::fmt::Debug);
+
+struct ExactCheckpointStore {
+    identity: VaultIdentity,
+    checkpoint: VaultCheckpoint,
+}
+
+impl RollbackFloorStore for ExactCheckpointStore {
+    type Error = Infallible;
+
+    fn load_checkpoint(&self, identity: VaultIdentity) -> Result<Option<VaultCheckpoint>, Self::Error> {
+        Ok((identity == self.identity).then_some(self.checkpoint))
+    }
+
+    fn compare_and_swap_checkpoint(
+        &self,
+        _identity: VaultIdentity,
+        _expected: Option<VaultCheckpoint>,
+        _next: VaultCheckpoint,
+    ) -> Result<CheckpointCasOutcome, Self::Error> {
+        Ok(CheckpointCasOutcome::Conflict(Some(self.checkpoint)))
+    }
+}
 
 fn password() -> thunderbolt_keystore::Result<Password> {
     Password::from_bytes(b"correct horse battery staple".to_vec())
@@ -70,6 +95,33 @@ fn vault_path(directory: &TempDir) -> PathBuf {
     directory.path().join("participant.vault")
 }
 
+fn create_vault(
+    path: impl AsRef<Path>,
+    identity: VaultIdentity,
+    password: Password,
+    params: KdfParams,
+) -> thunderbolt_keystore::Result<Vault> {
+    let recovery = RecoveryVault::create(path, identity, password, params)?;
+    let checkpoint = recovery.checkpoint();
+    let checkpoint_store = ExactCheckpointStore { identity, checkpoint };
+    recovery
+        .anchor(&checkpoint_store)
+        .map_err(|_| KeystoreError::CheckpointMismatch)
+}
+
+fn open_vault(
+    path: impl AsRef<Path>,
+    identity: VaultIdentity,
+    password: Password,
+) -> thunderbolt_keystore::Result<Vault> {
+    let recovery = RecoveryVault::open(path, identity, password)?;
+    let checkpoint = recovery.checkpoint();
+    let checkpoint_store = ExactCheckpointStore { identity, checkpoint };
+    recovery
+        .anchor(&checkpoint_store)
+        .map_err(|_| KeystoreError::CheckpointMismatch)
+}
+
 fn secret_option_eq(left: Option<&[u8]>, right: &[u8]) -> bool {
     left.is_some_and(|left| bool::from(left.ct_eq(right)))
 }
@@ -78,13 +130,13 @@ fn secret_option_eq(left: Option<&[u8]>, right: &[u8]) -> bool {
 fn holder_records_survive_atomic_updates_and_restart() -> Result<(), Box<dyn Error>> {
     let directory = TempDir::new()?;
     let path = vault_path(&directory);
-    let mut vault = Vault::create(&path, holder_identity(), password()?, params()?)?;
+    let mut vault = create_vault(&path, holder_identity(), password()?, params()?)?;
     vault.set_bitcoin_seed(BitcoinSeed::from_bytes(vec![0x31; 32])?)?;
     vault.set_paillier_key(PaillierKeyBytes::from_bytes(vec![0x52; 384])?)?;
     vault.set_holder_credential(HolderCredential::from_bytes(vec![0x73; 96])?)?;
     drop(vault);
 
-    let mut reopened = Vault::open(&path, holder_identity(), password()?)?;
+    let mut reopened = open_vault(&path, holder_identity(), password()?)?;
     assert!(secret_option_eq(
         reopened.bitcoin_seed()?.map(|value| value.expose_secret()),
         [0x31; 32].as_slice()
@@ -101,7 +153,7 @@ fn holder_records_survive_atomic_updates_and_restart() -> Result<(), Box<dyn Err
     assert!(!reopened.remove_holder_credential()?);
     drop(reopened);
 
-    let reopened = Vault::open(&path, holder_identity(), password()?)?;
+    let reopened = open_vault(&path, holder_identity(), password()?)?;
     assert!(reopened.holder_credential()?.is_none());
     Ok(())
 }
@@ -110,7 +162,7 @@ fn holder_records_survive_atomic_updates_and_restart() -> Result<(), Box<dyn Err
 fn committee_records_are_role_scoped_and_durable() -> Result<(), Box<dyn Error>> {
     let directory = TempDir::new()?;
     let path = vault_path(&directory);
-    let mut vault = Vault::create(&path, committee_identity(), password()?, params()?)?;
+    let mut vault = create_vault(&path, committee_identity(), password()?, params()?)?;
     vault.set_paillier_key(PaillierKeyBytes::from_bytes(vec![0x19; 512])?)?;
     vault.set_committee_share(CommitteeMemberShare::from_bytes(vec![0x2a; 128])?)?;
     vault.set_committee_session_nonce(CommitteeSessionNonce::from_bytes(vec![0x3b; 32])?)?;
@@ -122,10 +174,14 @@ fn committee_records_are_role_scoped_and_durable() -> Result<(), Box<dyn Error>>
         vault.set_holder_credential(HolderCredential::from_bytes(vec![0x5d; 64])?),
         Err(KeystoreError::InvalidRecordForRole)
     ));
-    let minimum_revision = vault.revision()?;
+    let trusted_checkpoint = vault.checkpoint()?;
     drop(vault);
 
-    let vault = Vault::open_with_minimum_revision(&path, committee_identity(), password()?, minimum_revision)?;
+    let checkpoint_store = ExactCheckpointStore {
+        identity: committee_identity(),
+        checkpoint: trusted_checkpoint,
+    };
+    let vault = Vault::open_anchored(&path, committee_identity(), password()?, &checkpoint_store)?;
     assert!(secret_option_eq(
         vault.committee_share()?.map(|value| value.expose_secret()),
         [0x2a; 128].as_slice()
@@ -141,18 +197,18 @@ fn committee_records_are_role_scoped_and_durable() -> Result<(), Box<dyn Error>>
 fn wrong_password_and_ciphertext_tamper_fail_closed() -> Result<(), Box<dyn Error>> {
     let directory = TempDir::new()?;
     let path = vault_path(&directory);
-    let mut vault = Vault::create(&path, holder_identity(), password()?, params()?)?;
+    let mut vault = create_vault(&path, holder_identity(), password()?, params()?)?;
     vault.set_bitcoin_seed(BitcoinSeed::from_bytes(vec![0xa1; 32])?)?;
     drop(vault);
 
-    let wrong = Vault::open(&path, holder_identity(), wrong_password()?);
+    let wrong = open_vault(&path, holder_identity(), wrong_password()?);
     assert!(matches!(wrong, Err(KeystoreError::AuthenticationFailed)));
 
     let mut encoded = fs::read(&path)?;
     let last = encoded.last_mut().ok_or("vault unexpectedly empty")?;
     *last ^= 0x80;
     fs::write(&path, encoded)?;
-    let tampered = Vault::open(&path, holder_identity(), password()?);
+    let tampered = open_vault(&path, holder_identity(), password()?);
     assert!(matches!(tampered, Err(KeystoreError::AuthenticationFailed)));
     Ok(())
 }
@@ -161,7 +217,7 @@ fn wrong_password_and_ciphertext_tamper_fail_closed() -> Result<(), Box<dyn Erro
 fn network_role_and_node_identity_are_bound() -> Result<(), Box<dyn Error>> {
     let directory = TempDir::new()?;
     let path = vault_path(&directory);
-    drop(Vault::create(&path, holder_identity(), password()?, params()?)?);
+    drop(create_vault(&path, holder_identity(), password()?, params()?)?);
 
     let wrong_network = VaultIdentity::new(
         Network::Signet,
@@ -170,7 +226,7 @@ fn network_role_and_node_identity_are_bound() -> Result<(), Box<dyn Error>> {
         deployment(),
     );
     assert!(matches!(
-        Vault::open(&path, wrong_network, password()?),
+        open_vault(&path, wrong_network, password()?),
         Err(KeystoreError::IdentityMismatch)
     ));
     let wrong_role = VaultIdentity::new(
@@ -180,12 +236,7 @@ fn network_role_and_node_identity_are_bound() -> Result<(), Box<dyn Error>> {
         deployment(),
     );
     assert!(matches!(
-        Vault::open_with_minimum_revision(
-            &path,
-            wrong_role,
-            password()?,
-            thunderbolt_keystore::VaultRevision::new(1)
-        ),
+        RecoveryVault::open(&path, wrong_role, password()?),
         Err(KeystoreError::IdentityMismatch)
     ));
     let wrong_node = VaultIdentity::new(
@@ -195,7 +246,7 @@ fn network_role_and_node_identity_are_bound() -> Result<(), Box<dyn Error>> {
         deployment(),
     );
     assert!(matches!(
-        Vault::open(&path, wrong_node, password()?),
+        open_vault(&path, wrong_node, password()?),
         Err(KeystoreError::IdentityMismatch)
     ));
     let wrong_deployment = VaultIdentity::new(
@@ -209,7 +260,7 @@ fn network_role_and_node_identity_are_bound() -> Result<(), Box<dyn Error>> {
         )?,
     );
     assert!(matches!(
-        Vault::open(&path, wrong_deployment, password()?),
+        open_vault(&path, wrong_deployment, password()?),
         Err(KeystoreError::IdentityMismatch)
     ));
     let wrong_epoch = VaultIdentity::new(
@@ -223,7 +274,7 @@ fn network_role_and_node_identity_are_bound() -> Result<(), Box<dyn Error>> {
         )?,
     );
     assert!(matches!(
-        Vault::open(&path, wrong_epoch, password()?),
+        open_vault(&path, wrong_epoch, password()?),
         Err(KeystoreError::IdentityMismatch)
     ));
     let wrong_descriptor = VaultIdentity::new(
@@ -237,7 +288,7 @@ fn network_role_and_node_identity_are_bound() -> Result<(), Box<dyn Error>> {
         )?,
     );
     assert!(matches!(
-        Vault::open(&path, wrong_descriptor, password()?),
+        open_vault(&path, wrong_descriptor, password()?),
         Err(KeystoreError::IdentityMismatch)
     ));
     Ok(())
@@ -247,13 +298,13 @@ fn network_role_and_node_identity_are_bound() -> Result<(), Box<dyn Error>> {
 fn advisory_lock_allows_only_one_open_instance() -> Result<(), Box<dyn Error>> {
     let directory = TempDir::new()?;
     let path = vault_path(&directory);
-    let first = Vault::create(&path, holder_identity(), password()?, params()?)?;
+    let first = create_vault(&path, holder_identity(), password()?, params()?)?;
     assert!(matches!(
-        Vault::open(&path, holder_identity(), password()?),
+        open_vault(&path, holder_identity(), password()?),
         Err(KeystoreError::Locked)
     ));
     drop(first);
-    let second = Vault::open(&path, holder_identity(), password()?)?;
+    let second = open_vault(&path, holder_identity(), password()?)?;
     drop(second);
     Ok(())
 }
@@ -266,20 +317,27 @@ fn backup_is_authenticated_and_restore_requires_empty_target() -> Result<(), Box
     let restored = directory.path().join("restored.vault");
     let wrong_target = directory.path().join("wrong-password.vault");
     let rollback_target = directory.path().join("rollback.vault");
-    let mut vault = Vault::create(&source, holder_identity(), password()?, params()?)?;
+    let mut vault = create_vault(&source, holder_identity(), password()?, params()?)?;
     vault.set_bitcoin_seed(BitcoinSeed::from_bytes(vec![0xd1; 32])?)?;
-    let backup_revision = vault.revision()?;
+    let backup_checkpoint = vault.checkpoint()?;
     vault.backup_to(&backup)?;
     drop(vault);
+    let backup_store = ExactCheckpointStore {
+        identity: holder_identity(),
+        checkpoint: backup_checkpoint,
+    };
 
     let failed_restore = Vault::restore(
         &backup,
         &wrong_target,
         holder_identity(),
         wrong_password()?,
-        backup_revision,
+        &backup_store,
     );
-    assert!(matches!(failed_restore, Err(KeystoreError::AuthenticationFailed)));
+    assert!(matches!(
+        failed_restore,
+        Err(CheckpointAnchorError::Keystore(KeystoreError::AuthenticationFailed))
+    ));
     assert!(!wrong_target.exists());
     assert!(matches!(
         Vault::restore(
@@ -287,13 +345,20 @@ fn backup_is_authenticated_and_restore_requires_empty_target() -> Result<(), Box
             &rollback_target,
             holder_identity(),
             password()?,
-            VaultRevision::new(backup_revision.get() + 1)
+            &ExactCheckpointStore {
+                identity: holder_identity(),
+                checkpoint: thunderbolt_keystore::VaultCheckpoint::new(
+                    VaultRevision::new(backup_checkpoint.revision().get() + 1),
+                    backup_checkpoint.state_digest()
+                ),
+            }
         ),
-        Err(KeystoreError::RollbackDetected)
+        Err(CheckpointAnchorError::Mismatch { .. })
     ));
     assert!(!rollback_target.exists());
 
-    let restored_vault = Vault::restore(&backup, &restored, holder_identity(), password()?, backup_revision)?;
+    let restored_vault = Vault::restore(&backup, &restored, holder_identity(), password()?, &backup_store)?;
+    assert_eq!(restored_vault.checkpoint()?, backup_checkpoint);
     assert!(secret_option_eq(
         restored_vault.bitcoin_seed()?.map(|value| value.expose_secret()),
         [0xd1; 32].as_slice()
@@ -304,14 +369,8 @@ fn backup_is_authenticated_and_restore_requires_empty_target() -> Result<(), Box
     fs::write(&existing_empty, [])?;
     set_owner_only(&existing_empty)?;
     assert!(matches!(
-        Vault::restore(
-            &backup,
-            &existing_empty,
-            holder_identity(),
-            password()?,
-            backup_revision
-        ),
-        Err(KeystoreError::AlreadyExists)
+        Vault::restore(&backup, &existing_empty, holder_identity(), password()?, &backup_store),
+        Err(CheckpointAnchorError::Keystore(KeystoreError::AlreadyExists))
     ));
     assert_eq!(fs::read(&existing_empty)?, Vec::<u8>::new());
     Ok(())
@@ -321,10 +380,10 @@ fn backup_is_authenticated_and_restore_requires_empty_target() -> Result<(), Box
 fn create_and_backup_never_overwrite_existing_files() -> Result<(), Box<dyn Error>> {
     let directory = TempDir::new()?;
     let source = vault_path(&directory);
-    let vault = Vault::create(&source, holder_identity(), password()?, params()?)?;
+    let vault = create_vault(&source, holder_identity(), password()?, params()?)?;
 
     assert!(matches!(
-        Vault::create(&source, holder_identity(), password()?, params()?),
+        create_vault(&source, holder_identity(), password()?, params()?),
         Err(KeystoreError::Locked)
     ));
 
@@ -340,7 +399,7 @@ fn create_and_backup_never_overwrite_existing_files() -> Result<(), Box<dyn Erro
     drop(vault);
 
     assert!(matches!(
-        Vault::create(&source, holder_identity(), password()?, params()?),
+        create_vault(&source, holder_identity(), password()?, params()?),
         Err(KeystoreError::AlreadyExists)
     ));
     Ok(())
@@ -350,7 +409,7 @@ fn create_and_backup_never_overwrite_existing_files() -> Result<(), Box<dyn Erro
 fn stale_crash_temporary_file_cannot_replace_live_vault() -> Result<(), Box<dyn Error>> {
     let directory = TempDir::new()?;
     let path = vault_path(&directory);
-    let mut vault = Vault::create(&path, holder_identity(), password()?, params()?)?;
+    let mut vault = create_vault(&path, holder_identity(), password()?, params()?)?;
     vault.set_bitcoin_seed(BitcoinSeed::from_bytes(vec![0xe1; 32])?)?;
     drop(vault);
 
@@ -360,7 +419,7 @@ fn stale_crash_temporary_file_cannot_replace_live_vault() -> Result<(), Box<dyn 
     fs::write(&stale, b"incomplete crash write")?;
     set_owner_only(&stale)?;
 
-    let mut reopened = Vault::open(&path, holder_identity(), password()?)?;
+    let mut reopened = open_vault(&path, holder_identity(), password()?)?;
     assert!(secret_option_eq(
         reopened.bitcoin_seed()?.map(|value| value.expose_secret()),
         [0xe1; 32].as_slice()
@@ -369,7 +428,7 @@ fn stale_crash_temporary_file_cannot_replace_live_vault() -> Result<(), Box<dyn 
     assert_eq!(fs::read(&stale)?, b"incomplete crash write");
     drop(reopened);
 
-    let reopened = Vault::open(&path, holder_identity(), password()?)?;
+    let reopened = open_vault(&path, holder_identity(), password()?)?;
     assert!(secret_option_eq(
         reopened.holder_credential()?.map(|value| value.expose_secret()),
         [0xf2; 64].as_slice()
@@ -382,14 +441,18 @@ fn external_file_replacement_aborts_update_and_restores_memory() -> Result<(), B
     let directory = TempDir::new()?;
     let path = vault_path(&directory);
     let replacement = directory.path().join("replacement.vault");
-    let mut vault = Vault::create(&path, holder_identity(), password()?, params()?)?;
+    let mut vault = create_vault(&path, holder_identity(), password()?, params()?)?;
     vault.set_bitcoin_seed(BitcoinSeed::from_bytes(vec![0x61; 32])?)?;
 
-    drop(Vault::create(&replacement, holder_identity(), password()?, params()?)?);
+    drop(create_vault(&replacement, holder_identity(), password()?, params()?)?);
     fs::rename(&replacement, &path)?;
 
     let result = vault.set_holder_credential(HolderCredential::from_bytes(vec![0x72; 48])?);
-    assert!(matches!(result, Err(KeystoreError::FileReplaced)));
+    assert!(matches!(
+        result,
+        Err(KeystoreError::AmbiguousWrite { source, .. })
+            if matches!(*source, KeystoreError::FileReplaced)
+    ));
     assert!(matches!(vault.holder_credential(), Err(KeystoreError::Poisoned)));
     assert!(matches!(vault.bitcoin_seed(), Err(KeystoreError::Poisoned)));
     Ok(())
@@ -403,7 +466,7 @@ fn multi_record_transaction_is_atomic_and_survives_restart() -> Result<(), Box<d
     let invoice = RecordKey::invoice(b"invoice-1".to_vec())?;
     let credential = RecordKey::credential(b"credential-1".to_vec())?;
     let transaction_id = TransactionId::new([0x81; 32]);
-    let mut vault = Vault::create(&path, holder_identity(), password()?, params()?)?;
+    let mut vault = create_vault(&path, holder_identity(), password()?, params()?)?;
 
     let outcome = vault.transact(vault.revision()?, transaction_id, |transaction| {
         transaction.compare_and_swap(
@@ -425,7 +488,7 @@ fn multi_record_transaction_is_atomic_and_survives_restart() -> Result<(), Box<d
     assert_eq!(outcome, CommitOutcome::Applied(VaultRevision::new(1)));
     drop(vault);
 
-    let reopened = Vault::open(&path, holder_identity(), password()?)?;
+    let reopened = open_vault(&path, holder_identity(), password()?)?;
     assert_eq!(reopened.revision()?, VaultRevision::new(1));
     assert!(secret_option_eq(
         reopened.get(&channel)?.map(|record| record.expose_secret()),
@@ -448,7 +511,7 @@ fn exact_replay_is_idempotent_and_changed_replay_fails() -> Result<(), Box<dyn E
     let path = vault_path(&directory);
     let key = RecordKey::channel(b"channel-replay".to_vec())?;
     let transaction_id = TransactionId::new([0x82; 32]);
-    let mut vault = Vault::create(&path, holder_identity(), password()?, params()?)?;
+    let mut vault = create_vault(&path, holder_identity(), password()?, params()?)?;
     let stage = |transaction: &mut thunderbolt_keystore::Transaction| {
         transaction.compare_and_swap(
             key.clone(),
@@ -462,7 +525,7 @@ fn exact_replay_is_idempotent_and_changed_replay_fails() -> Result<(), Box<dyn E
     );
     drop(vault);
 
-    let mut reopened = Vault::open(&path, holder_identity(), password()?)?;
+    let mut reopened = open_vault(&path, holder_identity(), password()?)?;
     assert_eq!(
         reopened.transact(VaultRevision::new(0), transaction_id, |transaction| {
             transaction.compare_and_swap(
@@ -510,7 +573,7 @@ fn compare_and_swap_conflict_rolls_back_every_staged_record() -> Result<(), Box<
     let path = vault_path(&directory);
     let first = RecordKey::channel(b"channel-cas".to_vec())?;
     let second = RecordKey::invoice(b"invoice-cas".to_vec())?;
-    let mut vault = Vault::create(&path, holder_identity(), password()?, params()?)?;
+    let mut vault = create_vault(&path, holder_identity(), password()?, params()?)?;
     vault.transact(VaultRevision::new(0), TransactionId::new([0x83; 32]), |transaction| {
         transaction.compare_and_swap(
             first.clone(),
@@ -550,8 +613,9 @@ fn consumed_nonce_tombstone_survives_restart_and_stale_backup_is_rejected() -> R
     let stale_backup = directory.path().join("committee-old.backup");
     let rejected_restore = directory.path().join("committee-restored.vault");
     let nonce_key = RecordKey::session_nonce(b"signing-session-9".to_vec())?;
-    let mut vault = Vault::create(&path, committee_identity(), password()?, params()?)?;
+    let mut vault = create_vault(&path, committee_identity(), password()?, params()?)?;
     vault.set_committee_share(CommitteeMemberShare::from_bytes(vec![0x61; 64])?)?;
+    let stale_checkpoint = vault.checkpoint()?;
     vault.backup_to(&stale_backup)?;
     vault.transact(vault.revision()?, TransactionId::new([0x85; 32]), |transaction| {
         transaction.compare_and_swap(
@@ -578,39 +642,43 @@ fn consumed_nonce_tombstone_survives_restart_and_stale_backup_is_rejected() -> R
     vault.transact(vault.revision()?, TransactionId::new([0x86; 32]), |transaction| {
         transaction.remove(nonce_key.clone(), nonce_version)
     })?;
-    let trusted_floor = vault.revision()?;
-    assert_eq!(trusted_floor, VaultRevision::new(3));
+    let trusted_checkpoint = vault.checkpoint()?;
+    assert_eq!(trusted_checkpoint.revision(), VaultRevision::new(3));
     assert_eq!(
         vault.record_status(&nonce_key)?,
         RecordStatus::Tombstoned(thunderbolt_keystore::RecordVersion::new(3))
     );
     drop(vault);
 
-    assert!(matches!(
-        Vault::open(&path, committee_identity(), password()?),
-        Err(KeystoreError::RollbackFloorRequired)
-    ));
-    let mut reopened = Vault::open_with_minimum_revision(&path, committee_identity(), password()?, trusted_floor)?;
+    let checkpoint_store = ExactCheckpointStore {
+        identity: committee_identity(),
+        checkpoint: trusted_checkpoint,
+    };
+    let mut reopened = Vault::open_anchored(&path, committee_identity(), password()?, &checkpoint_store)?;
     assert_eq!(
         reopened.record_status(&nonce_key)?,
         RecordStatus::Tombstoned(thunderbolt_keystore::RecordVersion::new(3))
     );
     assert!(matches!(
-        reopened.transact(trusted_floor, TransactionId::new([0x87; 32]), |transaction| {
-            transaction.compare_and_swap(
-                nonce_key.clone(),
-                ExpectedRecord::Version(thunderbolt_keystore::RecordVersion::new(3)),
-                SecretValue::from_bytes(vec![0x63; 32])?,
-            )
-        }),
+        reopened.transact(
+            trusted_checkpoint.revision(),
+            TransactionId::new([0x87; 32]),
+            |transaction| {
+                transaction.compare_and_swap(
+                    nonce_key.clone(),
+                    ExpectedRecord::Version(thunderbolt_keystore::RecordVersion::new(3)),
+                    SecretValue::from_bytes(vec![0x63; 32])?,
+                )
+            },
+        ),
         Err(KeystoreError::NonceConsumed)
     ));
     drop(reopened);
 
     fs::copy(&stale_backup, &path)?;
     assert!(matches!(
-        Vault::open_with_minimum_revision(&path, committee_identity(), password()?, trusted_floor),
-        Err(KeystoreError::RollbackDetected)
+        Vault::open_anchored(&path, committee_identity(), password()?, &checkpoint_store),
+        Err(CheckpointAnchorError::Mismatch { .. })
     ));
     assert!(matches!(
         Vault::restore(
@@ -618,10 +686,11 @@ fn consumed_nonce_tombstone_survives_restart_and_stale_backup_is_rejected() -> R
             &rejected_restore,
             committee_identity(),
             password()?,
-            VaultRevision::new(1)
+            &checkpoint_store
         ),
-        Err(KeystoreError::SigningStateRestoreForbidden)
+        Err(CheckpointAnchorError::Mismatch { .. })
     ));
+    assert_eq!(stale_checkpoint.revision(), VaultRevision::new(1));
     assert!(!rejected_restore.exists());
     Ok(())
 }
@@ -655,7 +724,7 @@ fn identity_and_record_limits_fail_closed() -> Result<(), Box<dyn Error>> {
 
     let directory = TempDir::new()?;
     let path = vault_path(&directory);
-    let mut vault = Vault::create(&path, holder_identity(), password()?, params()?)?;
+    let mut vault = create_vault(&path, holder_identity(), password()?, params()?)?;
     assert!(matches!(
         vault.transact(VaultRevision::new(0), TransactionId::new([0x88; 32]), |transaction| {
             for index in 0..=MAX_TRANSACTION_MUTATIONS {
@@ -680,7 +749,7 @@ fn vault_and_lock_files_are_owner_only() -> Result<(), Box<dyn Error>> {
     let directory = TempDir::new()?;
     let path = vault_path(&directory);
     let backup = directory.path().join("owner-only.backup");
-    let vault = Vault::create(&path, holder_identity(), password()?, params()?)?;
+    let vault = create_vault(&path, holder_identity(), password()?, params()?)?;
     vault.backup_to(&backup)?;
 
     assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
@@ -697,11 +766,11 @@ fn vault_and_lock_files_are_owner_only() -> Result<(), Box<dyn Error>> {
 fn group_readable_vault_is_rejected() -> Result<(), Box<dyn Error>> {
     let directory = TempDir::new()?;
     let path = vault_path(&directory);
-    drop(Vault::create(&path, holder_identity(), password()?, params()?)?);
+    drop(create_vault(&path, holder_identity(), password()?, params()?)?);
     fs::set_permissions(&path, fs::Permissions::from_mode(0o640))?;
 
     assert!(matches!(
-        Vault::open(&path, holder_identity(), password()?),
+        open_vault(&path, holder_identity(), password()?),
         Err(KeystoreError::UnsafeFile)
     ));
     Ok(())
@@ -716,11 +785,11 @@ fn symlink_vault_backup_and_lock_paths_are_rejected() -> Result<(), Box<dyn Erro
     let backup_link = directory.path().join("backup-link");
     let lock_attack_target = directory.path().join("lock-victim");
     let attacked_vault = directory.path().join("attacked.vault");
-    let vault = Vault::create(&path, holder_identity(), password()?, params()?)?;
+    let vault = create_vault(&path, holder_identity(), password()?, params()?)?;
 
     symlink(&path, &alias)?;
     assert!(matches!(
-        Vault::open(&alias, holder_identity(), password()?),
+        open_vault(&alias, holder_identity(), password()?),
         Err(KeystoreError::UnsafeFile)
     ));
 
@@ -736,7 +805,7 @@ fn symlink_vault_backup_and_lock_paths_are_rejected() -> Result<(), Box<dyn Erro
 
     symlink(&lock_attack_target, attacked_vault.with_extension("vault.lock"))?;
     assert!(matches!(
-        Vault::create(&attacked_vault, holder_identity(), password()?, params()?),
+        create_vault(&attacked_vault, holder_identity(), password()?, params()?),
         Err(KeystoreError::UnsafeFile)
     ));
     assert_eq!(fs::read(&lock_attack_target)?, b"do not modify");

@@ -1,0 +1,10 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Exclude local Git metadata and generated release artifacts"
+paths = [
+  "^[.]git/",
+  "^dist/",
+  "^target/",
+]

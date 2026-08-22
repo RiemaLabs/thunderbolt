@@ -1,9 +1,18 @@
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use bitcoin::Network;
 use libpaillier::{unknown_order::BigNumber, DecryptionKey, EncryptionKey};
 use proptest::prelude::*;
 use secp::{MaybeScalar, Scalar};
+use static_assertions::assert_not_impl_any;
+use tempfile::TempDir;
+use thunderbolt_keystore::{
+    CheckpointCasOutcome, CommitteeDescriptorDigest, KdfParams, NodeId, Password, RollbackFloorStore, VaultCheckpoint,
+    VaultIdentity, MIN_ARGON2_ITERATIONS, MIN_ARGON2_MEMORY_KIB,
+};
 use thunderbolt_protocol::{BitcoinTxid, ChannelId, Digest, EntryHash, InvoiceId};
 use thunderbolt_wire::{
     from_json_slice, to_json_vec, CanonicalDigest, PaillierCiphertextHex, PaillierPublicKeyHex, ProofResponseHex,
@@ -11,7 +20,90 @@ use thunderbolt_wire::{
 };
 
 use super::*;
-use crate::engine::{InvoiceFixture, ThresholdInvoiceFixture};
+use crate::engine::{derive_identity, InvoiceFixture, ThresholdInvoiceFixture};
+
+assert_not_impl_any!(KeystoreSecretVault<TestFloor>: Clone, std::fmt::Debug);
+
+#[derive(Clone, Default)]
+struct TestFloor {
+    state: Arc<Mutex<TestFloorState>>,
+}
+
+#[derive(Default)]
+struct TestFloorState {
+    identity: Option<VaultIdentity>,
+    checkpoint: Option<VaultCheckpoint>,
+    fail_before_advance: bool,
+    fail_after_advance: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("test rollback floor failure")]
+struct TestFloorError;
+
+impl TestFloor {
+    fn fail_before_advance_once(&self) -> Result<(), TestFloorError> {
+        let mut state = self.state.lock().map_err(|_| TestFloorError)?;
+        state.fail_before_advance = true;
+        Ok(())
+    }
+
+    fn fail_after_advance_once(&self) -> Result<(), TestFloorError> {
+        let mut state = self.state.lock().map_err(|_| TestFloorError)?;
+        state.fail_after_advance = true;
+        Ok(())
+    }
+}
+
+impl RollbackFloorStore for TestFloor {
+    type Error = TestFloorError;
+
+    fn load_checkpoint(&self, identity: VaultIdentity) -> Result<Option<VaultCheckpoint>, Self::Error> {
+        let state = self.state.lock().map_err(|_| TestFloorError)?;
+        if state.identity.is_some_and(|stored| stored != identity) {
+            return Ok(None);
+        }
+        Ok(state.checkpoint)
+    }
+
+    fn compare_and_swap_checkpoint(
+        &self,
+        identity: VaultIdentity,
+        expected: Option<VaultCheckpoint>,
+        next: VaultCheckpoint,
+    ) -> Result<CheckpointCasOutcome, Self::Error> {
+        let mut state = self.state.lock().map_err(|_| TestFloorError)?;
+        if state.identity.is_some_and(|stored| stored != identity) {
+            return Ok(CheckpointCasOutcome::Conflict(None));
+        }
+        if state.checkpoint == Some(next) {
+            return Ok(CheckpointCasOutcome::AlreadyCurrent);
+        }
+        let valid_transition = match (state.checkpoint, expected) {
+            (None, None) => next.revision().get() == 0,
+            (Some(current), Some(expected)) if current == expected => current
+                .revision()
+                .get()
+                .checked_add(1)
+                .is_some_and(|revision| revision == next.revision().get()),
+            _ => false,
+        };
+        if !valid_transition {
+            return Ok(CheckpointCasOutcome::Conflict(state.checkpoint));
+        }
+        if state.fail_before_advance {
+            state.fail_before_advance = false;
+            return Err(TestFloorError);
+        }
+        state.identity = Some(identity);
+        state.checkpoint = Some(next);
+        if state.fail_after_advance {
+            state.fail_after_advance = false;
+            return Err(TestFloorError);
+        }
+        Ok(CheckpointCasOutcome::Advanced)
+    }
+}
 
 // Public deterministic test primes, split into short literals so secret
 // scanners do not mistake cryptographic fixtures for deployable credentials.
@@ -315,6 +407,62 @@ fn channel(tag: u8) -> Result<ChannelContext, HolderError> {
     )
 }
 
+fn keystore_channel(tag: u8) -> Result<ChannelContext, HolderError> {
+    let channel_id = ChannelId::new(BitcoinTxid::from_bytes([tag; 32]), u32::from(tag));
+    ChannelContext::new(
+        Network::Regtest,
+        b"thunderbolt-regtest-v1",
+        7,
+        channel_id,
+        scalar(17)?.base_point_mul(),
+    )
+}
+
+fn keystore_identity(node_tag: u8) -> Result<VaultIdentity, Box<dyn std::error::Error>> {
+    Ok(holder_keystore_identity(
+        Network::Regtest,
+        b"thunderbolt-regtest-v1",
+        7,
+        CommitteeDescriptorDigest::new([0x44; 32])?,
+        NodeId::new([node_tag; 32]),
+    )?)
+}
+
+fn keystore_password() -> Result<Password, Box<dyn std::error::Error>> {
+    Ok(Password::from_bytes(b"holder adapter test password".to_vec())?)
+}
+
+fn keystore_params() -> Result<KdfParams, Box<dyn std::error::Error>> {
+    Ok(KdfParams::new(MIN_ARGON2_MEMORY_KIB, MIN_ARGON2_ITERATIONS, 1)?)
+}
+
+fn create_keystore_adapter(
+    path: &Path,
+    node_tag: u8,
+    floor: TestFloor,
+) -> Result<KeystoreSecretVault<TestFloor>, Box<dyn std::error::Error>> {
+    Ok(KeystoreSecretVault::create(
+        path,
+        keystore_identity(node_tag)?,
+        keystore_password()?,
+        keystore_params()?,
+        floor,
+    )?)
+}
+
+fn reopen_keystore_adapter(
+    path: &Path,
+    node_tag: u8,
+    floor: TestFloor,
+) -> Result<KeystoreSecretVault<TestFloor>, Box<dyn std::error::Error>> {
+    Ok(KeystoreSecretVault::open_with_floor_store(
+        path,
+        keystore_identity(node_tag)?,
+        keystore_password()?,
+        floor,
+    )?)
+}
+
 fn invoice_id(tag: u8) -> Result<InvoiceId, HolderError> {
     InvoiceId::new(format!("invoice-{tag}")).map_err(|_| HolderError::InvalidProtocolIdentifier)
 }
@@ -327,8 +475,8 @@ fn genesis_ack(tag: u8) -> DurableAcknowledgement {
     DurableAcknowledgement::new(0, EntryHash::from_bytes([tag; 32]), Digest::from_bytes([tag; 32]))
 }
 
-fn prepared_invoice(
-    recipient: &mut HolderEngine<MemoryVault>,
+fn prepared_invoice<V: SecretVault>(
+    recipient: &mut HolderEngine<V>,
     channel: &ChannelContext,
     invoice_id: &InvoiceId,
     refresh: Scalar,
@@ -351,8 +499,8 @@ fn prepared_invoice(
     )
 }
 
-fn prepared_threshold_invoice(
-    recipient: &mut HolderEngine<MemoryVault>,
+fn prepared_threshold_invoice<V: SecretVault>(
+    recipient: &mut HolderEngine<V>,
     channel: &ChannelContext,
     invoice_id: &InvoiceId,
     roster: ThresholdRoster,
@@ -778,5 +926,307 @@ fn os_random_identity_is_persisted_and_idempotent() -> Result<(), HolderError> {
     let mut second = HolderEngine::new(MemoryVault::default());
     let second_identity = second.initialize()?;
     assert_ne!(second_identity, identity);
+    Ok(())
+}
+
+#[test]
+fn real_keystore_single_invoice_transfer_receive_survives_restart() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let sender_path = directory.path().join("sender.vault");
+    let recipient_path = directory.path().join("recipient.vault");
+    let sender_floor = TestFloor::default();
+    let recipient_floor = TestFloor::default();
+    let mut sender = HolderEngine::new(create_keystore_adapter(&sender_path, 0x51, sender_floor.clone())?);
+    let mut recipient = HolderEngine::new(create_keystore_adapter(&recipient_path, 0x52, recipient_floor.clone())?);
+    let _ = sender.initialize_with_fixture_seed([0x61; 32])?;
+    let _ = recipient.initialize_with_fixture_seed([0x62; 32])?;
+
+    let channel = keystore_channel(31)?;
+    let invoice_id = invoice_id(31)?;
+    let holder_secret = scalar(23)?;
+    assert_eq!(
+        sender.install_genesis_credential(GenesisCredential::new(
+            channel.clone(),
+            CredentialSecret::from_bytes(holder_secret.serialize())?,
+            channel.anchor_base() * holder_secret,
+            genesis_ack(31),
+        )?)?,
+        ReceiveDisposition::OwnershipRecorded
+    );
+    let prepared_invoice = prepared_invoice(&mut recipient, &channel, &invoice_id, scalar(13)?)?;
+    let invoice_digest = prepared_invoice.envelope().canonical_digest()?;
+    let committed_invoice = CommittedInvoice::new(
+        prepared_invoice.envelope().clone(),
+        1,
+        acknowledgement(invoice_digest, 1, 0x63),
+    )?;
+    let _ = recipient.verify_committed_invoice(&channel, &invoice_id, committed_invoice.clone())?;
+    let verified = sender.verify_committed_invoice(&channel, &invoice_id, committed_invoice)?;
+    let prepared_transfer = sender.create_transfer_with_fixture_nonce(&verified, BigNumber::from(17_u32))?;
+
+    drop(sender);
+    drop(recipient);
+    let mut sender = HolderEngine::new(reopen_keystore_adapter(&sender_path, 0x51, sender_floor.clone())?);
+    let mut recipient = HolderEngine::new(reopen_keystore_adapter(&recipient_path, 0x52, recipient_floor.clone())?);
+    let committed = committed_transfer(&prepared_transfer, 0x64)?;
+    assert_eq!(
+        recipient.receive_committed_transfer(&channel, &invoice_id, &committed)?,
+        ReceiveDisposition::OwnershipRecorded
+    );
+    assert_eq!(
+        sender.acknowledge_committed_transfer(&channel, &committed)?,
+        TransferAcknowledgementDisposition::CredentialRetainedAndMarkedTransferred
+    );
+    assert_eq!(
+        recipient.receive_committed_transfer(&channel, &invoice_id, &committed)?,
+        ReceiveDisposition::AlreadyRecorded
+    );
+
+    drop(sender);
+    drop(recipient);
+    let mut sender = HolderEngine::new(reopen_keystore_adapter(&sender_path, 0x51, sender_floor)?);
+    let mut recipient = HolderEngine::new(reopen_keystore_adapter(&recipient_path, 0x52, recipient_floor)?);
+    assert!(sender
+        .credential_summary(&channel, 0)?
+        .and_then(|summary| summary.transferred_by().cloned())
+        .is_some());
+    assert!(recipient.credential_summary(&channel, 1)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn real_keystore_threshold_invoice_transfer_receive_survives_restart() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let sender_path = directory.path().join("threshold-sender.vault");
+    let recipient_path = directory.path().join("threshold-recipient.vault");
+    let sender_floor = TestFloor::default();
+    let recipient_floor = TestFloor::default();
+    let mut sender = HolderEngine::new(create_keystore_adapter(&sender_path, 0x71, sender_floor.clone())?);
+    let mut recipient = HolderEngine::new(create_keystore_adapter(&recipient_path, 0x72, recipient_floor.clone())?);
+    let _ = sender.initialize_with_fixture_seed([0x73; 32])?;
+    let _ = recipient.initialize_with_fixture_seed([0x74; 32])?;
+    let channel = keystore_channel(41)?;
+    let invoice_id = invoice_id(41)?;
+    let roster = threshold_roster()?;
+    let holder_secret = scalar(29)?;
+    let _ = sender.install_genesis_credential(GenesisCredential::new(
+        channel.clone(),
+        CredentialSecret::from_bytes(holder_secret.serialize())?,
+        channel.anchor_base() * holder_secret,
+        genesis_ack(41),
+    )?)?;
+    let prepared = prepared_threshold_invoice(&mut recipient, &channel, &invoice_id, roster.clone(), scalar(17)?)?;
+    let committed_invoice = CommittedThresholdInvoice::new(
+        prepared.recipient_share().clone(),
+        prepared.threshold_distribution().clone(),
+        1,
+        acknowledgement(prepared.package_digest()?.to_bytes(), 1, 0x75),
+    )?;
+    let _ = recipient.verify_committed_threshold_invoice(&channel, &invoice_id, &roster, committed_invoice.clone())?;
+    let verified = sender.verify_committed_threshold_invoice(&channel, &invoice_id, &roster, committed_invoice)?;
+    let prepared_transfer = sender.create_transfer_with_fixture_nonce(&verified, BigNumber::from(19_u32))?;
+    drop(sender);
+    drop(recipient);
+
+    let mut sender = HolderEngine::new(reopen_keystore_adapter(&sender_path, 0x71, sender_floor)?);
+    let mut recipient = HolderEngine::new(reopen_keystore_adapter(&recipient_path, 0x72, recipient_floor)?);
+    let committed = committed_transfer(&prepared_transfer, 0x76)?;
+    assert_eq!(
+        recipient.receive_committed_transfer(&channel, &invoice_id, &committed)?,
+        ReceiveDisposition::OwnershipRecorded
+    );
+    assert_eq!(
+        sender.acknowledge_committed_transfer(&channel, &committed)?,
+        TransferAcknowledgementDisposition::CredentialRetainedAndMarkedTransferred
+    );
+    Ok(())
+}
+
+#[test]
+fn keystore_dropped_transaction_rolls_back_and_second_open_is_locked() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("rollback.vault");
+    let twin_path = directory.path().join("same-identity-twin.vault");
+    let floor = TestFloor::default();
+    let mut adapter = create_keystore_adapter(&path, 0x81, floor.clone())?;
+    assert!(matches!(
+        create_keystore_adapter(&twin_path, 0x81, floor.clone()),
+        Err(error) if matches!(error.downcast_ref::<HolderError>(), Some(HolderError::Vault(VaultError::Conflict)))
+    ));
+    {
+        let mut transaction = adapter.begin()?;
+        let seed = zeroize::Zeroizing::new([0x82; 32]);
+        transaction.insert_identity(IdentityRecord::new(derive_identity(&seed)?, seed))?;
+    }
+    {
+        let transaction = adapter.begin()?;
+        assert!(transaction.identity().is_none());
+        transaction.commit()?;
+    }
+    let mut engine = HolderEngine::new(adapter);
+    let _ = engine.initialize_with_fixture_seed([0x83; 32])?;
+    let adapter = engine.into_vault();
+    assert!(matches!(
+        KeystoreSecretVault::open_with_floor_store(&path, keystore_identity(0x81)?, keystore_password()?, floor,),
+        Err(HolderError::Vault(VaultError::Conflict))
+    ));
+    drop(adapter);
+    Ok(())
+}
+
+#[test]
+fn keystore_checkpoint_cas_rejects_divergent_copied_paths() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let first_path = directory.path().join("fork-a.vault");
+    let second_path = directory.path().join("fork-b.vault");
+    let floor = TestFloor::default();
+    let mut bootstrap = HolderEngine::new(create_keystore_adapter(&first_path, 0x86, floor.clone())?);
+    let _ = bootstrap.initialize_with_fixture_seed([0x87; 32])?;
+    bootstrap.into_vault().backup_to(&second_path)?;
+
+    let mut first = reopen_keystore_adapter(&first_path, 0x86, floor.clone())?;
+    let mut second = reopen_keystore_adapter(&second_path, 0x86, floor.clone())?;
+    let first_channel = keystore_channel(71)?;
+    let first_secret = scalar(43)?;
+    let second_channel = keystore_channel(72)?;
+    let second_secret = scalar(47)?;
+    let mut first_transaction = first.begin()?;
+    let mut second_transaction = second.begin()?;
+    first_transaction.insert_credential(CredentialRecord::new(
+        CredentialKey {
+            channel: first_channel.key(),
+            step: 0,
+        },
+        zeroize::Zeroizing::new(first_secret.serialize()),
+        first_channel.anchor_base() * first_secret,
+        genesis_ack(71),
+    ))?;
+    second_transaction.insert_credential(CredentialRecord::new(
+        CredentialKey {
+            channel: second_channel.key(),
+            step: 0,
+        },
+        zeroize::Zeroizing::new(second_secret.serialize()),
+        second_channel.anchor_base() * second_secret,
+        genesis_ack(72),
+    ))?;
+    first_transaction.commit()?;
+    let forked = second_transaction.commit();
+    assert!(matches!(forked, Err(VaultError::CommitFailed)));
+    drop(second);
+    assert!(matches!(
+        reopen_keystore_adapter(&second_path, 0x86, floor),
+        Err(error) if matches!(error.downcast_ref::<HolderError>(), Some(HolderError::Vault(VaultError::Conflict)))
+    ));
+    let mut first = HolderEngine::new(first);
+    assert!(first.credential_summary(&first_channel, 0)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn keystore_identity_accepts_raw_deployment_names_and_rejects_testnet4() -> Result<(), Box<dyn std::error::Error>> {
+    let descriptor = CommitteeDescriptorDigest::new([0x44; 32])?;
+    let identity = holder_keystore_identity(
+        Network::Regtest,
+        b"thunderbolt-regtest-v1",
+        7,
+        descriptor,
+        NodeId::new([0x84; 32]),
+    )?;
+    assert_eq!(identity, keystore_identity(0x84)?);
+    assert!(matches!(
+        holder_keystore_identity(
+            Network::Testnet4,
+            b"thunderbolt-testnet4-v1",
+            7,
+            descriptor,
+            NodeId::new([0x85; 32]),
+        ),
+        Err(HolderError::InvalidInput { .. })
+    ));
+    Ok(())
+}
+
+#[test]
+fn keystore_tamper_and_old_backup_rollback_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let tamper_path = directory.path().join("tamper.vault");
+    let tamper_floor = TestFloor::default();
+    let mut tamper_engine = HolderEngine::new(create_keystore_adapter(&tamper_path, 0x91, tamper_floor.clone())?);
+    let _ = tamper_engine.initialize_with_fixture_seed([0x92; 32])?;
+    drop(tamper_engine);
+    let mut tampered = fs::read(&tamper_path)?;
+    let last = tampered.last_mut().ok_or("empty keystore")?;
+    *last ^= 0x80;
+    fs::write(&tamper_path, tampered)?;
+    assert!(matches!(
+        reopen_keystore_adapter(&tamper_path, 0x91, tamper_floor),
+        Err(error) if matches!(error.downcast_ref::<HolderError>(), Some(HolderError::Vault(VaultError::CorruptRecord)))
+    ));
+
+    let live_path = directory.path().join("live.vault");
+    let backup_path = directory.path().join("old.backup");
+    let floor = TestFloor::default();
+    let mut engine = HolderEngine::new(create_keystore_adapter(&live_path, 0x93, floor.clone())?);
+    let _ = engine.initialize_with_fixture_seed([0x94; 32])?;
+    engine.into_vault().backup_to(&backup_path)?;
+    let mut engine = HolderEngine::new(reopen_keystore_adapter(&live_path, 0x93, floor.clone())?);
+    let channel = keystore_channel(51)?;
+    let secret = scalar(31)?;
+    let _ = engine.install_genesis_credential(GenesisCredential::new(
+        channel.clone(),
+        CredentialSecret::from_bytes(secret.serialize())?,
+        channel.anchor_base() * secret,
+        genesis_ack(51),
+    )?)?;
+    drop(engine);
+    fs::copy(&backup_path, &live_path)?;
+    assert!(matches!(
+        reopen_keystore_adapter(&live_path, 0x93, floor),
+        Err(error) if matches!(error.downcast_ref::<HolderError>(), Some(HolderError::Vault(VaultError::Conflict)))
+    ));
+    Ok(())
+}
+
+#[test]
+fn keystore_floor_fault_poisoning_and_reconciliation_are_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("floor-fault.vault");
+    let floor = TestFloor::default();
+    let mut engine = HolderEngine::new(create_keystore_adapter(&path, 0xa1, floor.clone())?);
+    let _ = engine.initialize_with_fixture_seed([0xa2; 32])?;
+    floor.fail_before_advance_once()?;
+    let channel = keystore_channel(61)?;
+    let secret = scalar(37)?;
+    let result = engine.install_genesis_credential(GenesisCredential::new(
+        channel.clone(),
+        CredentialSecret::from_bytes(secret.serialize())?,
+        channel.anchor_base() * secret,
+        genesis_ack(61),
+    )?);
+    assert!(matches!(result, Err(HolderError::Vault(VaultError::CommitFailed))));
+    assert!(matches!(
+        engine.credential_summary(&channel, 0),
+        Err(HolderError::Vault(VaultError::Unavailable))
+    ));
+    drop(engine);
+
+    let mut engine = HolderEngine::new(reopen_keystore_adapter(&path, 0xa1, floor.clone())?);
+    assert!(engine.credential_summary(&channel, 0)?.is_some());
+    let revision_before = engine.into_vault().revision()?;
+    let mut engine = HolderEngine::new(reopen_keystore_adapter(&path, 0xa1, floor.clone())?);
+    floor.fail_after_advance_once()?;
+    let second_channel = keystore_channel(62)?;
+    let second_secret = scalar(41)?;
+    assert_eq!(
+        engine.install_genesis_credential(GenesisCredential::new(
+            second_channel.clone(),
+            CredentialSecret::from_bytes(second_secret.serialize())?,
+            second_channel.anchor_base() * second_secret,
+            genesis_ack(62),
+        )?)?,
+        ReceiveDisposition::OwnershipRecorded
+    );
+    assert!(engine.into_vault().revision()? > revision_before);
     Ok(())
 }

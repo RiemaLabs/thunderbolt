@@ -824,7 +824,7 @@ pub(crate) struct ThresholdInvoiceFixture {
     pub(crate) recipient_nonce: Nonce,
 }
 
-fn derive_identity(seed: &[u8; 32]) -> Result<HolderIdentity, HolderError> {
+pub(crate) fn derive_identity(seed: &[u8; 32]) -> Result<HolderIdentity, HolderError> {
     for counter in 0_u32..=u32::MAX {
         let mut hasher = Sha256::new();
         hasher.update(IDENTITY_DERIVATION_DOMAIN);

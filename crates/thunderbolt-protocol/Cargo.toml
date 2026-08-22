@@ -16,6 +16,11 @@ workspace = true
 serde = { version = "1.0.217", features = ["derive"] }
 sha2 = "0.10.8"
 thiserror = "2.0.12"
+thunderbolt-ledger = { path = "../thunderbolt-ledger" }
+thunderbolt-wire = { path = "../thunderbolt-wire" }
 
 [dev-dependencies]
+bitcoin = { version = "0.32.5", features = ["rand-std", "serde"] }
+proptest = "1.7.0"
+secp256k1 = { version = "0.31.1", features = ["rand"] }
 serde_json = "1.0"

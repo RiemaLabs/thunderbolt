@@ -1,5 +1,7 @@
 use std::io;
 
+use crate::VaultCheckpoint;
+
 /// Errors returned by the encrypted vault.
 ///
 /// Variants never contain passwords, keys, decrypted records, or ciphertext.
@@ -72,6 +74,20 @@ pub enum KeystoreError {
     /// A reserved signing nonce is immutable until it is tombstoned.
     #[error("committee signing nonce is already reserved")]
     NonceAlreadyReserved,
+
+    /// The authenticated file does not match the exact external checkpoint.
+    #[error("vault does not match the trusted checkpoint")]
+    CheckpointMismatch,
+
+    /// An encrypted replacement may or may not have become the live file.
+    #[error("vault write outcome is ambiguous; reconcile the candidate checkpoint")]
+    AmbiguousWrite {
+        /// Exact checkpoint of the attempted encrypted replacement.
+        candidate: VaultCheckpoint,
+        /// Underlying non-secret filesystem failure.
+        #[source]
+        source: Box<KeystoreError>,
+    },
 
     /// Generic restore cannot safely recover committee signing state.
     #[error("committee signing-state restore requires external monotonic reconciliation")]

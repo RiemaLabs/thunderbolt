@@ -20,11 +20,13 @@
 
 mod engine;
 mod error;
+mod keystore;
 mod types;
 mod vault;
 
 pub use engine::HolderEngine;
 pub use error::{HolderError, VaultError};
+pub use keystore::{holder_keystore_identity, KeystoreSecretVault};
 pub use thunderbolt_core::threshold::ThresholdMemberPublicKey;
 pub use types::{
     threshold_invoice_package_digest, ChannelContext, ChannelKey, CommittedInvoice, CommittedThresholdInvoice,

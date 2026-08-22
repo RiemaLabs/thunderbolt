@@ -26,6 +26,7 @@ Every RC must pass:
 3. Multi-process regtest tests for Open, Invoice, Transfer, committee update, and Finalize features included in the release.
 4. Restart tests at every durable transition and signing boundary.
 5. Duplicate, replay, stale sequence, wrong network, malformed proof, and resource-limit tests.
+   Bitcoin backend changes also require the opt-in live gate described in [Testing](testing.md); an ignored harness is not treated as automatic CI evidence.
 6. Database migration, backup, clean-host restore, and downgrade-policy checks.
 7. Dependency vulnerability, license, secret, and provenance scans.
 8. Review of unsafe code, production panics, test keys, fixed nonces, debug endpoints, and fail-open paths.

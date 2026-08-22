@@ -19,6 +19,7 @@
 mod commitment;
 mod engine;
 mod error;
+mod keystore_vault;
 mod record;
 mod signer;
 mod types;
@@ -30,6 +31,7 @@ pub mod insecure_regtest;
 pub use commitment::{CommittedTransfer, LedgerCommitmentVerifier};
 pub use engine::CommitteeMemberEngine;
 pub use error::{CommitteeError, Result};
+pub use keystore_vault::{committee_keystore_identity, KeystoreCommitteeVault, KeystoreCommitteeVaultError};
 pub use record::{PendingRefresh, RefreshEventBinding, UpdateAcknowledgement};
 pub use signer::{CommitteeSigner, NonceCommitment, SignerSessionBinding, SignerSessionId, SignerSessionPhase};
 pub use types::{

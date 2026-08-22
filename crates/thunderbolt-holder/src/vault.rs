@@ -161,6 +161,10 @@ impl InvoiceRecord {
         &self.decryption_key
     }
 
+    pub(crate) fn restore_state(&mut self, state: InvoiceState) {
+        self.state = state;
+    }
+
     pub(crate) fn mark_committed(&mut self, acknowledgement: DurableAcknowledgement) -> Result<bool, HolderError> {
         match &self.state {
             InvoiceState::Prepared => {
@@ -268,6 +272,10 @@ impl CredentialRecord {
         &self.secret
     }
 
+    pub(crate) fn restore_state(&mut self, state: CredentialState) {
+        self.state = state;
+    }
+
     pub(crate) fn mark_transferred(&mut self, acknowledgement: DurableAcknowledgement) -> Result<bool, HolderError> {
         match &self.state {
             CredentialState::Owned => {
@@ -356,6 +364,10 @@ impl OutboundTransferRecord {
             Some(existing) if existing == &acknowledgement => Ok(false),
             Some(_) => Err(HolderError::StateConflict),
         }
+    }
+
+    pub(crate) fn restore_acknowledgement(&mut self, acknowledgement: Option<DurableAcknowledgement>) {
+        self.acknowledgement = acknowledgement;
     }
 }
 

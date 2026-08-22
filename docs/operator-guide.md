@@ -1,6 +1,6 @@
 # Operator guide
 
-Bitcoin Thunderbolt `v1.0.0-rc.1` runs a reference Thunderbolt Ledger for development and regtest. Mainnet is disabled. The repository includes Holder, committee, Trusted Verifier, Keystore, and Bitcoin Core libraries, but the daemon does not construct or run them. It also does not expose metrics.
+Bitcoin Thunderbolt `v1.0.0-rc.1` runs a reference Thunderbolt Ledger for development and regtest. Mainnet is disabled. The repository includes Holder, committee, Trusted Verifier, Keystore, and Bitcoin Core libraries. The node library can inject the Trusted Verifier, but the shipped daemon does not configure it or run the other role libraries. It also does not expose metrics.
 
 ## What runs in this RC
 
@@ -18,10 +18,10 @@ Building the workspace also builds these non-executable components:
 
 | Crate | What it provides | What operators cannot do yet |
 | --- | --- | --- |
-| `thunderbolt-holder` | Local Holder and Recipient state transitions | Start a Holder daemon, create an Invoice through the CLI, or submit a Transfer automatically |
-| `thunderbolt-committee` | One-share committee update engine and signing-session guards | Start a committee daemon, run DKG, or produce and aggregate FROST shares |
-| `thunderbolt-verifier` | Trusted Invoice and Transfer verification | Enable production event submission in `thunderboltd` |
-| `thunderbolt-keystore` | Encrypted local vault and authenticated backup and restore | Unlock or manage participant secrets through the daemon or CLI |
+| `thunderbolt-holder` | Local Holder and Recipient state, including v1 single-committee and threshold Invoice packages | Start a Holder daemon, create an Invoice through the CLI, or submit a Transfer automatically |
+| `thunderbolt-committee` | One-share committee update engine with Recipient-share binding and signing-session guards | Start a committee daemon, verify a concrete quorum receipt, run DKG, or produce and aggregate FROST shares |
+| `thunderbolt-verifier` | Trusted Invoice and Transfer verification plus node injection API | Configure a production verifier in `thunderboltd`, or verify Open and Finalize |
+| `thunderbolt-keystore` | Encrypted transactional multi-record vault, revision floors, nonce tombstones, and restricted restore | Unlock or manage participant secrets through the daemon or CLI, or restore committee signing state |
 | `thunderbolt-bitcoin` | Validated Bitcoin Core RPC, chain tracking, and transaction policy checks | Connect the daemon to Bitcoin Core, fund a channel, or complete settlement |
 
 These libraries are implementation building blocks. Installing them does not create a Thunderbolt network or complete the lifecycle described in the paper.
@@ -31,9 +31,11 @@ These libraries are implementation building blocks. Installing them does not cre
 Use the pinned Rust toolchain:
 
 ```bash
-cargo build --workspace --release
-cargo test --workspace
+cargo build --locked --release
+cargo test --workspace --all-features --locked --lib --bins --tests
 ```
+
+The first command builds the default release members and excludes research-only settlement and single-process committee code. The full workspace test command enables those features deliberately for regression coverage. Release packaging builds only `thunderboltd` and `thunderbolt-cli`.
 
 Inspect the exact command surface from the built commit:
 
@@ -132,7 +134,9 @@ Optional CLI overrides are `--endpoint`, `--token-file`, and `--timeout-seconds`
 
 ## Development event submission
 
-The safe default daemon has no production proof verifier, so it rejects event submission. To exercise the state machine on development regtest, restart it with the explicit demo flag:
+The safe default daemon has no production proof verifier, so it rejects event submission. The node library's `bind_with_verifier` API is for an embedding runtime and has no TOML or CLI equivalent. Even an injected verifier supports only Invoice and Transfer; Open and Finalize fail closed.
+
+To exercise the state machine on development regtest, restart it with the explicit demo flag:
 
 ```bash
 ./target/release/thunderboltd \
@@ -181,6 +185,23 @@ make regtest-down
 
 The Compose files are [`compose.yaml`](../deploy/regtest/compose.yaml) and [`thunderbolt.toml`](../deploy/regtest/thunderbolt.toml).
 
+## Participant vault recovery
+
+`thunderbolt-keystore` is not used by this daemon, but future Holder and committee operators must preserve its rollback rules:
+
+- multi-record updates use one authenticated revision and one transaction identifier;
+- a consumed signing nonce becomes a permanent tombstone;
+- a committee vault opens only with a positive minimum revision obtained from an independently authenticated monotonic store;
+- the external floor must advance after every share, nonce, or signing-state commit;
+- generic committee restore is forbidden;
+- Holder restore requires an externally trusted minimum revision and an empty destination.
+
+An old vault file can authenticate successfully. Without the external revision floor, authentication alone does not detect rollback while the process is stopped.
+
+## Release test evidence
+
+The Bitcoin backend passed the official Bitcoin Core v31.1.0 live gate, including release-file verification, isolated regtest, the exact 100-confirmation coinbase boundary, a one-block disconnect and distinct replacement, graceful same-datadir restart, and a full rerun after restart. The test is ignored and environment-gated in the repository, so CI does not reproduce it automatically. See [Testing](testing.md) for the exact evidence boundary.
+
 ## systemd assets
 
 The repository includes:
@@ -216,12 +237,14 @@ Compatibility aliases `/live` and `/ready` are also available. The daemon marks 
 - Only the Ledger server role runs.
 - The control transport is loopback HTTP, not the reserved Unix socket.
 - Remote control and built-in TLS are rejected.
-- Production proof, Bitcoin, and committee verification are not connected to event submission.
-- The Holder, committee, Trusted Verifier, Keystore, and Bitcoin Core libraries have no daemon or CLI integration.
+- The daemon has no configured production verifier. The node injection API verifies only Invoice and Transfer.
+- Open, Finalize, actor signatures, Bitcoin policy, and concrete quorum receipts are not connected to event submission.
+- The Holder, committee, Keystore, and Bitcoin Core libraries have no daemon or CLI integration.
 - Metrics settings are parsed but no metrics endpoint runs.
 - Backups are verified but not encrypted by the daemon.
 - The Compose profile is a Ledger and storage demonstration, not a Bitcoin regtest network.
 - The wire codec uses 2048-bit Paillier values, while the accepted paper evaluates 3072-bit Paillier.
 - Open has no reviewed DKG or provisioning ceremony. Finalize has no `R_own` proof or combined-key Holder plus FROST signing path under `P`.
+- Version 1 remains active. Stable version 2 bindings are not adopted across messages and Ledger events, and the reducer permits one pending Invoice.
 
-Role processes, atomic participant storage adapters, Bitcoin settlement, threshold signing, metrics, and a production Ledger fault model remain release work. See [Production roadmap](roadmap.md).
+Role processes, participant vault adapters, outboxes, Ledger cursors, Bitcoin settlement, threshold signing, metrics, and a production Ledger fault model remain release work. See [Production roadmap](roadmap.md).

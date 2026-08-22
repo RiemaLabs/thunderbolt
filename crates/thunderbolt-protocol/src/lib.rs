@@ -23,6 +23,12 @@ mod identifiers;
 mod ledger;
 mod reducer;
 
+/// Version-two protocol types and reducer.
+///
+/// Version two is intentionally isolated from the stable version-one types,
+/// canonical encodings, and hashes exported at this crate's root.
+pub mod v2;
+
 pub use error::{IdentifierKind, ProtocolError};
 pub use event::{
     Actor, ActorRole, ChannelEvent, Committee, EventKind, FinalizeEvent, InvoiceEvent, OpenEvent, TransferEvent,

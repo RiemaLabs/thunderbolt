@@ -1,6 +1,6 @@
 # API and event contract
 
-Bitcoin Thunderbolt `v1.0.0-rc.1` exposes a loopback JSON API through `thunderboltd` and a thin client named `thunderbolt-cli`. The current server is a reference Thunderbolt Ledger. The workspace also contains Holder, committee, Trusted Verifier, Keystore, and Bitcoin Core libraries, but none of them add an HTTP route or change the daemon's Ledger-only role.
+Bitcoin Thunderbolt `v1.0.0-rc.1` exposes a loopback JSON API through `thunderboltd` and a thin client named `thunderbolt-cli`. The current server is a reference Thunderbolt Ledger. The node library has a transaction-scoped Trusted Verifier injection point for Invoice and Transfer, but the shipped daemon does not configure it and remains Ledger-only.
 
 ## Control transport
 
@@ -52,7 +52,7 @@ The CLI reads `[ledger].endpoint` and `[ledger].auth_token_file` unless a global
 | `GET /v1/channels/{id}` | `read` | Get one channel snapshot |
 | `GET /v1/channels/{id}/events` | `read` | List channel entries |
 | `GET /v1/channels/{id}/events/{sequence}` | `read` | Get one entry |
-| `POST /v1/channels/{id}/events` | `write` | Submit one development-gated Ledger entry |
+| `POST /v1/channels/{id}/events` | `write` | Submit one evidence-free proposal; the shipped daemon requires development demo mode because it has no Trusted Verifier |
 | `POST /v1/database/integrity` | `operator` | Run the full storage integrity check |
 | `POST /v1/database/backup` | `admin` | Create and verify a manual backup |
 | `POST /v1/admin/stop` | `admin` | Begin graceful stop |
@@ -71,7 +71,7 @@ Event submission has an extra identity rule: the authenticated token `id` must e
 
 ## Event submission safety mode
 
-The safe default server has no production verifier and rejects every submitted event with `verification_unavailable`. A development regtest demonstration must start with:
+The safe default daemon has no production verifier and rejects every submitted event with `verification_unavailable`. The node library can inject `TrustedVerifier` through `NodeServer::bind_with_verifier` or `from_listener_with_verifier`, but no daemon configuration or CLI option selects those constructors. A development regtest demonstration must start with:
 
 ```bash
 thunderboltd --config PATH start \
@@ -101,7 +101,9 @@ Implemented event payloads are `Open`, `Invoice`, `Transfer`, and `Finalize`. En
 
 The reducer checks lifecycle, sequence, previous hash, actor role, channel-lifetime invoice uniqueness, bounds, timestamps, and required verification-attestation kinds. It does not verify signatures, zero-knowledge proofs, Bitcoin transactions, or committee quorums.
 
-`thunderbolt-storage` applies the reducer and commits the immutable entry plus its channel snapshot in one SQLite transaction. An exact repeat of the same per-channel idempotency key and canonical entry returns the original committed result with `replayed = true`. Reusing the key for different content is rejected.
+`thunderbolt-storage` provides `append_verified_proposal` for service writes. It rejects client-supplied evidence, acquires the SQLite writer lock, deduplicates the evidence-free proposal, loads the authoritative snapshot and pending Invoice, samples trusted Ledger time, and invokes the verifier callback inside that transaction. It then commits the immutable entry, node evidence, channel snapshot, and retry mapping together. Exact retries return the original result without repeating verification. A verifier or persistence failure rolls back every related row.
+
+`append_entry` remains a trusted import and regression API. It accepts an already verified entry and must not be used as the public request path.
 
 ## Current public wire messages
 
@@ -109,19 +111,23 @@ The reducer checks lifecycle, sequence, previous hash, actor role, channel-lifet
 
 The RC codec fixes Paillier values at 2048 bits. The accepted paper evaluates 3072-bit Paillier. The project must reconcile that parameter and version the encoding before mainnet approval.
 
+The wire crate also provides `ChannelBindingV2` and `OperationBindingV2`. They define a stable channel `ctx_id` over the protocol suite, Bitcoin network and exact genesis, complete funding outpoint, deployment, committee epoch and descriptor, and anchor parameter suite. Invoice ID and positive Transfer step remain explicit operation inputs. These version 2 types are not yet used by the active version 1 envelopes or Ledger events and do not define actor signatures.
+
 ## Library APIs not exposed by the daemon
 
 The following APIs are available to runtime developers, not to `thunderbolt-cli` users:
 
-- `HolderEngine` creates and records the v1 single-committee Invoice path and Transfer state behind `SecretVault` and `VaultTransaction`. It does not create the threshold-Invoice and VESS package required by a committee deployment.
-- `CommitteeMemberEngine` owns one committee share and consumes only a verified committed Transfer binding. `CommitteeSigner` defines fail-closed nonce handling but supplies no FROST implementation or aggregator.
-- `TrustedVerifier` verifies Invoice and Transfer artifacts against a `DeploymentContext`, a channel snapshot, and trusted Ledger time. It does not verify Open, `R_own`, Finalize, actor signatures, or Bitcoin state.
-- `Vault` encrypts typed participant secrets and authenticates backup and restore operations. It is not a Holder or committee service by itself.
+- `HolderEngine` creates and records v1 single-committee Invoices and threshold Recipient-share plus VESS packages behind `SecretVault` and `VaultTransaction`. The threshold Recipient proof uses the implemented `tb/share` transcript rather than claiming the paper's exact `R_inv^thr` transcript.
+- `CommitteeMemberEngine` owns one committee share and verifies the exact Recipient-share, distribution, Transfer, and abstract committed-Ledger binding before a replay-safe update. `CommitteeSigner` defines fail-closed nonce handling but supplies no FROST implementation or aggregator.
+- `TrustedVerifier` verifies Invoice and Transfer artifacts against a `DeploymentContext`, a channel snapshot, and trusted Ledger time. The node can inject it into the atomic append path. It does not verify Open, `R_own`, Finalize, actor signatures, quorum receipts, or Bitcoin state.
+- `Vault` encrypts a transactional multi-record participant store. Committee open requires an externally anchored minimum revision and committee restore is forbidden. It is not a Holder or committee service by itself.
 - `BitcoinCoreClient` validates the selected Bitcoin network before use and provides bounded chain, funding, fee, broadcast, and closing checks. It has no wallet or signing interface.
 
-The current `POST /v1/channels/{id}/events` handler does not call any of these APIs. Safe startup therefore still rejects event submission unless the explicit development-regtest demo mode is enabled.
+The current `POST /v1/channels/{id}/events` handler always uses the atomic verified-append path. With an injected Trusted Verifier it can verify Invoice and Transfer. Open and Finalize always fail closed. Because `thunderboltd` starts the node without a verifier, its safe default still rejects all event submission unless the explicit development-regtest demo mode is enabled.
 
 ## Protocol v2 contract
+
+The stable channel and operation binding is implemented. The signed proposal and authorization layer is not.
 
 The production event envelope needs fields equivalent to:
 
@@ -143,7 +149,7 @@ actor_signature
 
 The signature digest must define a fixed Bitcoin Thunderbolt domain, hash-format version, integer widths, byte order, length encoding, optional-field encoding, and exact field order. Implementations must reject non-canonical values and share checked golden vectors.
 
-The node must verify a proposal inside the same storage write transaction that selects the current channel snapshot, referenced Invoice, and trusted Ledger time. Verifying first and appending later would allow the head or expiry decision to change between the two operations.
+Invoice and Transfer now use the required transaction-scoped verification boundary. Protocol v2 still needs an actor-scoped request identifier, actor signature validation, quorum receipt capability, and a durable notification outbox.
 
 The full runtime also needs control operations for wallet initialization and locking, encrypted backup and restore, Open, invoice creation, Transfer, Finalize, event subscriptions, committee update, threshold signing, heartbeat, and resharing. Those operations are not part of the current CLI or HTTP server.
 

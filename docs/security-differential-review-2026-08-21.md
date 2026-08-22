@@ -4,7 +4,7 @@
 
 This review covered commit `fd6206b` and the new protocol, configuration, storage, wire, and reference-node layers on `release/1.0`. The review treated cryptography, Bitcoin settlement, authorization, and ledger state as high risk.
 
-This is a historical review of that commit. Later commits added Holder, one-share committee, Trusted Verifier, encrypted Keystore, and Bitcoin Core libraries. They are not covered by this report and are not wired into `thunderboltd`. See [Architecture](architecture.md) and [Production roadmap](roadmap.md) for current scope.
+This is a historical review of that commit. Later commits added Holder, one-share committee, Trusted Verifier, transactional Keystore, Bitcoin Core, stable version 2 binding, and atomic verified-append libraries. They are not covered by this report. See [Current security milestone](security-milestone-2026-08-21.md), [Architecture](architecture.md), and [Production roadmap](roadmap.md) for current scope.
 
 | Severity | Found | Resolved in branch |
 | --- | ---: | ---: |

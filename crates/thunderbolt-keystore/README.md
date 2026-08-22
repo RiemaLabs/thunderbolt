@@ -15,8 +15,12 @@ decrypted payloads, and opaque record values are zeroized on drop.
 
 The vault deliberately exposes a narrow API:
 
-- `Vault::create` is no-clobber and creates an owner-only file.
-- `Vault::open` authenticates the complete vault before returning any record.
+- `RecoveryVault::create` is no-clobber and creates an owner-only file without
+  exposing secret records.
+- `RecoveryVault::open` authenticates a file but remains restricted until
+  `anchor` loads an exact checkpoint from a `RollbackFloorStore`.
+- `Vault::open_anchored` combines recovery and exact external anchoring for
+  normal production startup.
 - namespaced keys separate wallet, Paillier, channel, invoice, credential,
   committee-share, signing-nonce, and adapter-owned state.
 - `Vault::transact` checks the authenticated vault revision and every expected
@@ -28,9 +32,9 @@ The vault deliberately exposes a narrow API:
 - records, keys, values, total plaintext, transaction width, and retained
   idempotency receipts all have explicit bounds.
 - `Vault::backup_to` never overwrites a destination.
-- `Vault::restore` authenticates a Holder backup and enforces an external
-  minimum revision before creating an empty target. Committee signing-state
-  restore is deliberately unsupported.
+- backups preserve the exact authenticated encrypted bytes and checkpoint.
+  `Vault::restore` requires that exact checkpoint from the independent store
+  before creating an empty target.
 - one advisory lock file prevents two cooperating processes from opening the
   same live vault at once.
 
@@ -42,19 +46,26 @@ can hold up to 512 KiB, and a vault can hold up to 4,096 records with at most
 receipts only after retaining an external durable request history. Nonce
 tombstones are never pruned.
 
-An authenticated revision does not by itself stop replacement of a stopped
-vault with an older, valid file. Plain `Vault::open` therefore refuses
-committee-member vaults. Committee operators must call
-`Vault::open_with_minimum_revision` with a positive revision from an
-independently authenticated monotonic store, and must advance that external
-floor after every nonce, share, or signing-state commit. A file below that
-floor is rejected before any secret is exposed.
+An authenticated numeric revision does not stop two copied vault paths from
+diverging independently at the same next revision. `VaultCheckpoint` therefore
+commits to both the revision and the exact randomized encrypted file. A copied
+fork has a different state digest even at the same revision and loses the
+external compare-and-swap.
 
-Holder restore also requires an externally trusted minimum revision. Plain
-Holder open remains available for current channel state, whose public ledger
-sequence rejects stale updates; any future Holder signing-session nonce store
-must use checkpointed open and the same advance-before-release discipline as a
-committee member.
+`RollbackFloorStore` is the integration contract for that independent anchor.
+It keys checkpoints by the complete authenticated `VaultIdentity` and provides
+an atomic expected-checkpoint to exact-next-checkpoint transition. Initialization
+anchors revision zero. Later transitions advance exactly one revision. An exact
+next checkpoint is idempotent; stale expected checkpoints, skipped revisions,
+and equal-revision different-digest forks conflict. Success is allowed only
+after the checkpoint is durable. The backend error must not format secrets or
+authentication credentials.
+
+This crate intentionally does not implement the trait with a local file: a file
+stored with the vault or covered by the same backup cannot detect rollback of
+that trust domain. The restricted recovery handle exposes only identity and
+checkpoint. It cannot read or mutate records until the independent store
+confirms the exact checkpoint.
 
 On Unix, vault, backup, temporary, and lock files are opened with
 `O_NOFOLLOW | O_CLOEXEC`. The implementation rejects symlinks, non-regular
@@ -65,8 +76,10 @@ variables. A daemon should obtain a password through an interactive prompt or
 an operating-system credential facility, move it into `Password`, and avoid
 retaining another copy.
 
-If any live-vault replacement returns an error, the open handle is poisoned.
+If an atomic live-vault replacement returns an error, the open handle is poisoned.
 This is intentionally conservative because an error after rename can leave the
-new file visible while memory still reflects the old state. A poisoned handle
-exposes no records and creates no backup; the process must drop it and reopen
-from disk.
+new file visible while memory still reflects the old state. `AmbiguousWrite`
+carries the exact attempted candidate checkpoint. The adapter drops the
+poisoned handle, opens a restricted recovery handle, compares the actual file
+against the prior and candidate checkpoints, and resolves the external CAS
+before secrets can be exposed again.

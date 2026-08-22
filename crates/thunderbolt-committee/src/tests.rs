@@ -1,17 +1,23 @@
 use std::error::Error;
 use std::fmt;
-use std::sync::LazyLock;
+use std::fs;
+use std::sync::{Arc, Barrier, LazyLock, Mutex};
 
 use bitcoin::Network;
 use libpaillier::{DecryptionKey, EncryptionKey};
 use proptest::prelude::*;
 use secp::Scalar;
+use tempfile::TempDir;
 use thunderbolt_core::paillier::{add_ciphertexts, encrypt_plaintext, random_nonce_in_group};
 use thunderbolt_core::threshold::{create_threshold_refresh_distribution, ThresholdMemberPublicKey};
 use thunderbolt_core::zkp::types::scalar_to_big_number;
 use thunderbolt_core::zkp::{
     prove_share_encryption, prove_transfer, ShareEncryptionStatement, ShareEncryptionWitness, TransferStatement,
     TransferWitness,
+};
+use thunderbolt_keystore::{
+    CheckpointCasOutcome, CommitteeSessionNonce, KdfParams, Password, RecordStatus, RollbackFloorStore,
+    VaultCheckpoint, VaultIdentity, VaultRevision, MIN_ARGON2_ITERATIONS, MIN_ARGON2_MEMORY_KIB,
 };
 use thunderbolt_protocol::EntryHash;
 use thunderbolt_wire::{
@@ -131,6 +137,13 @@ fn fixture() -> std::result::Result<&'static TestFixture, TestCaseError> {
     match FIXTURE.as_ref() {
         Ok(fixture) => Ok(fixture),
         Err(error) => Err(TestCaseError::fail(error.clone())),
+    }
+}
+
+fn fixture_for_example() -> std::result::Result<&'static TestFixture, TestError> {
+    match &*FIXTURE {
+        Ok(fixture) => Ok(fixture),
+        Err(error) => Err(TestError(error.clone())),
     }
 }
 
@@ -311,10 +324,10 @@ fn engine_for(
     CommitteeMemberEngine::provision(vault, package).map_err(|error| TestCaseError::fail(error.to_string()))
 }
 
-fn apply_fixture(
-    engine: &mut CommitteeMemberEngine<MemoryVault>,
-    fixture: &TestFixture,
-) -> Result<UpdateAcknowledgement> {
+fn apply_fixture<V>(engine: &mut CommitteeMemberEngine<V>, fixture: &TestFixture) -> Result<UpdateAcknowledgement>
+where
+    V: CommitteeVault,
+{
     engine.apply_committed_refresh(
         &fixture.recipient_share,
         &fixture.threshold_refresh,
@@ -575,6 +588,449 @@ proptest! {
         prop_assert!(matches!(result, Err(CommitteeError::LedgerCommitmentMismatch)));
         prop_assert_eq!(engine.durable_revision(), 0);
     }
+}
+
+#[derive(Clone, Default)]
+struct TestFloorStore {
+    state: Arc<Mutex<TestFloorState>>,
+}
+
+#[derive(Default)]
+struct TestFloorState {
+    entries: Vec<(VaultIdentity, VaultCheckpoint)>,
+    fail_before_revision: Option<u64>,
+    fail_after_revision: Option<u64>,
+}
+
+#[derive(Debug)]
+struct TestFloorError;
+
+impl fmt::Display for TestFloorError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("injected rollback floor failure")
+    }
+}
+
+impl Error for TestFloorError {}
+
+impl TestFloorStore {
+    fn fail_before(&self, revision: u64) -> std::result::Result<(), TestFloorError> {
+        let mut state = self.state.lock().map_err(|_| TestFloorError)?;
+        state.fail_before_revision = Some(revision);
+        Ok(())
+    }
+
+    fn fail_after(&self, revision: u64) -> std::result::Result<(), TestFloorError> {
+        let mut state = self.state.lock().map_err(|_| TestFloorError)?;
+        state.fail_after_revision = Some(revision);
+        Ok(())
+    }
+}
+
+impl RollbackFloorStore for TestFloorStore {
+    type Error = TestFloorError;
+
+    fn load_checkpoint(&self, identity: VaultIdentity) -> std::result::Result<Option<VaultCheckpoint>, Self::Error> {
+        let state = self.state.lock().map_err(|_| TestFloorError)?;
+        Ok(state
+            .entries
+            .iter()
+            .find_map(|(stored_identity, revision)| (*stored_identity == identity).then_some(*revision)))
+    }
+
+    fn compare_and_swap_checkpoint(
+        &self,
+        identity: VaultIdentity,
+        expected: Option<VaultCheckpoint>,
+        next: VaultCheckpoint,
+    ) -> std::result::Result<CheckpointCasOutcome, Self::Error> {
+        let mut state = self.state.lock().map_err(|_| TestFloorError)?;
+        let current = state
+            .entries
+            .iter()
+            .find_map(|(stored_identity, checkpoint)| (*stored_identity == identity).then_some(*checkpoint));
+        if current == Some(next) {
+            return Ok(CheckpointCasOutcome::AlreadyCurrent);
+        }
+        let valid_sequence = match expected {
+            None => next.revision().get() == 0,
+            Some(previous) => previous
+                .revision()
+                .get()
+                .checked_add(1)
+                .is_some_and(|revision| revision == next.revision().get()),
+        };
+        if current != expected || !valid_sequence {
+            return Ok(CheckpointCasOutcome::Conflict(current));
+        }
+        if state.fail_before_revision == Some(next.revision().get()) {
+            state.fail_before_revision = None;
+            return Err(TestFloorError);
+        }
+        match state
+            .entries
+            .iter_mut()
+            .find(|(stored_identity, _)| *stored_identity == identity)
+        {
+            Some((_, current)) => *current = next,
+            None => state.entries.push((identity, next)),
+        }
+        if state.fail_after_revision == Some(next.revision().get()) {
+            state.fail_after_revision = None;
+            return Err(TestFloorError);
+        }
+        Ok(CheckpointCasOutcome::Advanced)
+    }
+}
+
+fn keystore_password() -> thunderbolt_keystore::Result<Password> {
+    Password::from_bytes(b"committee adapter test password".to_vec())
+}
+
+fn keystore_params() -> thunderbolt_keystore::Result<KdfParams> {
+    KdfParams::new(MIN_ARGON2_MEMORY_KIB, MIN_ARGON2_ITERATIONS, 1)
+}
+
+fn real_engine(
+    fixture: &TestFixture,
+    member_index: usize,
+    directory: &TempDir,
+    floor: TestFloorStore,
+) -> std::result::Result<CommitteeMemberEngine<KeystoreCommitteeVault<TestFloorStore>>, Box<dyn Error>> {
+    let secret = fixture
+        .secrets
+        .get(member_index)
+        .ok_or_else(|| TestError("member index outside fixture".to_owned()))?;
+    let adapter = KeystoreCommitteeVault::create(
+        directory.path().join("committee.vault"),
+        &fixture.descriptor,
+        secret.member_id,
+        keystore_password()?,
+        keystore_params()?,
+        floor,
+    )?;
+    let package =
+        package_for(fixture, member_index, fixture.descriptor.clone()).map_err(|error| TestError(error.to_string()))?;
+    Ok(CommitteeMemberEngine::provision(adapter, package)?)
+}
+
+#[test]
+fn keystore_adapter_provisions_opens_applies_and_replays() -> std::result::Result<(), Box<dyn Error>> {
+    let fixture = fixture_for_example()?;
+    let directory = TempDir::new()?;
+    let floor = TestFloorStore::default();
+    let mut engine = real_engine(fixture, 0, &directory, floor.clone())?;
+    let acknowledgement = apply_fixture(&mut engine, fixture)?;
+    let engine_revision = engine.durable_revision();
+    let mut adapter = engine.into_vault();
+    let physical_revision = adapter.floor_revision()?;
+    assert_eq!(engine_revision, 2);
+    assert_eq!(physical_revision, VaultRevision::new(3));
+    drop(adapter);
+
+    let member_id = fixture.secrets[0].member_id;
+    let adapter = KeystoreCommitteeVault::open(
+        directory.path().join("committee.vault"),
+        &fixture.descriptor,
+        member_id,
+        keystore_password()?,
+        floor,
+    )?;
+    let mut reopened = CommitteeMemberEngine::open(adapter, fixture.descriptor.clone())?;
+    let replay = apply_fixture(&mut reopened, fixture)?;
+    assert_eq!(replay, acknowledgement);
+    assert_eq!(reopened.durable_revision(), 2);
+    assert_eq!(reopened.into_vault().floor_revision()?, physical_revision);
+    Ok(())
+}
+
+#[test]
+fn keystore_adapter_rejects_engine_cas_conflicts_without_advancing_floor() -> std::result::Result<(), Box<dyn Error>> {
+    let fixture = fixture_for_example()?;
+    let directory = TempDir::new()?;
+    let floor = TestFloorStore::default();
+    let engine = real_engine(fixture, 0, &directory, floor)?;
+    let mut adapter = engine.into_vault();
+    let before = adapter.floor_revision()?;
+    let entry = VaultEntry::new(10, VaultPlaintext::from_secret_bytes(vec![0x61; 32])?);
+    let result = CommitteeVault::compare_and_swap(&mut adapter, 9, entry);
+    assert!(matches!(
+        result,
+        Err(VaultStoreError::Conflict {
+            current_revision: Some(0)
+        })
+    ));
+    assert_eq!(adapter.floor_revision()?, before);
+    let loaded = CommitteeVault::load(&mut adapter)?.ok_or("missing adapter record")?;
+    assert_eq!(loaded.revision(), 0);
+    let overflow = CommitteeVault::compare_and_swap(
+        &mut adapter,
+        u64::MAX,
+        VaultEntry::new(u64::MAX, VaultPlaintext::from_secret_bytes(vec![0x62; 32])?),
+    );
+    assert!(matches!(
+        overflow,
+        Err(VaultStoreError::Backend(KeystoreCommitteeVaultError::RevisionMismatch))
+    ));
+    Ok(())
+}
+
+#[test]
+fn keystore_adapter_recovers_pending_and_applied_floor_failures() -> std::result::Result<(), Box<dyn Error>> {
+    let fixture = fixture_for_example()?;
+    for (case, failed_revision) in [("pending", 2_u64), ("applied", 3_u64)] {
+        let directory = TempDir::new()?;
+        let floor = TestFloorStore::default();
+        let mut engine = real_engine(fixture, 0, &directory, floor.clone())?;
+        floor.fail_before(failed_revision)?;
+        assert!(
+            apply_fixture(&mut engine, fixture).is_err(),
+            "{case} failure must fail closed"
+        );
+        let adapter = engine.into_vault();
+        let candidate = adapter.recovery_candidate().ok_or("missing recovery candidate")?;
+        drop(adapter);
+        let identity = committee_keystore_identity(&fixture.descriptor, fixture.secrets[0].member_id)?;
+        let expected = floor.load_checkpoint(identity)?.ok_or("missing expected checkpoint")?;
+
+        let adapter = KeystoreCommitteeVault::reconcile_candidate(
+            directory.path().join("committee.vault"),
+            &fixture.descriptor,
+            fixture.secrets[0].member_id,
+            keystore_password()?,
+            floor,
+            expected,
+            candidate,
+        )?;
+        let mut recovered = CommitteeMemberEngine::open(adapter, fixture.descriptor.clone())?;
+        let acknowledgement = apply_fixture(&mut recovered, fixture)?;
+        assert_eq!(acknowledgement.durable_revision(), 2);
+        let replay = apply_fixture(&mut recovered, fixture)?;
+        assert_eq!(replay, acknowledgement);
+        assert_eq!(recovered.durable_revision(), 2);
+    }
+    Ok(())
+}
+
+#[test]
+fn keystore_adapter_accepts_ambiguous_but_durable_floor_advance() -> std::result::Result<(), Box<dyn Error>> {
+    let fixture = fixture_for_example()?;
+    let directory = TempDir::new()?;
+    let floor = TestFloorStore::default();
+    let mut engine = real_engine(fixture, 0, &directory, floor.clone())?;
+    floor.fail_after(2)?;
+    let acknowledgement = apply_fixture(&mut engine, fixture)?;
+    assert_eq!(acknowledgement.durable_revision(), 2);
+    assert_eq!(engine.into_vault().floor_revision()?, VaultRevision::new(3));
+    Ok(())
+}
+
+#[test]
+fn keystore_nonce_tombstone_survives_restart_and_stale_backup_fails_floor() -> std::result::Result<(), Box<dyn Error>> {
+    let fixture = fixture_for_example()?;
+    let directory = TempDir::new()?;
+    let floor = TestFloorStore::default();
+    let engine = real_engine(fixture, 0, &directory, floor.clone())?;
+    let mut adapter = engine.into_vault();
+    let binding = SignerSessionBinding::new(
+        fixture.descriptor.id(),
+        fixture.descriptor.epoch(),
+        fixture.secrets[0].member_id,
+        [0x71; 32],
+        b"keystore-nonce-session",
+    )?;
+    let session_id = binding.session_id();
+    adapter.reserve_session_nonce(session_id, CommitteeSessionNonce::from_bytes(vec![0x72; 32])?)?;
+    assert!(matches!(
+        adapter.session_nonce_status(session_id)?,
+        RecordStatus::Present(_)
+    ));
+    let backup = directory.path().join("stale.backup");
+    adapter.backup_to(&backup)?;
+    adapter.consume_session_nonce(session_id)?;
+    assert!(matches!(
+        adapter.session_nonce_status(session_id)?,
+        RecordStatus::Tombstoned(_)
+    ));
+    let trusted_floor = adapter.floor_revision()?;
+    drop(adapter);
+
+    let mut reopened = KeystoreCommitteeVault::open(
+        directory.path().join("committee.vault"),
+        &fixture.descriptor,
+        fixture.secrets[0].member_id,
+        keystore_password()?,
+        floor.clone(),
+    )?;
+    assert!(matches!(
+        reopened.session_nonce_status(session_id)?,
+        RecordStatus::Tombstoned(_)
+    ));
+    assert!(reopened
+        .reserve_session_nonce(session_id, CommitteeSessionNonce::from_bytes(vec![0x73; 32])?)
+        .is_err());
+    let engine = CommitteeMemberEngine::open(reopened, fixture.descriptor.clone())?;
+    assert_eq!(engine.durable_revision(), 0);
+    drop(engine);
+
+    fs::copy(&backup, directory.path().join("committee.vault"))?;
+    let stale = KeystoreCommitteeVault::open(
+        directory.path().join("committee.vault"),
+        &fixture.descriptor,
+        fixture.secrets[0].member_id,
+        keystore_password()?,
+        floor,
+    );
+    assert!(matches!(stale, Err(KeystoreCommitteeVaultError::FloorMismatch)));
+    assert!(trusted_floor.get() > 1);
+    Ok(())
+}
+
+#[test]
+fn keystore_adapter_rejects_wrong_deployment_epoch_and_descriptor() -> std::result::Result<(), Box<dyn Error>> {
+    let fixture = fixture_for_example()?;
+    let directory = TempDir::new()?;
+    let floor = TestFloorStore::default();
+    let engine = real_engine(fixture, 0, &directory, floor.clone())?;
+    drop(engine);
+    let variants = [
+        CommitteeDescriptor::new(
+            fixture.descriptor.network(),
+            b"wrong-deployment",
+            fixture.descriptor.epoch(),
+            fixture.descriptor.threshold(),
+            fixture.descriptor.anchor_base(),
+            fixture.descriptor.members().to_vec(),
+        )?,
+        CommitteeDescriptor::new(
+            fixture.descriptor.network(),
+            fixture.descriptor.deployment_id(),
+            CommitteeEpoch::new(fixture.descriptor.epoch().get() + 1),
+            fixture.descriptor.threshold(),
+            fixture.descriptor.anchor_base(),
+            fixture.descriptor.members().to_vec(),
+        )?,
+        CommitteeDescriptor::new(
+            fixture.descriptor.network(),
+            fixture.descriptor.deployment_id(),
+            fixture.descriptor.epoch(),
+            1,
+            fixture.descriptor.anchor_base(),
+            fixture.descriptor.members().to_vec(),
+        )?,
+    ];
+    for descriptor in variants {
+        assert!(KeystoreCommitteeVault::open(
+            directory.path().join("committee.vault"),
+            &descriptor,
+            fixture.secrets[0].member_id,
+            keystore_password()?,
+            floor.clone(),
+        )
+        .is_err());
+    }
+    let testnet4 = CommitteeDescriptor::new(
+        Network::Testnet4,
+        fixture.descriptor.deployment_id(),
+        fixture.descriptor.epoch(),
+        fixture.descriptor.threshold(),
+        fixture.descriptor.anchor_base(),
+        fixture.descriptor.members().to_vec(),
+    )?;
+    assert!(matches!(
+        committee_keystore_identity(&testnet4, fixture.secrets[0].member_id),
+        Err(KeystoreCommitteeVaultError::InvalidIdentity)
+    ));
+    Ok(())
+}
+
+#[test]
+fn copied_keystore_paths_cannot_both_advance_one_checkpoint() -> std::result::Result<(), Box<dyn Error>> {
+    let fixture = fixture_for_example()?;
+    let directory = TempDir::new()?;
+    let floor = TestFloorStore::default();
+    let engine = real_engine(fixture, 0, &directory, floor.clone())?;
+    let mut adapter = engine.into_vault();
+    let original = directory.path().join("committee.vault");
+    let copy = directory.path().join("committee-copy.vault");
+    adapter.backup_to(&copy)?;
+    let base_checkpoint = adapter.checkpoint()?;
+    drop(adapter);
+
+    let member_id = fixture.secrets[0].member_id;
+    let first = KeystoreCommitteeVault::open(
+        &original,
+        &fixture.descriptor,
+        member_id,
+        keystore_password()?,
+        floor.clone(),
+    )?;
+    let second = KeystoreCommitteeVault::open(
+        &copy,
+        &fixture.descriptor,
+        member_id,
+        keystore_password()?,
+        floor.clone(),
+    )?;
+    let barrier = Arc::new(Barrier::new(2));
+    let first_barrier = barrier.clone();
+    let first_thread = std::thread::spawn(move || {
+        let mut adapter = first;
+        first_barrier.wait();
+        CommitteeVault::compare_and_swap(
+            &mut adapter,
+            0,
+            VaultEntry::new(1, VaultPlaintext::from_secret_bytes(vec![0xa1; 32]).ok()?),
+        )
+        .ok()?;
+        Some(())
+    });
+    let second_thread = std::thread::spawn(move || {
+        let mut adapter = second;
+        barrier.wait();
+        CommitteeVault::compare_and_swap(
+            &mut adapter,
+            0,
+            VaultEntry::new(1, VaultPlaintext::from_secret_bytes(vec![0xb2; 32]).ok()?),
+        )
+        .ok()?;
+        Some(())
+    });
+    let first_won = first_thread
+        .join()
+        .map_err(|_| TestError("first checkpoint thread panicked".to_owned()))?
+        .is_some();
+    let second_won = second_thread
+        .join()
+        .map_err(|_| TestError("second checkpoint thread panicked".to_owned()))?
+        .is_some();
+    assert_ne!(first_won, second_won);
+
+    let (winner, loser) = if first_won {
+        (&original, &copy)
+    } else {
+        (&copy, &original)
+    };
+    let mut winning_adapter = KeystoreCommitteeVault::open(
+        winner,
+        &fixture.descriptor,
+        member_id,
+        keystore_password()?,
+        floor.clone(),
+    )?;
+    assert_eq!(
+        CommitteeVault::load(&mut winning_adapter)?
+            .ok_or("winner missing engine record")?
+            .revision(),
+        1
+    );
+    assert_ne!(winning_adapter.checkpoint()?, base_checkpoint);
+    drop(winning_adapter);
+    assert!(matches!(
+        KeystoreCommitteeVault::open(loser, &fixture.descriptor, member_id, keystore_password()?, floor,),
+        Err(KeystoreCommitteeVaultError::FloorMismatch)
+    ));
+    Ok(())
 }
 
 #[derive(Default)]
