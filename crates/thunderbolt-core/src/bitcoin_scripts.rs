@@ -11,10 +11,7 @@ use bitcoin::{
     taproot::{ControlBlock, LeafVersion, TaprootBuilder, TaprootSpendInfo},
     Address, Network, ScriptBuf, XOnlyPublicKey,
 };
-use bitcoin::{
-    opcodes::all::{OP_CHECKSIGADD},
-    script::Builder,
-};
+use bitcoin::{opcodes::all::OP_CHECKSIGADD, script::Builder};
 use std::{str::FromStr, sync::LazyLock};
 
 // TODO: Generate this key using a public method to prove it is not held by Nubit team.

@@ -1,20 +1,17 @@
-use std::collections::BTreeMap;
-
 use bitcoin::bip32::Xpriv;
 use bitcoin::key::constants::SCHNORR_SIGNATURE_SIZE;
-use bitcoin::key::{Keypair, TweakedPublicKey};
+use bitcoin::key::TweakedPublicKey;
 use bitcoin::psbt::PsbtSighashType;
 use bitcoin::secp256k1::schnorr::Signature;
-use bitcoin::sighash::{Prevouts, SighashCache};
-use bitcoin::taproot::{ControlBlock, LeafVersion, TaprootSpendInfo};
+use bitcoin::taproot::{ControlBlock, TaprootSpendInfo};
+use bitcoin::Txid;
 use bitcoin::{
     absolute,
-    secp256k1::{All, Message, Secp256k1},
+    secp256k1::{All, Secp256k1},
     transaction, Address, Amount, Network, OutPoint, Psbt, PublicKey, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
     Witness, XOnlyPublicKey,
 };
-use bitcoin::{TapLeafHash, Txid};
-use bitcoin_utils::constants::{DUST_SATS, OVERHEAD, SAFETY_INPUT_VBYTES, TAPROOT_OUTPUT_VBYTES};
+use bitcoin_utils::constants::{OVERHEAD, SAFETY_INPUT_VBYTES, TAPROOT_OUTPUT_VBYTES};
 
 use bitcoin_utils::errors::ConstructionError;
 use bitcoin_utils::types::Utxo;
@@ -23,7 +20,24 @@ use bitcoin_utils::utils::{
     generate_p2tr_tweaked_address, generate_redeem_script, generate_tap_key_origins,
 };
 
-use crate::scripts::{gen_prepare_taproot};
+use crate::bitcoin_account::{BitcoinAccount, BitcoinAccountLocal};
+use crate::bitcoin_scripts::gen_prepare_taproot;
+
+#[derive(Debug, Clone)]
+pub struct PrepareTxInfo {
+    pub prev_address: Address,
+    pub prev_outputs: Vec<Utxo>,
+    pub prev_outputs_tx: Option<Transaction>,
+    pub sats_per_vbytes: u64,
+    pub fixed_amount: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TxRef {
+    txid: Txid,
+    vout: usize,
+    amount: u64,
+}
 
 pub struct TxContext {
     multi_sig_address: Address,
@@ -31,39 +45,71 @@ pub struct TxContext {
 
     network: Network,
 
-    // The first output is controlled by the user and the committee.
-    // It holds the funds.
-    funding_utxo_idx: usize,
-    funding_utxo_taproot_spend_info: TaprootSpendInfo,
-    funding_utxo_script: ScriptBuf,
-    funding_utxo_control_block: ControlBlock,
+    // The prepare tx provides the funds to be transferred in the Thunderbolt layer.
+    prepare_tx: Transaction,
 
-    // The second output is controlled by the committee.
-    // It is used to lock the outputs to prevent front-run of the SIGHASH_NONE signature.
-    dummy_utxo_idx: usize,
+    // Prepare tx's first output is locked by the user and the committee.
+    // It holds the funds.
+    locked_utxo_idx: usize,
+    locked_utxo_taproot_spend_info: TaprootSpendInfo,
+    locked_utxo_script: ScriptBuf,
+    locked_utxo_control_block: ControlBlock,
 }
 
 impl TxContext {
-    pub fn new(x_pubkey_user: XOnlyPublicKey, x_pubkey_comm: XOnlyPublicKey, network: Network) -> Self {
-        let (funding_utxo_taproot_spend_info, funding_utxo_script, funding_utxo_control_block) =
+    pub fn initialize(
+        user: &BitcoinAccountLocal,
+        committee: &impl BitcoinAccount,
+        network: Network,
+        prepare_tx_info: &PrepareTxInfo,
+    ) -> Self {
+        let secp = Secp256k1::new();
+        let mut tx_ctx = TxContext::new(user.get_x_pubkey().0, committee.get_x_pubkey().0, network);
+
+        let mut prepare_tx = tx_ctx.construct_unsigned_prepare(&prepare_tx_info).unwrap();
+
+        let signed_prepare_tx = tx_ctx
+            .sign_prepare(
+                &user.get_pubkey(),
+                &prepare_tx_info.prev_address,
+                &mut prepare_tx,
+                &secp,
+                &user.get_xpriv(),
+            )
+            .unwrap();
+
+        tx_ctx.set_signed_prepare(signed_prepare_tx);
+
+        tx_ctx
+    }
+
+    fn new(x_pubkey_user: XOnlyPublicKey, x_pubkey_comm: XOnlyPublicKey, network: Network) -> Self {
+        let (locked_utxo_taproot_spend_info, locked_utxo_script, locked_utxo_control_block) =
             gen_prepare_taproot(&x_pubkey_user, &x_pubkey_comm);
 
-        let funding_utxo_script_pubkey = funding_utxo_taproot_spend_info.output_key();
+        let locked_utxo_script_pubkey = locked_utxo_taproot_spend_info.output_key();
 
-        let multi_sig_address = generate_p2tr_tweaked_address(network, funding_utxo_script_pubkey);
+        let multi_sig_address = generate_p2tr_tweaked_address(network, locked_utxo_script_pubkey);
 
         let committee_address =
             generate_p2tr_tweaked_address(network, TweakedPublicKey::dangerous_assume_tweaked(x_pubkey_comm));
+
+        let default_tx = Transaction {
+            version: transaction::Version(2),
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![],
+        };
 
         Self {
             multi_sig_address,
             committee_address,
             network,
-            funding_utxo_idx: 0,
-            funding_utxo_taproot_spend_info,
-            funding_utxo_script,
-            funding_utxo_control_block,
-            dummy_utxo_idx: 1,
+            prepare_tx: default_tx,
+            locked_utxo_idx: 0,
+            locked_utxo_taproot_spend_info,
+            locked_utxo_script,
+            locked_utxo_control_block,
         }
     }
 
@@ -72,18 +118,16 @@ impl TxContext {
         let overhead = OVERHEAD;
         let out0_vb = TAPROOT_OUTPUT_VBYTES;
         let out1_vb = TAPROOT_OUTPUT_VBYTES;
-        let out2_vb = TAPROOT_OUTPUT_VBYTES;
-        let total_vb = input_vb + overhead + out0_vb + out1_vb + out2_vb;
+        let total_vb = input_vb + overhead + out0_vb + out1_vb;
         let fee = total_vb * sats_per_vbytes;
         let out0_sats = fixed_amount;
-        let out1_sats = DUST_SATS;
         // The output to collect the remaining fee.
-        let out2_sats = 0;
-        fee + out0_sats + out1_sats + out2_sats
+        let out1_sats = 0;
+        fee + out0_sats + out1_sats
     }
 
     pub fn estimate_output_amount(&self, outputs_count: usize, fixed_amount: u64, sats_per_vbytes: u64) -> u64 {
-        let inputs_count = 2;
+        let inputs_count = 1;
         let input_vb = (inputs_count as u64) * SAFETY_INPUT_VBYTES;
         let overhead = OVERHEAD;
         let output_vb = (outputs_count as u64) * TAPROOT_OUTPUT_VBYTES;
@@ -92,7 +136,7 @@ impl TxContext {
         fixed_amount - fee
     }
 
-    pub fn first_prepare_output(&self, fixed_amount: u64) -> TxOut {
+    pub fn prepare_output(&self, fixed_amount: u64) -> TxOut {
         let txout = TxOut {
             value: Amount::from_sat(fixed_amount),
             script_pubkey: self.multi_sig_address.script_pubkey(),
@@ -100,31 +144,24 @@ impl TxContext {
         txout
     }
 
-    pub fn second_prepare_output(&self) -> TxOut {
-        let txout = TxOut {
-            value: Amount::from_sat(DUST_SATS),
-            script_pubkey: self.committee_address.script_pubkey(),
-        };
-        txout
-    }
-
-    pub fn construct_unsigned_prepare(
-        &self,
-        prev_address: &Address,
-        prev_outputs: Vec<Utxo>,
-        prev_outputs_tx: Option<Transaction>,
-        sats_per_vbytes: u64,
-        fixed_amount: u64,
-    ) -> Result<Psbt, ConstructionError> {
+    pub fn construct_unsigned_prepare(&self, prepare_tx_info: &PrepareTxInfo) -> Result<Psbt, ConstructionError> {
+        let PrepareTxInfo {
+            prev_address,
+            prev_outputs,
+            prev_outputs_tx,
+            sats_per_vbytes,
+            fixed_amount,
+        } = prepare_tx_info;
         let input_fee = prev_outputs.iter().map(|u| u.value).sum::<Amount>().to_sat();
-        let required_fee = self.estimate_input_amount(prev_outputs.len(), fixed_amount, sats_per_vbytes);
+        let required_fee =
+            self.estimate_input_amount(prev_outputs.len(), fixed_amount.clone(), sats_per_vbytes.clone());
 
         if input_fee < required_fee {
             return Err(ConstructionError::InsufficientFunds(None, required_fee, input_fee));
         }
 
         let mut input = Vec::new();
-        for out in &prev_outputs {
+        for out in prev_outputs {
             let previous_output = OutPoint {
                 txid: out.txid,
                 vout: out.vout,
@@ -138,15 +175,15 @@ impl TxContext {
             input.push(txin);
         }
 
-        let output0 = self.first_prepare_output(fixed_amount);
-        let output1 = self.second_prepare_output();
+        let output0 = self.prepare_output(fixed_amount.clone());
         let remaining_fee = input_fee - required_fee;
-        let output2 = TxOut {
+        // send back the remaining fee to the user.
+        let output1 = TxOut {
             value: Amount::from_sat(remaining_fee),
             script_pubkey: prev_address.script_pubkey(),
         };
 
-        let output = vec![output0, output1, output2];
+        let output = vec![output0, output1];
 
         let tx = Transaction {
             version: transaction::Version(2),
@@ -165,7 +202,7 @@ impl TxContext {
                         "prev_outputs_tx should not be None with p2pkh address type".to_string(),
                     ))?;
                 }
-                let tx = prev_outputs_tx.unwrap();
+                let tx = prev_outputs_tx.as_ref().unwrap();
                 for (i, _) in prev_outputs.iter().enumerate() {
                     psbt.inputs[i].non_witness_utxo = Some(tx.clone());
                 }
@@ -291,6 +328,14 @@ impl TxContext {
         Ok(signed_prepare)
     }
 
+    pub fn set_signed_prepare(&mut self, signed_prepare: Transaction) {
+        self.prepare_tx = signed_prepare;
+    }
+
+    pub fn get_signed_prepare(&self) -> &Transaction {
+        &self.prepare_tx
+    }
+
     pub fn construct_unsigned_redeem(
         &self,
         signed_prepare_txid: Txid,
@@ -306,17 +351,8 @@ impl TxContext {
             sequence: Sequence::MAX,
             witness: Witness::default(),
         };
-        let input1 = TxIn {
-            previous_output: OutPoint {
-                txid: signed_prepare_txid,
-                vout: 1,
-            },
-            script_sig: ScriptBuf::default(),
-            sequence: Sequence::MAX,
-            witness: Witness::default(),
-        };
 
-        let input = vec![input0, input1];
+        let input = vec![input0];
 
         let output = outputs;
 
@@ -334,104 +370,31 @@ impl TxContext {
             script_pubkey: self.multi_sig_address.script_pubkey(),
         };
 
-        let input_txout1 = TxOut {
-            value: Amount::from_sat(DUST_SATS),
-            script_pubkey: self.committee_address.script_pubkey(),
-        };
         psbt.inputs[0].witness_utxo = Some(input_txout0);
-        psbt.inputs[1].witness_utxo = Some(input_txout1);
 
         Ok(psbt)
     }
 
-    pub fn sign_redeem_funding_utxo(
-        &self,
-        fixed_amount: u64,
-        psbt: &mut Psbt,
-        secp: &Secp256k1<All>,
-        keypair: &Keypair,
-    ) -> Result<Signature, ConstructionError> {
-        // TODO: Add a verification function for the committee to confirm.
-
-        let input_utxo = self.first_prepare_output(fixed_amount);
-        let unlock_leaf_hash = TapLeafHash::from_script(&self.funding_utxo_script, LeafVersion::TapScript);
-        let unlock_script = self.funding_utxo_script.clone();
-        let unlock_control_block = self.funding_utxo_control_block.clone();
-
-        psbt.inputs[self.funding_utxo_idx].witness_utxo = Some(input_utxo);
-        psbt.inputs[self.funding_utxo_idx].tap_scripts =
-            BTreeMap::from([(unlock_control_block, (unlock_script, LeafVersion::TapScript))]);
-
-        let tx = psbt.clone().extract_tx().unwrap();
-        let mut cache = SighashCache::new(&tx);
-
-        let prevouts = &[
-            psbt.inputs[self.funding_utxo_idx].witness_utxo.as_ref().unwrap(),
-            psbt.inputs[self.dummy_utxo_idx].witness_utxo.as_ref().unwrap(),
-        ];
-
-        let prevouts = Prevouts::All(prevouts);
-        let sighash_type = bitcoin::TapSighashType::None;
-
-        let tap_sighash = cache.taproot_script_spend_signature_hash(
-            self.funding_utxo_idx,
-            &prevouts,
-            unlock_leaf_hash,
-            sighash_type,
-        )?;
-        let msg = Message::from(tap_sighash);
-        Ok(secp.sign_schnorr(&msg, keypair))
-    }
-
-    pub fn sign_redeem_dummy_utxo(
-        &self,
-        psbt: &mut Psbt,
-        secp: &Secp256k1<All>,
-        keypair: &Keypair,
-    ) -> Result<Transaction, ConstructionError> {
-        // TODO: Add the verification part. The committee shall verify the outputs provided by the user.
-        // The dummy UTXO in the whitepaper shall be signed by the committee.
-        let mut tx = psbt.clone().extract_tx().unwrap();
-        let mut cache = SighashCache::new(&tx);
-
-        let prevouts = &[
-            psbt.inputs[self.funding_utxo_idx].witness_utxo.as_ref().unwrap(),
-            psbt.inputs[self.dummy_utxo_idx].witness_utxo.as_ref().unwrap(),
-        ];
-
-        let prevouts = Prevouts::All(prevouts);
-        let sighash_type = bitcoin::TapSighashType::Default;
-
-        let tap_sighash = cache.taproot_key_spend_signature_hash(self.dummy_utxo_idx, &prevouts, sighash_type)?;
-        let msg = Message::from(tap_sighash);
-        let sig = secp.sign_schnorr(&msg, keypair);
-        let mut witness = Witness::new();
-        witness.push(sig.serialize());
-        tx.input[self.dummy_utxo_idx].witness = witness;
-        Ok(tx)
-    }
-
     pub fn aggregate_redeem(
         &self,
-        mut signed_redeem: Transaction,
+        psbt: &mut Psbt,
         user_signature: Signature,
         committee_signature: Signature,
     ) -> Result<Transaction, ConstructionError> {
-        let mut u_sig = Vec::with_capacity(SCHNORR_SIGNATURE_SIZE + 1);
+        let mut unsigned_redeem = psbt.clone().extract_tx().unwrap();
+        let mut u_sig = Vec::with_capacity(SCHNORR_SIGNATURE_SIZE);
         u_sig.extend_from_slice(&user_signature.serialize());
-        u_sig.push(bitcoin::TapSighashType::None as u8);
 
-        let mut c_sig = Vec::with_capacity(SCHNORR_SIGNATURE_SIZE + 1);
+        let mut c_sig = Vec::with_capacity(SCHNORR_SIGNATURE_SIZE);
         c_sig.extend_from_slice(&committee_signature.serialize());
-        c_sig.push(bitcoin::TapSighashType::None as u8);
 
         let mut witness = Witness::new();
         witness.push(c_sig);
         witness.push(u_sig);
-        witness.push(self.funding_utxo_script.clone());
-        witness.push(self.funding_utxo_control_block.serialize());
-        signed_redeem.input[0].witness = witness;
-        Ok(signed_redeem)
+        witness.push(self.locked_utxo_script.clone());
+        witness.push(self.locked_utxo_control_block.serialize());
+        unsigned_redeem.input[0].witness = witness;
+        Ok(unsigned_redeem)
     }
 
     pub fn default_redeem_outputs(&self, fixed_amount: u64, recipient: Address, sats_per_vbytes: u64) -> Vec<TxOut> {
@@ -439,5 +402,13 @@ impl TxContext {
             value: Amount::from_sat(self.estimate_output_amount(1, fixed_amount, sats_per_vbytes)),
             script_pubkey: recipient.script_pubkey(),
         }]
+    }
+
+    pub fn as_tx_ref(&self) -> TxRef {
+        TxRef {
+            txid: self.prepare_tx.compute_txid(),
+            vout: self.locked_utxo_idx,
+            amount: self.prepare_tx.output[self.locked_utxo_idx].value.to_sat(),
+        }
     }
 }
