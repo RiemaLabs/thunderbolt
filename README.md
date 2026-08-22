@@ -4,9 +4,11 @@ Bitcoin Thunderbolt is an open source protocol for asynchronous off-chain transf
 
 Thunderbolt lets the sender and recipient complete a transfer at different times.
 
+The project is maintained by Nubit.
+
 ## Release status
 
-The `release/1.0` branch is the active release candidate. Regtest and signet are the supported deployment targets during the RC. Mainnet activation will follow the remaining signing and settlement integration and an external security audit.
+`v1.0.0` is the first stable open source release. It brings together the protocol libraries, durable role services, Ledger and rollback-floor applications, Bitcoin and CometBFT integrations, operator tooling, and reproducible release assets.
 
 ## Roles
 

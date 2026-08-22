@@ -2,7 +2,7 @@ use crate::{Result, ThunderboltError};
 use libpaillier::{unknown_order::BigNumber, Ciphertext, DecryptionKey, EncryptionKey, Nonce};
 use zeroize::Zeroize;
 
-/// Canonical modulus width of the legacy RC/v1 Paillier profile.
+/// Canonical modulus width of the legacy v1 Paillier profile.
 ///
 /// This constant remains unchanged for compatibility. New code selects a
 /// closed [`PaillierModulusProfile`] instead of changing this value.
@@ -131,7 +131,7 @@ impl PaillierAccount for PaillierAccountLocal {
 }
 
 impl PaillierAccountLocal {
-    /// Generates a legacy RC/v1 2048-bit account.
+    /// Generates a legacy v1 2048-bit account.
     ///
     /// Protocol-v2 integrations must use `new_with_profile` and must not fall
     /// back to this constructor when the production profile is unavailable.
@@ -195,7 +195,7 @@ fn ensure_non_negative(label: &str, value: &BigNumber) -> Result<()> {
     Ok(())
 }
 
-/// Validates a legacy RC/v1 2048-bit key.
+/// Validates a legacy v1 2048-bit key.
 ///
 /// Protocol-v2 code must use `validate_protocol_encryption_key_with_profile`.
 /// This rejects attacker-sized keys before any GCD or modular exponentiation.
@@ -207,7 +207,7 @@ pub fn validate_protocol_encryption_key(pk: &EncryptionKey) -> Result<()> {
         || (pk.n() % BigNumber::from(2u32)).is_zero()
     {
         return Err(ThunderboltError::InvalidParameter(format!(
-            "Paillier modulus must use the {MAX_PAILLIER_MODULUS_BITS}-bit RC parameter"
+            "Paillier modulus must use the {MAX_PAILLIER_MODULUS_BITS}-bit legacy v1 parameter"
         )));
     }
     Ok(())

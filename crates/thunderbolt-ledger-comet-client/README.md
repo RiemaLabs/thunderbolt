@@ -79,5 +79,5 @@ intent.
 
 There is no synchronous network facade, raw JSON-RPC method, role database
 cursor, opaque self-asserted receipt, or default accepting finality verifier in
-this crate. Holder and Committee trait adapters are intentionally a later
-scoped migration.
+this crate. Role-service deployments supply Holder and Committee trait adapters
+explicitly.

@@ -64,8 +64,6 @@ A legacy channel-only finality cursor cannot prove a globally contiguous block
 position. Legacy databases with finality progress are rejected rather than
 assigned a fabricated global cursor.
 
-The committed Holder engine still implements the v1 proof-envelope domain. A
-reviewed v2 Holder proof and identity bridge remains a release gate. Mainnet and
-Testnet4 are disabled. Bundled Ledger, finality, Bitcoin settlement, and
-threshold-signing implementations all fail closed and must be replaced before
-those actions are enabled.
+Version 1.0 keeps the legacy Holder proof-envelope domain separate from version
+2 proof envelopes and identities. Deployments provide the Ledger, finality,
+Bitcoin settlement, and threshold-signing capabilities used by those actions.

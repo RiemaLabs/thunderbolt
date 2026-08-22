@@ -47,7 +47,7 @@ impl RpcConfig {
     /// Creates a configuration with production-safe bounds.
     ///
     /// Plain HTTP endpoints must use a literal loopback IP address. Mainnet and
-    /// testnet4 are rejected by this release candidate.
+    /// testnet4 are rejected by version 1.0.
     pub fn new(endpoint: Url, network: Network) -> Result<Self> {
         validate_endpoint(&endpoint)?;
         validate_network(network)?;

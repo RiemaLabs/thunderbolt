@@ -196,7 +196,7 @@ fn verify_member_share(
     Ok(committed_point)
 }
 
-/// Creates a legacy RC/v1 2048-bit threshold refresh distribution.
+/// Creates a legacy v1 2048-bit threshold refresh distribution.
 pub fn create_threshold_refresh_distribution(
     context: ProofContext,
     anchor_base: Point,
@@ -290,7 +290,7 @@ pub fn create_threshold_refresh_distribution_with_profile(
     }
 }
 
-/// Verifies a legacy RC/v1 2048-bit threshold refresh distribution.
+/// Verifies a legacy v1 2048-bit threshold refresh distribution.
 pub fn verify_threshold_refresh_distribution(distribution: &ThresholdRefreshDistribution) -> Result<()> {
     distribution.context.expect_invoice()?;
     if distribution.threshold == 0 {

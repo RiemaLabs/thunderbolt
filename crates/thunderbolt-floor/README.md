@@ -26,11 +26,11 @@ Ambiguous submissions use an opaque transport token. Resolution must be
 causally ordered and prove the finalized result of that exact CAS; an ordinary
 read that could finalize before the pending write is not sufficient.
 
-## Current blocker
+## Deployment status
 
-This crate is not deployable by itself. The current `thunderbolt-ledger` crate
-provides deterministic execution commitments, not validator signatures, quorum
-certificates, or a light-client proof. A stable CAS RPC is also not landed.
-Production use remains blocked until an authenticated Ledger transport and an
-audited CometBFT or equivalent finality verifier implement the traits in this
-crate. Test doubles do not cross that boundary.
+The server side is implemented by `thunderbolt-floor-app`,
+`thunderbolt-floor-abci`, and `thunderbolt-floor-node`. This client-side adapter
+is not deployable by itself: version 1.0 does not include a concrete
+authenticated `LedgerFloorTransport` or a `LedgerFinalityVerifier` that binds
+finalized Floor results to the configured chain. Deployments provide those
+integrations explicitly; test doubles do not cross this boundary.

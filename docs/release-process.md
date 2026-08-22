@@ -1,10 +1,10 @@
 # Release process
 
-Bitcoin Thunderbolt publishes release candidates before a stable release. Release work is prepared on `release/1.0` and fast-forwarded to `release/open_source`.
+Bitcoin Thunderbolt uses semantic versions and publishes stable releases from exact Git tags. Release work is prepared on a release branch and fast-forwarded to `release/open_source`.
 
 ## Version policy
 
-- Release candidates may change local control and storage interfaces with documented migrations.
+- Pre-release versions may change local control and storage interfaces with documented migrations.
 - A change to canonical protocol bytes, signatures, or state transitions requires explicit compatibility review.
 - Patch releases preserve protocol and storage compatibility unless a coordinated security response documents an exception.
 
@@ -12,7 +12,7 @@ The daemon, CLI, release archive, and container must report the same software ve
 
 ## Required checks
 
-Every release candidate must pass:
+Every release must pass:
 
 1. A clean locked build with the pinned Rust toolchain.
 2. Formatting, strict Clippy, unit, property, integration, and documentation tests.
@@ -25,16 +25,16 @@ Every release candidate must pass:
 9. Checksums and a software bill of materials for the exact release archive.
 10. Independent verification of the source commit and archive contents.
 
-## Build a candidate
+## Build a release locally
 
 ```bash
 git status --short
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked --lib --bins --tests
-scripts/generate-sbom.sh
-scripts/package-release.sh
-scripts/verify-release.sh <release-archive>
+scripts/generate-sbom.sh NEW_SBOM_DIRECTORY
+scripts/package-release.sh v1.0.0 NEW_RELEASE_DIRECTORY
+scripts/verify-release.sh --checksums-only NEW_RELEASE_DIRECTORY
 ```
 
 Run the external CometBFT and Bitcoin Core interoperability gates with their pinned signed releases. Then install the archive on a clean host and run the documented operator topology.
@@ -53,11 +53,11 @@ Release notes include:
 
 ## Publication
 
-Tag the verified commit, sign the tag and checksum manifest, and publish the exact archive tested on the clean host. Update `release/open_source` with a normal fast-forward push. Do not rewrite a published release branch.
+Fast-forward the reviewed release commit to `release/open_source`, then push an exact `vMAJOR.MINOR.PATCH` tag. The tag triggers `.github/workflows/release.yml`, which builds the platform archives, assembles a combined checksum manifest, extracts the matching changelog section, and publishes the GitHub Release. Do not rewrite a published release branch or replace assets under an existing version.
 
-## Stable release
+## Mainnet activation
 
-Stable mainnet activation additionally requires the complete lifecycle integration, production threshold signing and key provisioning, operational recovery drills, external interoperability testing, and an independent security audit.
+Mainnet activation additionally requires the complete lifecycle integration, production threshold signing and key provisioning, operational recovery drills, external interoperability testing, and an independent security audit.
 
 ## Rollback
 

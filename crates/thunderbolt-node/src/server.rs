@@ -22,7 +22,7 @@ pub struct NodeOptions {
     pub allow_unverified_demo_events: bool,
 }
 
-/// Validates safety constraints enforced by this release candidate.
+/// Validates safety constraints enforced by version 1.0.
 pub fn validate_runtime_config(config: &Config, options: NodeOptions) -> Result<(), NodeError> {
     config
         .validate()
@@ -30,7 +30,7 @@ pub fn validate_runtime_config(config: &Config, options: NodeOptions) -> Result<
 
     if config.deployment.network == Network::Mainnet {
         return Err(NodeError::Configuration(
-            "mainnet is disabled in the 1.0 release candidate; use regtest, signet, or testnet".to_owned(),
+            "mainnet is disabled in version 1.0; use regtest, signet, or testnet".to_owned(),
         ));
     }
     if config.node.role != NodeRole::Ledger {

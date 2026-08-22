@@ -948,7 +948,7 @@ fn validate_auth(config: &Config, errors: &mut Vec<String>) {
 
 fn validate_deployment_safety(config: &Config, errors: &mut Vec<String>) {
     if config.deployment.network == Network::Mainnet {
-        errors.push("mainnet is disabled in the v1.0.0 release candidate".to_owned());
+        errors.push("mainnet is disabled in version 1.0".to_owned());
     }
 
     let unsafe_flags = [
@@ -1128,7 +1128,7 @@ scopes = ["admin"]
 [ledger]
 endpoint = "https://ledger.example.com/"
 "#;
-        let error = Config::from_toml_str(source).expect_err("mainnet must stay disabled in the RC");
+        let error = Config::from_toml_str(source).expect_err("mainnet must stay disabled in version 1.0");
         assert!(error.to_string().contains("mainnet is disabled"));
     }
 

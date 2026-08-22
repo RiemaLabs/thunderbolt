@@ -2,14 +2,14 @@
 
 ## Release status
 
-Bitcoin Thunderbolt is currently released for regtest and signet deployments. Mainnet activation is not enabled in this release candidate.
+Bitcoin Thunderbolt `v1.0.0` receives security fixes for the documented regtest and signet environments.
 
-Once the RC is public, the latest RC receives security fixes. Older development snapshots may be used to reproduce research results, but they are not supported operator releases.
+The latest stable release receives security fixes. Development snapshots may be used to reproduce research results, but they are not supported operator releases.
 
-| Version | Security fixes | Mainnet approved |
-| --- | --- | --- |
-| `1.0.0-rc.1` | Yes | No |
-| Older RCs and research snapshots | No | No |
+| Version | Security fixes |
+| --- | --- |
+| `1.0.x` | Yes |
+| Development and research snapshots | No |
 
 ## Report a vulnerability
 

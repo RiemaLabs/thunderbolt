@@ -15,6 +15,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   verify-packaging:
     name: release archive and checksum gate
@@ -90,3 +94,109 @@ jobs:
           path: dist
           if-no-files-found: error
           retention-days: 7
+
+  publish:
+    name: publish GitHub Release
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: archive
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: unsigned-release-*-${{ github.sha }}
+          path: release-input
+      - name: Assemble release assets and notes
+        shell: bash
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "stable release tags must use vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          software_version="${VERSION#v}"
+          manifest_version="$(awk '
+            /^\[workspace\.package\]$/ { workspace_package = 1; next }
+            workspace_package && /^version = / {
+              gsub(/^version = "|"[[:space:]]*$/, "", $0)
+              print
+              exit
+            }
+          ' Cargo.toml)"
+          if [[ "$manifest_version" != "$software_version" ]]; then
+            echo "tag $VERSION does not match workspace version $manifest_version" >&2
+            exit 1
+          fi
+
+          mapfile -t artifact_dirs < <(find release-input -mindepth 1 -maxdepth 1 -type d -print | sort)
+          if [[ "${#artifact_dirs[@]}" -ne 2 ]]; then
+            echo "expected exactly two platform artifact directories" >&2
+            exit 1
+          fi
+          linux_dir="$(find release-input -mindepth 1 -maxdepth 1 -type d -name 'unsigned-release-ubuntu-*' -print -quit)"
+          if [[ -z "$linux_dir" ]]; then
+            echo "missing Ubuntu release artifact" >&2
+            exit 1
+          fi
+
+          mkdir release-assets
+          for artifact_dir in "${artifact_dirs[@]}"; do
+            binary_archive="$(find "$artifact_dir" -maxdepth 1 -type f -name "bitcoin-thunderbolt-${software_version}-*.tar.gz" ! -name '*-source.tar.gz' -print)"
+            if [[ -z "$binary_archive" ]]; then
+              echo "missing platform binary archive in $artifact_dir" >&2
+              exit 1
+            fi
+            cp "$binary_archive" release-assets/
+
+            platform="${artifact_dir#release-input/unsigned-release-}"
+            platform="${platform%-${GITHUB_SHA}}"
+            for sbom in "$artifact_dir"/*.cdx.json; do
+              sbom_name="${sbom##*/}"
+              cp "$sbom" "release-assets/${sbom_name%.cdx.json}-${platform}.cdx.json"
+            done
+          done
+
+          for shared_name in \
+            "bitcoin-thunderbolt-${software_version}-source.tar.gz" \
+            "bitcoin-thunderbolt-${software_version}-source.zip" \
+            SIGNING-INSTRUCTIONS.txt; do
+            reference="$linux_dir/$shared_name"
+            test -s "$reference"
+            for artifact_dir in "${artifact_dirs[@]}"; do
+              cmp -s "$reference" "$artifact_dir/$shared_name"
+            done
+            cp "$reference" release-assets/
+          done
+
+          (
+            cd release-assets
+            sha256sum ./*.tar.gz ./*.zip ./*.cdx.json SIGNING-INSTRUCTIONS.txt |
+              sed 's#  \./#  #'
+          ) > release-assets/SHA256SUMS
+
+          awk -v heading="## [$software_version]" '
+            index($0, heading) == 1 { found = 1; capture = 1; next }
+            capture && /^## \[/ { exit }
+            capture { print }
+            END { if (!found) exit 1 }
+          ' CHANGELOG.md > release-notes.md
+          test -s release-notes.md
+
+      - name: Publish immutable versioned assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          gh release create "$VERSION" release-assets/* \
+            --verify-tag \
+            --title "Bitcoin Thunderbolt $VERSION" \
+            --notes-file release-notes.md \
+            --latest

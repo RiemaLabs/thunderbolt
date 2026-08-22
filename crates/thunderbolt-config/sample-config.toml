@@ -1,4 +1,4 @@
-# Bitcoin Thunderbolt v1.0.0-rc.1 regtest configuration.
+# Bitcoin Thunderbolt v1.0.0 regtest configuration.
 #
 # Environment overrides use THUNDERBOLT_ and double underscores between nested
 # fields. Example: THUNDERBOLT_ADMIN__PORT=29736.
@@ -15,7 +15,7 @@ listen_port = 19735
 
 [deployment]
 environment = "development" # development, staging, or production
-network = "regtest"         # regtest, signet, testnet, or mainnet (mainnet is disabled in this RC)
+network = "regtest"         # regtest, signet, or testnet in version 1.0
 id = "thunderbolt-regtest-v1"
 
 [paths]

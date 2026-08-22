@@ -102,8 +102,8 @@ pub enum ValidationError {
 /// Fail-closed Bitcoin backend failures.
 #[derive(Debug, Error)]
 pub enum BitcoinError {
-    /// Mainnet is deliberately unavailable in this release candidate.
-    #[error("Bitcoin mainnet is disabled in this release candidate")]
+    /// Mainnet is deliberately unavailable in version 1.0.
+    #[error("Bitcoin mainnet is disabled in version 1.0")]
     MainnetDisabled,
     /// The selected rust-bitcoin network is not supported by this backend.
     #[error("unsupported Bitcoin network: {0}")]

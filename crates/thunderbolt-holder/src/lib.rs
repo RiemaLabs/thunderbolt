@@ -40,7 +40,7 @@ pub use vault::{
     OutboundTransferRecord, SecretVault, VaultTransaction,
 };
 
-/// Paillier modulus size enforced by the version-one release candidate.
+/// Paillier modulus size enforced by the legacy version-one profile.
 pub const RC_PAILLIER_MODULUS_BITS: usize = thunderbolt_core::paillier::PAILLIER_MODULUS_BYTES * 8;
 
 #[cfg(test)]

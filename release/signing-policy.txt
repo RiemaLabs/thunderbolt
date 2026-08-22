@@ -1,18 +1,19 @@
 Bitcoin Thunderbolt release verification
 
-1. Build from a clean, reviewed, signed source commit with package-release.sh.
-2. Rebuild independently and review every artifact named by SHA256SUMS.
-3. Sign only SHA256SUMS with a dedicated maintainer release key:
+1. Push an exact vMAJOR.MINOR.PATCH tag to trigger the release workflow.
+2. The workflow builds the tagged commit on each supported host and retains the
+   platform archives, source archives, and per-binary SBOMs.
+3. The publication job checks that the tag matches the Cargo workspace version,
+   compares shared source artifacts, and creates one SHA256SUMS manifest over the
+   complete GitHub Release asset set.
+4. Publish the assets from the tag-triggered workflow. Never replace an artifact
+   under an existing version; issue a new version instead.
+5. Verify a download against SHA256SUMS and the exact tagged commit before use.
 
-   scripts/sign-release.sh dist FULL_GPG_SECRET_KEY_FINGERPRINT
+Maintainers may additionally create a detached GPG signature with:
 
-4. Verify using the full fingerprint obtained through an independent trusted channel:
+   scripts/sign-release.sh RELEASE_DIRECTORY FULL_GPG_SECRET_KEY_FINGERPRINT
 
-   scripts/verify-release.sh dist FULL_GPG_PUBLIC_KEY_FINGERPRINT
+Verify that signature with:
 
-5. Publish the archives, SBOMs, SHA256SUMS, and SHA256SUMS.asc as immutable files.
-   Never replace an artifact under an existing version. Issue a new version instead.
-
-The repository does not define which key is trusted. Maintainers must publish and
-rotate the authorized release-key fingerprints through a separately controlled
-project channel before the first public release.
+   scripts/verify-release.sh RELEASE_DIRECTORY FULL_GPG_PUBLIC_KEY_FINGERPRINT

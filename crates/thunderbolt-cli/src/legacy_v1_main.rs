@@ -165,7 +165,7 @@ enum AppError {
     #[error("node returned HTTP {status}: {body}")]
     Server { status: StatusCode, body: String },
 
-    #[error("mainnet is disabled in the 1.0 release candidate")]
+    #[error("mainnet is disabled in version 1.0")]
     MainnetDisabled,
 }
 

@@ -48,7 +48,7 @@ A correct test result does not settle a design objection about the threat model 
 
 ## Releases
 
-The release manager follows [Release process](docs/release-process.md). No single person should both produce and provide the only verification of release artifacts. A stable release requires the mainnet gates and external audit; maintainers cannot waive those requirements through ordinary review.
+The release manager follows [Release process](docs/release-process.md). No single person should both produce and provide the only verification of release artifacts. Mainnet activation requires the documented mainnet gates and external review; maintainers cannot waive those requirements through ordinary review.
 
 ## Adding maintainers
 

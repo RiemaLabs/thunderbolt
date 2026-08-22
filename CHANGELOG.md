@@ -4,40 +4,33 @@ All notable changes to Bitcoin Thunderbolt are recorded here. The project follow
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-08-22
+
+Bitcoin Thunderbolt 1.0.0 is the first stable open source release maintained by Nubit. It turns the research protocol into a complete open source systems foundation spanning cryptography, state machines, durable services, consensus integration, Bitcoin integration, operator tooling, and release automation.
+
 ### Added
 
-- Public repository documentation for architecture, operator roles, configuration, security, API design, release management, and history sanitization.
-- Apache License 2.0, project notice, contribution policy, governance, support, security reporting, and community templates.
-- Explicit `v1.0.0-rc.1` status with mainnet disabled pending implementation, testing, and audit gates.
-- Reference Ledger daemon, loopback JSON API, operator CLI, strict configuration, bearer-token authorization, deterministic protocol reducer, and durable SQLite storage.
-- Fail-closed Bitcoin Core access with network and genesis validation, bounded RPC, reorganization-aware chain cursors, and funding and closing checks.
-- Transactional Holder and Recipient state engine for credentials, v1 single-committee and threshold Invoice packages, Transfers, and idempotent Ledger acknowledgements.
-- One-share committee member engine with Recipient-share and committed-Transfer binding, replay-safe refresh state, and fail-closed signing-session guards.
-- Trusted verification bridge for bounded Invoice and Transfer artifacts.
-- Stable version 2 channel and operation bindings with exact Bitcoin network, genesis, funding outpoint, deployment, committee, protocol-suite, and anchor-suite scope.
-- Standalone `thunderbolt-ledger` contract with chain-scoped BIP340 signed proposals, actor-scoped request digests, executed blocks, application hashes, and ordered Merkle inclusion proofs.
-- Deterministic protocol v2 reducer with bounded concurrent Invoices, exact selected-Invoice consumption, consensus block time, and typed external proof hooks.
-- Transaction-scoped verified Ledger append and optional node injection of the Trusted Verifier for Invoice and Transfer.
-- Encrypted transactional multi-record Keystore with exact-checkpoint CAS, idempotent receipts, nonce tombstones, fenced reads and outputs, and exact anchored restore.
-- Concrete Holder and committee Keystore adapters with exact-checkpoint CAS, fenced reads and outputs, replay handling, and externally finalized pruning.
+- Deterministic signed Ledger and rollback-floor applications, bounded ABCI servers, durable SQLite state, application hashes, request indexes, and inclusion proofs.
+- Authenticated bounded CometBFT RPC, durable light-client finality coordination, and typed finalized capabilities for role services.
+- Durable Holder and committee services with encrypted vaults, outboxes, Ledger cursors, checkpoint fencing, replay handling, and restart reconciliation.
+- Canonical version 2 protocol, wire, proof, channel, and operation bindings scoped to the Bitcoin network, funding outpoint, deployment, committee, proof suite, and anchor suite.
+- Fixed-width Paillier support, ownership proofs, and trusted verification interfaces for bounded Invoice and Transfer artifacts.
+- Strict role configuration, process locking, owner-only Unix-socket control, redacted diagnostics, and lifecycle commands through `thunderboltd` and `thunderbolt-cli`.
+- Fail-closed Bitcoin Core access with network and genesis validation, bounded RPC, maturity and confirmation policy, reorganization-aware cursors, and funding and settlement checks.
+- A three-binary default release graph, systemd and container assets, source and platform archives, SBOM generation, checksum tooling, and GitHub Actions release publication.
 
 ### Changed
 
-- Legacy settlement code and single-process committee fixtures are excluded from default release builds and remain available only through the explicit `legacy-research`, `insecure-regression`, or `insecure-regtest` features.
-- Version 2 is a separate library surface. The shipped daemon, HTTP API, SQLite service, and role processes remain on version 1 and do not interpret version 2 entries.
+- Replaced the legacy loopback HTTP and bearer-token operator path with an owner-only local Unix socket.
+- Excluded legacy settlement code and test-only committee fixtures from default release builds; they remain available only through explicit non-default features.
+- Kept version 2 as a separate library surface rather than silently interpreting version 2 entries through legacy version 1 interfaces.
 
 ### Security
 
-- Documented historical secret-bearing files and oversized generated build history that must be removed before publication.
-- Defined private vulnerability reporting and mainnet approval gates.
-- Enforced the coinbase maturity boundary, non-zero verifier statement digests, Recipient-share binding, and zeroization of Holder cryptographic intermediates.
+- Bounded public codecs, queues, snapshots, requests, and retained state to make resource limits part of the protocol boundary.
+- Bound signatures, proofs, credentials, and finalized capabilities to their exact network, deployment, channel, operation, and finality contexts.
+- Added encrypted checkpoint-fenced participant storage and fail-closed handling for replay, corruption, stale state, ambiguous writes, and finality loss.
 
-### Validation
+### Deployment scope
 
-- Final local workspace run: 268 passed, 0 failed, and 1 intentionally ignored live Bitcoin test. The final workspace all-target check also passed.
-- Isolated Linux gate on integrated version 2 ancestor `bcdf250`: 127 tests, 3 doctests, formatting, workspace check, strict Clippy, and warnings-as-errors rustdoc passed. Final adapter regressions have separate focused local coverage.
-- Passed the live Bitcoin backend gate on the official Bitcoin Core v31.1.0 release, including verified release metadata, isolated regtest, exact 100-confirmation funding maturity, a one-block disconnect and distinct replacement, graceful same-datadir restart, and a complete post-restart rerun. The harness remains ignored and environment-gated rather than automatic CI.
-
-## [1.0.0-rc.1] - Unreleased
-
-The first RC packages a version 1 Ledger-role daemon and operator CLI for development and regtest. Version 2 Ledger, reducer, Holder, committee, verifier, Keystore, and Bitcoin Core libraries are included but do not form a deployed runtime or finality system. A complete Open-to-Finalize lifecycle, DKG, `R_own`, combined-key threshold signing, production Ledger fault model, metrics, and mainnet support are unavailable.
+- Release archives contain the reusable software and operator assets. Deployment identities, trust roots, credentials, checkpoint providers, role handlers, and environment-specific configuration remain operator-provisioned.

@@ -70,7 +70,7 @@ fn invoice_challenge(
     transcript.challenge()
 }
 
-/// Generates a legacy RC/v1 2048-bit invoice proof.
+/// Generates a legacy v1 2048-bit invoice proof.
 pub fn prove_invoice(statement: &InvoiceStatement, witness: &InvoiceWitness) -> Result<InvoiceProof> {
     validate_statement(statement)?;
     validate_nonce(&statement.bob_key, &witness.bob_nonce)?;
@@ -151,7 +151,7 @@ pub fn prove_invoice_with_profile(
     }
 }
 
-/// Verifies a legacy RC/v1 2048-bit invoice proof.
+/// Verifies a legacy v1 2048-bit invoice proof.
 pub fn verify_invoice(statement: &InvoiceStatement, proof: &InvoiceProof) -> Result<()> {
     validate_statement(statement)?;
     validate_ciphertext(&statement.bob_key, &proof.a_bob)?;

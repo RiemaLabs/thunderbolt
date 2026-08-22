@@ -1,5 +1,5 @@
 name: Bug report
-description: Report reproducible incorrect behavior in a supported RC
+description: Report reproducible incorrect behavior in a supported release
 title: "bug: "
 labels:
   - bug
@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Bitcoin Thunderbolt RC releases are for development and regtest. Mainnet is not approved.
+        Bitcoin Thunderbolt v1.0 supports the documented regtest and signet environments.
 
         Do not use this form for a security or privacy issue. Use the private report form on the Security tab. Never include a seed, private key, committee share, credential, wallet, database, or unredacted log.
 
@@ -28,7 +28,7 @@ body:
     attributes:
       label: Version or commit
       description: Output from the daemon or the full source commit.
-      placeholder: v1.0.0-rc.1 or a full commit identifier
+      placeholder: v1.0.0 or a full commit identifier
     validations:
       required: true
 

@@ -28,7 +28,7 @@ jobs:
         run: |
           docker build \
             --pull \
-            --build-arg VERSION=1.0.0-rc.1 \
+            --build-arg VERSION=1.0.0 \
             --build-arg REVISION="${GITHUB_SHA}" \
             --tag bitcoin-thunderbolt:ci \
             .

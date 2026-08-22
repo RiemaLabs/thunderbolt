@@ -4,9 +4,8 @@ This crate is Bitcoin Thunderbolt's fail-closed Bitcoin Core boundary. It
 provides a bounded JSON-RPC client, explicit network and genesis checks, a
 reorg-aware chain cursor, and pure funding and closing-transaction validators.
 
-The release candidate supports regtest, signet, and testnet3. Mainnet and
-testnet4 are intentionally rejected until the release gates for those networks
-are complete.
+Version 1.0 supports regtest, signet, and testnet3. Mainnet and testnet4 use
+separate network-specific activation profiles.
 
 ## Security boundary
 

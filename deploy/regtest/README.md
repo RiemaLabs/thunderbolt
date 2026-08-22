@@ -54,7 +54,7 @@ docker run --rm --read-only --user 10002:10002 \
   --mount type=bind,src=/absolute/floor-config,dst=/var/lib/thunderbolt-floor/config,readonly \
   --mount type=bind,src=/absolute/floor-data,dst=/var/lib/thunderbolt-floor/data \
   --tmpfs /run/thunderbolt-floor:rw,noexec,nosuid,nodev,mode=0700,uid=10002,gid=10002 \
-  bitcoin-thunderbolt:1.0.0-rc.1 \
+  bitcoin-thunderbolt:1.0.0 \
   --config /var/lib/thunderbolt-floor/config/node.toml check
 ```
 

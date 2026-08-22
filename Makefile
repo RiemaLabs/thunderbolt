@@ -1,5 +1,5 @@
 CARGO ?= cargo
-VERSION ?= v1.0.0-rc.1
+VERSION ?= v1.0.0
 
 .PHONY: fmt binary-graph lint test doc check audit deny semver sbom image regtest-up regtest-status regtest-down release verify
 

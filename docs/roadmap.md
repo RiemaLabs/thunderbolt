@@ -1,6 +1,6 @@
 # Roadmap
 
-The `release/1.0` branch is focused on a deployable multi-process Thunderbolt release.
+Version 1.0 establishes the stable open source baseline for Bitcoin Thunderbolt.
 
 ## Landed foundation
 
@@ -14,9 +14,9 @@ The `release/1.0` branch is focused on a deployable multi-process Thunderbolt re
 - bounded wire, proposal, block, query, and snapshot formats
 - fixed-width Paillier arithmetic foundation and ownership proof
 
-## Release integration
+## Version 1.0 integration
 
-The current work connects the concrete Ledger client to Holder and committee run loops, installs the role handlers in the daemon, and packages a complete regtest topology. The integration gate covers independent processes, empty blocks, ambiguous broadcasts, restarts, rollback-floor recovery, quorum loss, and Bitcoin reorganizations.
+Version 1.0 brings the Ledger and rollback-floor applications, Holder and committee services, authenticated CometBFT clients, Bitcoin Core backend, strict runtime configuration, encrypted storage, and operator control into one release. Concrete deployment handlers and trust material remain explicit operator-provided integration points.
 
 ## Cryptography
 
@@ -32,9 +32,9 @@ Before mainnet activation, the project will complete:
 
 The detailed signing decision is recorded in the [signing protocol design](signing-protocol-v2.md).
 
-## Operator release
+## Version 1.0 release package
 
-The release package will include:
+The release package includes:
 
 - daemon and CLI binaries without demo behavior in the default feature graph
 - CometBFT and Bitcoin Core configuration templates

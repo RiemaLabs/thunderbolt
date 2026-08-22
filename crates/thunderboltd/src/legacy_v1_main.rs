@@ -169,7 +169,7 @@ fn initialize(config_path: &Path, arguments: InitArgs) -> Result<(), AppError> {
     println!("initialized Bitcoin Thunderbolt node");
     println!("configuration: {}", config_path.display());
     println!("operator token: {}", token_path.display());
-    println!("network: regtest (mainnet is disabled in this release candidate)");
+    println!("network: regtest (mainnet is disabled in version 1.0)");
     Ok(())
 }
 

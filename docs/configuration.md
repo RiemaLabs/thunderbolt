@@ -47,7 +47,7 @@ The redacted configuration returned by the CLI does not print paths, network end
 
 ## Network profiles
 
-Regtest and signet are supported during the release candidate. Every process in one deployment must use the same Bitcoin genesis hash, Ledger chain, deployment identifier, committee descriptor, proof suite, and finality policy.
+Version 1.0 documents regtest and signet deployment profiles. Every process in one deployment must use the same Bitcoin genesis hash, Ledger chain, deployment identifier, committee descriptor, proof suite, and finality policy.
 
 Literal loopback HTTP is accepted only for regtest CometBFT profiles. Remote CometBFT peers require HTTPS, pinned CA certificates, a pinned node identity and SPKI binding, and a client certificate.
 

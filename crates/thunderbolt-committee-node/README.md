@@ -67,15 +67,15 @@ The service reparses `PublicMessageV2` RecipientShare, ThresholdRefresh, and
 Transfer artifacts only from authenticated signed event bytes. It exact-binds
 their channel, invoice, step, roster, anchor, ciphertext, event, inclusion, and
 finality fields, then requires the private runtime's non-mutating proof/roster
-validation before cursor advance. A crash after a future v2
-engine's encrypted share update but before SQLite acknowledgement commit is
-recoverable by deterministic runtime replay.
+validation before cursor advance. If a crash occurs after an encrypted share
+update but before SQLite acknowledgement commit, deterministic runtime replay
+recovers the transition.
 
 The committed `CommitteeMemberEngine` still accepts legacy v1 transcripts, so
 its adapter reports `V2RuntimeUnavailable` before fetching, persistence, cursor
-advance, private mutation, or acknowledgement. A real share update waits on the
-reviewed core-v2/Committee migration; v2 transcripts are never reinterpreted as
-v1. The concrete async Ledger-Comet client is also an external deployment gate.
+advance, private mutation, or acknowledgement. Version 2 transcripts are never
+reinterpreted as version 1. `thunderbolt-ledger-comet-client` provides the
+concrete Ledger client, while deployments supply its Committee adapter.
 
 No Committee-authored v2 event currently exists, so acknowledgements remain
 unsigned local outbox records. The shipped signer hook fails closed. The crate

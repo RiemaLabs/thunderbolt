@@ -24,9 +24,9 @@ This makes an exact ambiguous `Stop` retry safe across process restart without
 requiring the actor-lifetime RequestId ledger to survive the restart.
 
 Liveness and readiness are independent. Liveness reports only whether the
-bounded lifecycle actor is being polled. The current supervisor always emits
-`NotReady`; role integration must add an explicit capability-attestation
-transition before it can emit `Ready`.
+bounded lifecycle actor is being polled. Version 1.0 leaves the
+capability-attestation transition to the role integration, so the base
+supervisor reports `NotReady` until that integration supplies it.
 
 The caller continuously polls `RuntimeSupervisor::run`. Fixed `Start`, `Drain`,
 and `Stop` hooks execute serially through an eight-command mailbox under

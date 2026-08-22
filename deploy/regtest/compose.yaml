@@ -5,8 +5,8 @@ services:
     build:
       context: ../..
       args:
-        VERSION: 1.0.0-rc.1
-    image: bitcoin-thunderbolt:1.0.0-rc.1
+        VERSION: 1.0.0
+    image: bitcoin-thunderbolt:1.0.0
     command:
       - --config
       - /var/lib/thunderbolt/config/runtime.toml

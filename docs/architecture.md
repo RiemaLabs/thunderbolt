@@ -126,4 +126,4 @@ Fatal storage or consensus ambiguity closes the affected process boundary. It is
 
 ## Current release boundary
 
-The release branch contains the role services, deterministic Ledger and floor applications, bounded ABCI server, authenticated CometBFT clients, encrypted storage, and operator runtime. The final integration work connects the concrete role handlers, Bitcoin settlement, Paillier proof backend, and threshold signing path into the packaged daemons. Mainnet stays disabled until that integrated path and its external audit are complete.
+Version 1.0 contains the role services, deterministic Ledger and floor applications, bounded ABCI server, authenticated CometBFT clients, encrypted storage, Bitcoin and proof backends, operator runtime, and packaged integration points. Deployment-specific role handlers, trust material, and threshold-signing providers are supplied at the operator boundary.

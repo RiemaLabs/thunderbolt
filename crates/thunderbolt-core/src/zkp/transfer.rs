@@ -62,7 +62,7 @@ fn transfer_challenge(
     transcript.challenge()
 }
 
-/// Generates a legacy RC/v1 2048-bit transfer proof.
+/// Generates a legacy v1 2048-bit transfer proof.
 pub fn prove_transfer(statement: &TransferStatement, witness: &TransferWitness) -> Result<TransferProof> {
     validate_statement(statement)?;
     validate_nonce(&statement.bob_key, &witness.holder_nonce)?;
@@ -121,7 +121,7 @@ pub fn prove_transfer_with_profile(
     }
 }
 
-/// Verifies a legacy RC/v1 2048-bit transfer proof.
+/// Verifies a legacy v1 2048-bit transfer proof.
 pub fn verify_transfer(statement: &TransferStatement, proof: &TransferProof) -> Result<()> {
     validate_statement(statement)?;
     validate_ciphertext(&statement.bob_key, &proof.a_ciphertext)?;

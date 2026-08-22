@@ -61,7 +61,7 @@ fn validate_statement(statement: &ShareEncryptionStatement) -> Result<()> {
     Ok(())
 }
 
-/// Generates a legacy RC/v1 2048-bit share-encryption proof.
+/// Generates a legacy v1 2048-bit share-encryption proof.
 pub fn prove_share_encryption(
     statement: &ShareEncryptionStatement,
     witness: &ShareEncryptionWitness,
@@ -121,7 +121,7 @@ pub fn prove_share_encryption_with_profile(
     }
 }
 
-/// Verifies a legacy RC/v1 2048-bit share-encryption proof.
+/// Verifies a legacy v1 2048-bit share-encryption proof.
 pub fn verify_share_encryption(statement: &ShareEncryptionStatement, proof: &ShareEncryptionProof) -> Result<()> {
     validate_statement(statement)?;
     validate_ciphertext(&statement.recipient_key, &proof.a_ciphertext)?;

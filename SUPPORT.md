@@ -1,10 +1,10 @@
 # Support
 
-Bitcoin Thunderbolt `v1.0.0-rc.1` supports the reference Ledger, control CLI, and regtest demonstrations. Mainnet operation and real funds are not supported.
+Bitcoin Thunderbolt `v1.0.0` supports the protocol libraries, reference Ledger and rollback floor, local control CLI, and documented regtest and signet environments.
 
 ## Where to ask
 
-- Open a bug report for reproducible incorrect behavior in a supported RC.
+- Open a bug report for reproducible incorrect behavior in a supported release.
 - Open a feature request for a scoped proposal that fits the documented architecture.
 - Use a documentation issue when a command, role, configuration field, or limitation is unclear.
 - Use the private route in [SECURITY.md](SECURITY.md) for any suspected security or privacy issue.
@@ -30,7 +30,7 @@ Replace secret values with a description such as `[redacted control token]`. Do 
 
 ## Support boundaries
 
-Maintainers can help with the documented source build, current RC interface, regtest behavior, and reproducible project defects. They cannot recover lost keys or funds, operate a committee for a user, audit a private deployment through a public issue, or guarantee response times.
+Maintainers can help with the documented source build, the current stable interface, regtest and signet behavior, and reproducible project defects. They cannot recover lost keys or funds, operate a committee for a user, audit a private deployment through a public issue, or guarantee response times.
 
 Research benchmarks are maintained for reproducibility and regression. They are not a supported production service or a substitute for the daemon architecture.
 
