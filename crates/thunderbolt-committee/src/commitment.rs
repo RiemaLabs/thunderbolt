@@ -9,10 +9,13 @@ use crate::{CommitteeError, Result};
 /// A trusted [`LedgerCommitmentVerifier`] produces this value from its native
 /// quorum/finality receipt. The two wire digests prove that the ledger entries
 /// contain the exact threshold distribution and transfer that the member
-/// verifies locally. `committed_head_hash` proves the transfer is an ancestor
-/// of the accepted ledger head; it is receipt context, not the idempotency key.
+/// verifies locally. The recipient-share digest binds the proof that the
+/// recipient ciphertext encrypts the same refresh committed by the committee
+/// distribution. `committed_head_hash` proves the transfer is an ancestor of
+/// the accepted ledger head; it is receipt context, not the idempotency key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CommittedTransfer {
+    recipient_share_digest: [u8; 32],
     threshold_refresh_digest: [u8; 32],
     transfer_digest: [u8; 32],
     invoice_entry_hash: EntryHash,
@@ -26,6 +29,7 @@ impl CommittedTransfer {
     /// Constructs the result of a successful external ledger verification.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        recipient_share_digest: [u8; 32],
         threshold_refresh_digest: [u8; 32],
         transfer_digest: [u8; 32],
         invoice_entry_hash: EntryHash,
@@ -41,6 +45,7 @@ impl CommittedTransfer {
             return Err(CommitteeError::LedgerCommitmentMismatch);
         }
         Ok(Self {
+            recipient_share_digest,
             threshold_refresh_digest,
             transfer_digest,
             invoice_entry_hash,
@@ -49,6 +54,12 @@ impl CommittedTransfer {
             transfer_sequence,
             transfer_step,
         })
+    }
+
+    /// Returns the exact recipient-share canonical wire digest.
+    #[must_use]
+    pub const fn recipient_share_digest(&self) -> &[u8; 32] {
+        &self.recipient_share_digest
     }
 
     /// Returns the exact threshold-refresh canonical wire digest.
@@ -98,9 +109,10 @@ impl CommittedTransfer {
 ///
 /// The implementation must verify the ledger quorum or consensus certificate,
 /// verify that `transfer_entry_hash` consumes `invoice_entry_hash`, verify both
-/// entries are ancestors of `committed_head_hash`, and derive the two wire
-/// digests from the committed entry artifacts. Returning caller-supplied fields
-/// without those checks is unsafe.
+/// entries are ancestors of `committed_head_hash`, and derive the recipient
+/// share, threshold distribution, and transfer wire digests from the committed
+/// entry artifacts. Returning caller-supplied fields without those checks is
+/// unsafe.
 pub trait LedgerCommitmentVerifier {
     /// Native signed/quorum receipt type.
     type Receipt;

@@ -4,7 +4,7 @@ use libpaillier::EncryptionKey;
 use secp::{MaybePoint, MaybeScalar, Point, Scalar};
 use thunderbolt_core::paillier::decrypt_to_big_number;
 use thunderbolt_core::zkp::types::big_number_to_scalar;
-use thunderbolt_wire::{CanonicalDigest, ThresholdEnvelopeV1, TransferEnvelopeV1};
+use thunderbolt_wire::{CanonicalDigest, ShareEnvelopeV1, ThresholdEnvelopeV1, TransferEnvelopeV1};
 use zeroize::Zeroizing;
 
 use crate::record::{
@@ -132,8 +132,9 @@ where
         self.vault
     }
 
-    /// Applies one refresh only after verifying both its invoice distribution
-    /// and the exact committed transfer that consumes that invoice.
+    /// Applies one refresh only after verifying the recipient share proof, its
+    /// committee distribution, and the exact committed transfer that consumes
+    /// the proven recipient ciphertext.
     ///
     /// The method verifies every public encrypted-share proof but calls Paillier
     /// decryption only for this process's member ciphertext. A successful return
@@ -141,6 +142,7 @@ where
     /// encrypted-vault revision.
     pub fn apply_committed_refresh<L>(
         &mut self,
+        recipient_share: &ShareEnvelopeV1,
         threshold_refresh: &ThresholdEnvelopeV1,
         transfer: &TransferEnvelopeV1,
         ledger_verifier: &L,
@@ -150,20 +152,23 @@ where
         L: LedgerCommitmentVerifier,
     {
         self.ensure_available()?;
-        validate_wire_bindings(&self.descriptor, threshold_refresh, transfer)?;
+        validate_wire_bindings(&self.descriptor, recipient_share, threshold_refresh, transfer)?;
+        let recipient_share_digest = recipient_share.canonical_digest()?;
         let threshold_refresh_digest = threshold_refresh.canonical_digest()?;
         let transfer_digest = transfer.canonical_digest()?;
         let committed = ledger_verifier
             .verify_committed(receipt)
             .map_err(|error| CommitteeError::LedgerCommitment(error.to_string()))?;
         let transfer_step = transfer.binding.step.ok_or(CommitteeError::TransferBindingMismatch)?;
-        if committed.threshold_refresh_digest() != &threshold_refresh_digest
+        if committed.recipient_share_digest() != &recipient_share_digest
+            || committed.threshold_refresh_digest() != &threshold_refresh_digest
             || committed.transfer_digest() != &transfer_digest
             || committed.transfer_step() != transfer_step
         {
             return Err(CommitteeError::LedgerCommitmentMismatch);
         }
         let requested_binding = RefreshEventBinding::new(
+            recipient_share_digest,
             threshold_refresh_digest,
             transfer_digest,
             committed.invoice_entry_hash(),
@@ -180,6 +185,7 @@ where
         // A replay with the exact committed event hash returns its durable
         // receipt above. New events must pass every expensive proof before the
         // vault gains pending state.
+        recipient_share.verify()?;
         threshold_refresh.verify()?;
         transfer.verify()?;
         validate_exact_member_set(&self.descriptor, threshold_refresh)?;
@@ -472,10 +478,22 @@ fn validate_opened_record(
 
 fn validate_wire_bindings(
     descriptor: &CommitteeDescriptor,
+    recipient_share: &ShareEnvelopeV1,
     threshold_refresh: &ThresholdEnvelopeV1,
     transfer: &TransferEnvelopeV1,
 ) -> Result<()> {
     let invoice_binding = &threshold_refresh.binding;
+    if recipient_share.binding != *invoice_binding {
+        return Err(CommitteeError::RecipientBindingMismatch);
+    }
+    if recipient_share.statement.member_id != crate::RECIPIENT_SHARE_MEMBER_ID {
+        return Err(CommitteeError::WrongRecipientShareId);
+    }
+    if recipient_share.statement.anchor_base != threshold_refresh.distribution.anchor_base
+        || recipient_share.statement.committed_point != threshold_refresh.distribution.delta
+    {
+        return Err(CommitteeError::RecipientDeltaMismatch);
+    }
     let transfer_binding = &transfer.binding;
     if invoice_binding.network != descriptor.network()
         || invoice_binding.deployment_id.as_bytes() != descriptor.deployment_id()
@@ -511,6 +529,11 @@ fn validate_wire_bindings(
     }
     if threshold_refresh.distribution.delta != transfer.anchor_transition.delta {
         return Err(CommitteeError::TransferDeltaMismatch);
+    }
+    if recipient_share.statement.recipient_key != transfer.statement.bob_key
+        || recipient_share.statement.ciphertext != transfer.statement.invoice_ciphertext
+    {
+        return Err(CommitteeError::RecipientTransferMismatch);
     }
     Ok(())
 }

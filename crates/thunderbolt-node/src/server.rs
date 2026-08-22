@@ -9,7 +9,7 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use crate::api::{build_router, AppState};
-use crate::NodeError;
+use crate::{NodeError, ProposalVerifier};
 
 /// Runtime switches which are intentionally not part of the durable protocol.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -18,7 +18,7 @@ pub struct NodeOptions {
     ///
     /// The server still rejects client-asserted verification evidence. It
     /// synthesizes deterministic attestations labelled
-    /// `development-unverified-demo` before invoking the state machine.
+    /// `development-unverified-demo` using transaction-scoped ledger time.
     pub allow_unverified_demo_events: bool,
 }
 
@@ -113,14 +113,57 @@ impl NodeServer {
         validate_runtime_config(&config, options)?;
         let address = SocketAddr::new(config.admin.bind_address, config.admin.port);
         let listener = TcpListener::bind(address).await?;
-        Self::from_listener(listener, config, options).await
+        Self::from_listener_inner(listener, config, options, None).await
+    }
+
+    /// Binds with a trusted Invoice/Transfer verifier.
+    ///
+    /// Open and Finalize remain fail-closed even when a verifier is supplied.
+    pub async fn bind_with_verifier(
+        config: Config,
+        options: NodeOptions,
+        verifier: Arc<dyn ProposalVerifier>,
+    ) -> Result<Self, NodeError> {
+        validate_runtime_config(&config, options)?;
+        if options.allow_unverified_demo_events {
+            return Err(NodeError::Configuration(
+                "development demo evidence and a trusted verifier cannot be enabled together".to_owned(),
+            ));
+        }
+        let address = SocketAddr::new(config.admin.bind_address, config.admin.port);
+        let listener = TcpListener::bind(address).await?;
+        Self::from_listener_inner(listener, config, options, Some(verifier)).await
     }
 
     /// Uses an already-bound loopback listener.
     ///
     /// This supports socket activation and ephemeral-port integration tests.
     pub async fn from_listener(listener: TcpListener, config: Config, options: NodeOptions) -> Result<Self, NodeError> {
+        Self::from_listener_inner(listener, config, options, None).await
+    }
+
+    /// Uses an already-bound listener and an injected trusted verifier.
+    pub async fn from_listener_with_verifier(
+        listener: TcpListener,
+        config: Config,
+        options: NodeOptions,
+        verifier: Arc<dyn ProposalVerifier>,
+    ) -> Result<Self, NodeError> {
+        Self::from_listener_inner(listener, config, options, Some(verifier)).await
+    }
+
+    async fn from_listener_inner(
+        listener: TcpListener,
+        config: Config,
+        options: NodeOptions,
+        verifier: Option<Arc<dyn ProposalVerifier>>,
+    ) -> Result<Self, NodeError> {
         validate_runtime_config(&config, options)?;
+        if options.allow_unverified_demo_events && verifier.is_some() {
+            return Err(NodeError::Configuration(
+                "development demo evidence and a trusted verifier cannot be enabled together".to_owned(),
+            ));
+        }
         let local_address = listener.local_addr()?;
         if !local_address.ip().is_loopback() {
             return Err(NodeError::Configuration(
@@ -148,6 +191,7 @@ impl NodeServer {
             Arc::new(storage),
             database_workers,
             options,
+            verifier,
         );
         let router = build_router(state.clone())?;
         Ok(Self {

@@ -27,10 +27,10 @@ session before asking the signer for a signature share.
    one Paillier decryption key and one `ShamirShare` into
    `CommitteeMemberState`. No production function accepts a committee secret or
    reconstructs one.
-2. `apply_committed_refresh` verifies the complete public distribution and
-   committed transfer, selects one member ciphertext by public member id,
-   decrypts only that ciphertext, and compares its public point to the Feldman
-   evaluation.
+2. `apply_committed_refresh` verifies the recipient share proof, complete public
+   distribution, and committed transfer, selects one member ciphertext by
+   public member id, decrypts only that ciphertext, and compares its public
+   point to the Feldman evaluation.
 3. The new scalar is computed with secp256k1 scalar subtraction. It is encoded
    immediately into a new zeroizing `ShamirShare` and replaces the old share
    only after the encrypted vault compare-and-swap succeeds.

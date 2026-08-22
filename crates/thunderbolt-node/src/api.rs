@@ -14,11 +14,11 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use thunderbolt_config::{AuthIdentity, Config, Environment, Network, NodeRole, TokenScope, TokenStore};
-use thunderbolt_protocol::{
-    ChannelEvent, ChannelId, ChannelSnapshot, Digest, ImplementationId, LedgerEntry, ParticipantId,
-    VerificationEvidence, PROTOCOL_VERSION,
+use thunderbolt_protocol::{ChannelId, ChannelSnapshot, LedgerEntry, PROTOCOL_VERSION};
+use thunderbolt_storage::{
+    IntegrityReport, SqliteStorage, StorageError, VerifiedAppendError, VerifiedAppendOutcome, DEFAULT_PAGE_LIMIT,
+    MAX_PAGE_LIMIT,
 };
-use thunderbolt_storage::{IntegrityReport, SqliteStorage, StorageError, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tower::limit::ConcurrencyLimitLayer;
@@ -26,11 +26,10 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::{DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer};
 use tracing::{error, info_span, Level};
 
-use crate::{NodeError, NodeOptions};
+use crate::verifier::{development_demo_evidence, verify_proposal};
+use crate::{NodeError, NodeOptions, ProposalVerifier, ProposalVerifierError};
 
 const API_VERSION: u16 = 1;
-const DEMO_ID: &str = "development-unverified-demo";
-
 #[derive(Clone)]
 pub(crate) struct AppState {
     config: Arc<Config>,
@@ -41,6 +40,7 @@ pub(crate) struct AppState {
     stop: CancellationToken,
     started_at: Instant,
     options: NodeOptions,
+    verifier: Option<Arc<dyn ProposalVerifier>>,
 }
 
 impl AppState {
@@ -50,6 +50,7 @@ impl AppState {
         storage: Arc<SqliteStorage>,
         database_workers: usize,
         options: NodeOptions,
+        verifier: Option<Arc<dyn ProposalVerifier>>,
     ) -> Self {
         Self {
             config,
@@ -60,6 +61,7 @@ impl AppState {
             stop: CancellationToken::new(),
             started_at: Instant::now(),
             options,
+            verifier,
         }
     }
 
@@ -89,6 +91,16 @@ impl AppState {
         F: FnOnce(&SqliteStorage) -> Result<T, StorageError> + Send + 'static,
         M: FnOnce(StorageError) -> ApiError + Send,
     {
+        self.database_task(operation, map_storage_error).await
+    }
+
+    async fn database_task<T, E, F, M>(&self, operation: F, map_error: M) -> Result<T, ApiError>
+    where
+        T: Send + 'static,
+        E: Send + 'static,
+        F: FnOnce(&SqliteStorage) -> Result<T, E> + Send + 'static,
+        M: FnOnce(E) -> ApiError + Send,
+    {
         let permit = self
             .database_slots
             .clone()
@@ -105,7 +117,25 @@ impl AppState {
                 error!(error = %join_error, "bounded database worker terminated");
                 ApiError::internal()
             })?
-            .map_err(map_storage_error)
+            .map_err(map_error)
+    }
+
+    async fn append_verified_proposal(&self, proposal: LedgerEntry) -> Result<VerifiedAppendOutcome, ApiError> {
+        let verifier = self.verifier.clone();
+        let development_demo = self.options.allow_unverified_demo_events;
+        self.database_task(
+            move |storage| {
+                storage.append_verified_proposal(&proposal, |context| {
+                    if development_demo {
+                        development_demo_evidence(context)
+                    } else {
+                        verify_proposal(context, verifier.as_deref())
+                    }
+                })
+            },
+            verified_append_error,
+        )
+        .await
     }
 }
 
@@ -271,7 +301,9 @@ async fn ready(State(state): State<AppState>) -> Response {
 async fn info(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<InfoResponse>, ApiError> {
     let _identity = authorize(&state, &headers, TokenScope::Read)?;
     let verification_mode = if state.options.allow_unverified_demo_events {
-        DEMO_ID
+        "development-unverified-demo"
+    } else if state.verifier.is_some() {
+        "trusted-invoice-transfer"
     } else {
         "verification-required-no-verifier-configured"
     };
@@ -383,7 +415,7 @@ async fn append_event(
 ) -> Result<(StatusCode, Json<AppendResponse>), ApiError> {
     let identity = authorize(&state, &headers, TokenScope::Write)?;
     let path_channel_id = parse_channel_id(&channel_id)?;
-    let Json(mut entry) = payload.map_err(|rejection| {
+    let Json(entry) = payload.map_err(|rejection| {
         if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
             ApiError::payload_too_large()
         } else {
@@ -406,11 +438,14 @@ async fn append_event(
             "the authenticated token id must match the ledger actor participant id".to_owned(),
         ));
     }
-    prepare_verification(&state, &mut entry)?;
+    if !entry.event.verification().is_empty() {
+        return Err(ApiError::unprocessable(
+            "client_verification_rejected",
+            "verification evidence must be produced by the transaction-scoped node verifier".to_owned(),
+        ));
+    }
 
-    let outcome = state
-        .database_with(move |storage| storage.append_entry(&entry), append_storage_error)
-        .await?;
+    let outcome = state.append_verified_proposal(entry).await?;
     let status = if outcome.replayed {
         StatusCode::OK
     } else {
@@ -489,46 +524,6 @@ fn json_rejection(rejection: JsonRejection) -> ApiError {
     }
 }
 
-fn prepare_verification(state: &AppState, entry: &mut LedgerEntry) -> Result<(), ApiError> {
-    if !entry.event.verification().is_empty() {
-        return Err(ApiError::unprocessable(
-            "client_verification_rejected",
-            "verification evidence must be produced by a trusted node verifier, not supplied by a client".to_owned(),
-        ));
-    }
-    if !state.options.allow_unverified_demo_events {
-        return Err(ApiError::unavailable(
-            "verification_unavailable",
-            "no production verifier is configured; unverified events are disabled".to_owned(),
-        ));
-    }
-
-    let verifier = ParticipantId::new(DEMO_ID).map_err(|_| ApiError::internal())?;
-    let implementation = ImplementationId::new(DEMO_ID).map_err(|_| ApiError::internal())?;
-    let evidence: Vec<VerificationEvidence> = entry
-        .event
-        .required_verifications()
-        .iter()
-        .copied()
-        .map(|kind| {
-            VerificationEvidence::verified(
-                kind,
-                verifier.clone(),
-                implementation.clone(),
-                Digest::ZERO,
-                entry.occurred_at_ms,
-            )
-        })
-        .collect();
-    match &mut entry.event {
-        ChannelEvent::Open(event) => event.verification = evidence,
-        ChannelEvent::Invoice(event) => event.verification = evidence,
-        ChannelEvent::Transfer(event) => event.verification = evidence,
-        ChannelEvent::Finalize(event) => event.verification = evidence,
-    }
-    Ok(())
-}
-
 fn authorize(state: &AppState, headers: &HeaderMap, required: TokenScope) -> Result<Option<AuthIdentity>, ApiError> {
     if !state.config.auth.enabled {
         return Ok(None);
@@ -558,16 +553,44 @@ fn authorize(state: &AppState, headers: &HeaderMap, required: TokenScope) -> Res
     Ok(Some(identity))
 }
 
-fn append_storage_error(error: StorageError) -> ApiError {
-    error!(error = %error, "ledger append rejected");
+fn verified_append_error(error: VerifiedAppendError<ProposalVerifierError>) -> ApiError {
+    error!(error = %error, "verified ledger append rejected");
     match error {
-        StorageError::Protocol(_) | StorageError::InvalidInput(_) | StorageError::SequenceConflict { .. } => {
-            ApiError::conflict(
+        VerifiedAppendError::Storage(storage_error) => match storage_error {
+            StorageError::ClientVerificationEvidence => ApiError::unprocessable(
+                "client_verification_rejected",
+                "client-supplied verification evidence is forbidden".to_owned(),
+            ),
+            StorageError::VerifiedRequestConflict(_) => ApiError::conflict(
+                "idempotency_conflict",
+                "the channel idempotency key is already bound to a different proposal".to_owned(),
+            ),
+            StorageError::Protocol(_)
+            | StorageError::InvalidInput(_)
+            | StorageError::PendingInvoiceReference { .. }
+            | StorageError::SequenceConflict { .. } => ApiError::conflict(
                 "ledger_transition_rejected",
-                "the event conflicts with the durable channel lifecycle".to_owned(),
-            )
-        }
-        _ => ApiError::internal(),
+                "the proposal conflicts with the durable channel lifecycle".to_owned(),
+            ),
+            _ => ApiError::internal(),
+        },
+        VerifiedAppendError::Verification(verification_error) => match verification_error {
+            ProposalVerifierError::Unavailable { .. } | ProposalVerifierError::UnsupportedEvent { .. } => {
+                ApiError::unavailable(
+                    "verification_unavailable",
+                    "no trusted verifier is available for this event type".to_owned(),
+                )
+            }
+            ProposalVerifierError::MissingContext { .. } => ApiError::conflict(
+                "verification_context_unavailable",
+                "authoritative ledger context is unavailable for this proposal".to_owned(),
+            ),
+            ProposalVerifierError::Rejected { .. } | ProposalVerifierError::Trusted(_) => ApiError::unprocessable(
+                "verification_failed",
+                "trusted verification rejected the proposal".to_owned(),
+            ),
+            ProposalVerifierError::InvalidEvidence { .. } => ApiError::internal(),
+        },
     }
 }
 

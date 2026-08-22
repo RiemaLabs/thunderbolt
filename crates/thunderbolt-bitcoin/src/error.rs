@@ -52,6 +52,9 @@ impl TransportError {
 /// Pure funding or closing-transaction validation failures.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ValidationError {
+    /// The expected funding policy is unsafe or internally inconsistent.
+    #[error("invalid funding expectation: {0}")]
+    InvalidFundingExpectation(&'static str),
     /// The observed outpoint is not the one authorized by the protocol state.
     #[error("funding observation is for a different outpoint")]
     FundingOutpointMismatch,

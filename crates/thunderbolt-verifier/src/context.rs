@@ -4,13 +4,9 @@ use bitcoin::Network;
 use thunderbolt_protocol::{ImplementationId, ParticipantId};
 use thunderbolt_wire::{DeploymentId, PaillierPublicKeyHex, PointHex, MAX_COMMITTEE_MEMBERS, MAX_DEPLOYMENT_ID_BYTES};
 
-use crate::{Result, VerifierError};
+pub use thunderbolt_wire::RECIPIENT_SHARE_MEMBER_ID;
 
-/// Reserved share identifier for the recipient proof in a threshold invoice.
-///
-/// Committee distributions are limited to 256 members. Reserving `u32::MAX`
-/// keeps the recipient proof domain visibly separate from committee shares.
-pub const RECIPIENT_SHARE_MEMBER_ID: u32 = u32::MAX;
+use crate::{Result, VerifierError};
 
 /// Exact public committee material trusted for one deployment epoch.
 #[derive(Clone, Debug, PartialEq, Eq)]

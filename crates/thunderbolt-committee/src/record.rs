@@ -14,7 +14,7 @@ use crate::{
 };
 
 const VAULT_MAGIC: &[u8; 16] = b"THB-COMMITTEE\0\0\0";
-const VAULT_FORMAT_VERSION: u16 = 1;
+const VAULT_FORMAT_VERSION: u16 = 2;
 const MAX_DECRYPTION_KEY_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_EVENT_HISTORY: usize = 500_000;
 pub(crate) const MAX_SIGNING_HISTORY: usize = 500_000;
@@ -23,6 +23,7 @@ pub(crate) const MAX_SIGNING_HISTORY: usize = 500_000;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RefreshEventBinding {
     event_id: RefreshEventId,
+    recipient_share_digest: [u8; 32],
     threshold_refresh_digest: [u8; 32],
     transfer_digest: [u8; 32],
     invoice_entry_hash: EntryHash,
@@ -35,6 +36,7 @@ pub struct RefreshEventBinding {
 impl RefreshEventBinding {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
+        recipient_share_digest: [u8; 32],
         threshold_refresh_digest: [u8; 32],
         transfer_digest: [u8; 32],
         invoice_entry_hash: EntryHash,
@@ -44,7 +46,8 @@ impl RefreshEventBinding {
         transfer_step: u64,
     ) -> Self {
         let mut hasher = Sha256::new();
-        append_bytes(&mut hasher, b"bitcoin-thunderbolt/committee-refresh-event/v1");
+        append_bytes(&mut hasher, b"bitcoin-thunderbolt/committee-refresh-event/v2");
+        hasher.update(recipient_share_digest);
         hasher.update(threshold_refresh_digest);
         hasher.update(transfer_digest);
         hasher.update(invoice_entry_hash.as_bytes());
@@ -54,6 +57,7 @@ impl RefreshEventBinding {
         let event_id = RefreshEventId::from_bytes(hasher.finalize().into());
         Self {
             event_id,
+            recipient_share_digest,
             threshold_refresh_digest,
             transfer_digest,
             invoice_entry_hash,
@@ -68,6 +72,12 @@ impl RefreshEventBinding {
     #[must_use]
     pub const fn event_id(&self) -> RefreshEventId {
         self.event_id
+    }
+
+    /// Returns the exact recipient-share wire digest.
+    #[must_use]
+    pub const fn recipient_share_digest(&self) -> &[u8; 32] {
+        &self.recipient_share_digest
     }
 
     /// Returns the exact threshold-refresh wire digest.
@@ -394,11 +404,12 @@ fn acknowledgement_digest(
     updated_share_commitment: Point,
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    append_bytes(&mut hasher, b"bitcoin-thunderbolt/committee-update-acknowledgement/v1");
+    append_bytes(&mut hasher, b"bitcoin-thunderbolt/committee-update-acknowledgement/v2");
     hasher.update(descriptor_id.as_bytes());
     hasher.update(epoch.get().to_be_bytes());
     hasher.update(member_id.get().to_be_bytes());
     hasher.update(binding.event_id.as_bytes());
+    hasher.update(binding.recipient_share_digest);
     hasher.update(binding.threshold_refresh_digest);
     hasher.update(binding.transfer_digest);
     hasher.update(binding.invoice_entry_hash.as_bytes());
@@ -436,6 +447,7 @@ fn decode_pending(cursor: &mut Cursor<'_>) -> Result<Option<PendingRefresh>> {
 
 fn encode_binding(output: &mut Vec<u8>, binding: &RefreshEventBinding) {
     output.extend_from_slice(binding.event_id.as_bytes());
+    output.extend_from_slice(&binding.recipient_share_digest);
     output.extend_from_slice(&binding.threshold_refresh_digest);
     output.extend_from_slice(&binding.transfer_digest);
     output.extend_from_slice(binding.invoice_entry_hash.as_bytes());
@@ -447,6 +459,7 @@ fn encode_binding(output: &mut Vec<u8>, binding: &RefreshEventBinding) {
 
 fn decode_binding(cursor: &mut Cursor<'_>) -> Result<RefreshEventBinding> {
     let stored_event_id = RefreshEventId::from_bytes(cursor.array_32()?);
+    let recipient_share_digest = cursor.array_32()?;
     let threshold_refresh_digest = cursor.array_32()?;
     let transfer_digest = cursor.array_32()?;
     let invoice_entry_hash = EntryHash::from_bytes(cursor.array_32()?);
@@ -455,6 +468,7 @@ fn decode_binding(cursor: &mut Cursor<'_>) -> Result<RefreshEventBinding> {
     let transfer_sequence = cursor.u64()?;
     let transfer_step = cursor.u64()?;
     let binding = RefreshEventBinding::new(
+        recipient_share_digest,
         threshold_refresh_digest,
         transfer_digest,
         invoice_entry_hash,

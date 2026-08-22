@@ -12,7 +12,7 @@ use thunderbolt_wire::{
     from_json_slice, to_json_vec, BindingContext, CanonicalDigest, CanonicalInteger, ChannelId, HexBytes,
     InvoiceEnvelopeV1, PointHex, PublicMessageV1, ShareEnvelopeV1, ShareStatementV1, ThresholdEnvelopeV1,
     TransferEnvelopeV1, ValidateWire, WireError, MAX_DEPLOYMENT_ID_BYTES, MAX_WIRE_MESSAGE_BYTES,
-    PAILLIER_MODULUS_BYTES,
+    PAILLIER_MODULUS_BYTES, RECIPIENT_SHARE_MEMBER_ID,
 };
 
 fn scalar(value: u8) -> Scalar {
@@ -138,6 +138,9 @@ fn public_messages_round_trip_verify_and_reject_tampering() {
     let threshold_json = to_json_vec(&threshold).expect("threshold JSON");
     let threshold_roundtrip: ThresholdEnvelopeV1 = from_json_slice(&threshold_json).expect("threshold roundtrip");
     assert_eq!(threshold_roundtrip, threshold);
+    let mut reserved_member = threshold.clone();
+    reserved_member.distribution.encrypted_shares[1].member_id = RECIPIENT_SHARE_MEMBER_ID;
+    assert!(reserved_member.validate_wire().is_err());
 
     let transfer_binding =
         BindingContext::transfer(Network::Regtest, b"local-deployment", 7, b"channel-42", b"invoice-9", 1)

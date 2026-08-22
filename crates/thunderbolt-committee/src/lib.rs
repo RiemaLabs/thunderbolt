@@ -40,5 +40,7 @@ pub use vault::{
     CommitteeVault, VaultEntry, VaultPlaintext, VaultPlaintextError, VaultStoreError, MAX_VAULT_PLAINTEXT_BYTES,
 };
 
+pub use thunderbolt_wire::RECIPIENT_SHARE_MEMBER_ID;
+
 #[cfg(test)]
 mod tests;

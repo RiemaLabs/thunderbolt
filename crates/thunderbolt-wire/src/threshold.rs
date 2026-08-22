@@ -16,6 +16,10 @@ use crate::share::ShareProofV1;
 use crate::{Result, WireError};
 
 pub const MAX_COMMITTEE_MEMBERS: usize = 256;
+/// Reserved share identifier for the Recipient proof in a threshold Invoice.
+///
+/// Committee rosters must never assign this identifier to an operator.
+pub const RECIPIENT_SHARE_MEMBER_ID: u32 = u32::MAX;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -28,10 +32,10 @@ pub struct ThresholdEncryptedShareV1 {
 
 impl ThresholdEncryptedShareV1 {
     pub fn from_core(share: &ThresholdEncryptedShare) -> Result<Self> {
-        if share.member_id == 0 {
+        if share.member_id == 0 || share.member_id == RECIPIENT_SHARE_MEMBER_ID {
             return Err(WireError::InvalidMessage {
                 message: "threshold refresh",
-                reason: "committee member identifiers must be positive",
+                reason: "committee member identifiers must be positive and not reserved",
             });
         }
         let wire = Self {
@@ -45,10 +49,10 @@ impl ThresholdEncryptedShareV1 {
     }
 
     pub fn to_core(&self) -> Result<ThresholdEncryptedShare> {
-        if self.member_id == 0 {
+        if self.member_id == 0 || self.member_id == RECIPIENT_SHARE_MEMBER_ID {
             return Err(WireError::InvalidMessage {
                 message: "threshold refresh",
-                reason: "committee member identifiers must be positive",
+                reason: "committee member identifiers must be positive and not reserved",
             });
         }
         Ok(ThresholdEncryptedShare {
@@ -168,10 +172,13 @@ impl ThresholdDistributionV1 {
         }
         let mut previous = None;
         for share in &self.encrypted_shares {
-            if share.member_id == 0 || previous.is_some_and(|id| share.member_id <= id) {
+            if share.member_id == 0
+                || share.member_id == RECIPIENT_SHARE_MEMBER_ID
+                || previous.is_some_and(|id| share.member_id <= id)
+            {
                 return Err(WireError::InvalidMessage {
                     message: "threshold refresh",
-                    reason: "encrypted shares must have unique positive member ids in ascending order",
+                    reason: "encrypted shares must have unique non-reserved positive member ids in ascending order",
                 });
             }
             previous = Some(share.member_id);

@@ -6,7 +6,7 @@ use crate::{CommitteeEpoch, CommitteeMemberId, RefreshEventId, SignerSessionId};
 #[derive(Debug, Error)]
 pub enum CommitteeError {
     /// Committee member zero is reserved and cannot be provisioned.
-    #[error("committee member identifiers must be positive")]
+    #[error("committee member identifiers must be positive and must not use the reserved recipient identifier")]
     InvalidMemberId,
 
     /// The public committee descriptor has an invalid threshold or member set.
@@ -50,6 +50,22 @@ pub enum CommitteeError {
     /// The wire distribution does not select the exact provisioned member set.
     #[error("threshold refresh does not target the exact provisioned committee")]
     WrongMemberSet,
+
+    /// The recipient proof does not use the protocol-reserved share identifier.
+    #[error("recipient share proof must use the reserved recipient identifier")]
+    WrongRecipientShareId,
+
+    /// The recipient share and committee distribution use different bindings.
+    #[error("recipient share proof binding does not match the threshold distribution")]
+    RecipientBindingMismatch,
+
+    /// The recipient share proof does not open the distributed public delta.
+    #[error("recipient share proof does not match the threshold distribution anchor and delta")]
+    RecipientDeltaMismatch,
+
+    /// The committed transfer does not consume the proven recipient ciphertext.
+    #[error("committed transfer does not consume the proven recipient ciphertext and key")]
+    RecipientTransferMismatch,
 
     /// A transfer wire message does not consume the same invoice/distribution.
     #[error("committed transfer does not match the threshold-refresh invoice")]

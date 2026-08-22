@@ -1,4 +1,6 @@
+use std::convert::Infallible;
 use std::fs;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Barrier};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -10,7 +12,10 @@ use thunderbolt_protocol::{
     EventKind, IdempotencyKey, ImplementationId, InvoiceEvent, InvoiceId, LedgerEntry, OpenEvent, ParticipantId,
     ProtocolError, ProtocolLimits, TransferEvent, VerificationEvidence, VerificationKind, MAX_ARTIFACT_BYTES,
 };
-use thunderbolt_storage::{SqliteStorage, StorageError, StorageOptions, MAX_PAGE_BYTES, MAX_PAGE_LIMIT};
+use thunderbolt_storage::{
+    ProposalDigest, SqliteStorage, StorageError, StorageOptions, VerifiedAppendError, CURRENT_SCHEMA_VERSION,
+    MAX_PAGE_BYTES, MAX_PAGE_LIMIT,
+};
 
 fn participant(value: &str) -> ParticipantId {
     ParticipantId::new(value).expect("valid test participant")
@@ -133,6 +138,25 @@ fn transfer_entry(snapshot: &ChannelSnapshot, invoice: &str, recipient_name: &st
             verification: required_evidence(EventKind::Transfer, at),
         }),
     )
+}
+
+fn without_evidence(mut entry: LedgerEntry) -> LedgerEntry {
+    match &mut entry.event {
+        ChannelEvent::Open(event) => event.verification.clear(),
+        ChannelEvent::Invoice(event) => event.verification.clear(),
+        ChannelEvent::Transfer(event) => event.verification.clear(),
+        ChannelEvent::Finalize(event) => event.verification.clear(),
+    }
+    entry
+}
+
+fn accept_proposal(
+    context: thunderbolt_storage::VerifiedProposalContext<'_>,
+) -> Result<Vec<VerificationEvidence>, Infallible> {
+    Ok(required_evidence(
+        context.proposal().event.kind(),
+        context.ledger_time_ms(),
+    ))
 }
 
 #[test]
@@ -396,6 +420,386 @@ fn trusted_ledger_time_is_sampled_after_waiting_for_the_writer_lock() {
 }
 
 #[test]
+fn verified_append_persists_evidence_snapshot_and_request_mapping_atomically() {
+    let directory = TempDir::new().expect("temp dir");
+    let path = directory.path().join("verified.db");
+    let storage = SqliteStorage::open(&path).expect("open storage");
+    let proposal = without_evidence(open_entry(channel(20), 10));
+    let expected_digest = ProposalDigest::from_proposal(&proposal).expect("proposal digest");
+    let observed_time = Arc::new(std::sync::Mutex::new(None));
+    let callback_time = Arc::clone(&observed_time);
+
+    let outcome = storage
+        .append_verified_proposal(&proposal, |context| {
+            assert_eq!(context.proposal(), &proposal);
+            assert!(context.snapshot().is_none());
+            assert!(context.pending_invoice_head().is_none());
+            *callback_time.lock().expect("time lock") = Some(context.ledger_time_ms());
+            accept_proposal(context)
+        })
+        .expect("verified append");
+    let ledger_time = observed_time.lock().expect("time lock").expect("callback time");
+    assert_eq!(outcome.proposal_digest, expected_digest);
+    assert_eq!(outcome.snapshot.opened_at_ms, ledger_time);
+    assert_eq!(outcome.snapshot.last_occurred_at_ms, ledger_time);
+    assert!(!outcome.replayed);
+
+    let committed = storage
+        .get_entry(&proposal.channel_id, 0)
+        .expect("read committed entry")
+        .expect("committed entry");
+    assert_eq!(committed.event.verification().len(), 3);
+    assert!(committed
+        .event
+        .verification()
+        .iter()
+        .all(|evidence| evidence.verified_at_ms == ledger_time));
+    let connection = Connection::open(&path).expect("raw connection");
+    let counts = (
+        connection
+            .query_row("SELECT count(*) FROM ledger_entries", [], |row| row.get::<_, i64>(0))
+            .expect("ledger count"),
+        connection
+            .query_row("SELECT count(*) FROM verification_evidence", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("evidence count"),
+        connection
+            .query_row("SELECT count(*) FROM channel_snapshots", [], |row| row.get::<_, i64>(0))
+            .expect("snapshot count"),
+        connection
+            .query_row("SELECT count(*) FROM verified_requests", [], |row| row.get::<_, i64>(0))
+            .expect("request count"),
+    );
+    assert_eq!(counts, (1, 3, 1, 1));
+    let request_identity: (String, String) = connection
+        .query_row("SELECT actor_id, idempotency_key FROM verified_requests", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .expect("request identity");
+    assert_eq!(request_identity, ("holder:0".to_string(), "open-0".to_string()));
+    storage.integrity_check().expect("verified records are consistent");
+}
+
+#[test]
+fn verified_append_retry_uses_stable_digest_without_reinvoking_verifier() {
+    let directory = TempDir::new().expect("temp dir");
+    let path = directory.path().join("replay.db");
+    let storage = SqliteStorage::open(&path).expect("open storage");
+    let proposal = without_evidence(open_entry(channel(21), 10));
+    let first = storage
+        .append_verified_proposal(&proposal, accept_proposal)
+        .expect("first append");
+    drop(storage);
+    let storage = SqliteStorage::open(&path).expect("reopen storage");
+    let replay = storage
+        .append_verified_proposal(&proposal, |_| -> Result<Vec<VerificationEvidence>, Infallible> {
+            panic!("an exact committed proposal must not be verified twice")
+        })
+        .expect("idempotent replay");
+
+    assert!(replay.replayed);
+    assert_eq!(replay.proposal_digest, first.proposal_digest);
+    assert_eq!(replay.entry_hash, first.entry_hash);
+    assert_eq!(replay.snapshot, first.snapshot);
+}
+
+#[test]
+fn conflicting_channel_request_key_is_rejected_before_verification() {
+    let directory = TempDir::new().expect("temp dir");
+    let storage = SqliteStorage::open(directory.path().join("request-conflict.db")).expect("open storage");
+    let proposal = without_evidence(open_entry(channel(29), 10));
+    storage
+        .append_verified_proposal(&proposal, accept_proposal)
+        .expect("first append");
+    let mut conflict = proposal;
+    conflict.occurred_at_ms += 1;
+    let invoked = AtomicBool::new(false);
+
+    let result = storage.append_verified_proposal(&conflict, |_| {
+        invoked.store(true, Ordering::SeqCst);
+        Ok::<_, Infallible>(Vec::new())
+    });
+    assert!(matches!(
+        result,
+        Err(VerifiedAppendError::Storage(StorageError::VerifiedRequestConflict(_)))
+    ));
+    assert!(!invoked.load(Ordering::SeqCst));
+}
+
+#[test]
+fn client_evidence_is_rejected_before_the_verifier_callback() {
+    let directory = TempDir::new().expect("temp dir");
+    let storage = SqliteStorage::open(directory.path().join("client-evidence.db")).expect("open storage");
+    let proposal = open_entry(channel(22), 10);
+    let invoked = AtomicBool::new(false);
+
+    let result = storage.append_verified_proposal(&proposal, |_| {
+        invoked.store(true, Ordering::SeqCst);
+        Ok::<_, Infallible>(Vec::new())
+    });
+    assert!(matches!(
+        result,
+        Err(VerifiedAppendError::Storage(StorageError::ClientVerificationEvidence))
+    ));
+    assert!(!invoked.load(Ordering::SeqCst));
+}
+
+#[test]
+fn oversized_verifier_evidence_is_rejected_before_entry_preparation() {
+    let directory = TempDir::new().expect("temp dir");
+    let path = directory.path().join("oversized-evidence.db");
+    let storage = SqliteStorage::open(&path).expect("open storage");
+    let proposal = without_evidence(open_entry(channel(30), 10));
+    let limit = ProtocolLimits::default().max_verifications_per_event;
+
+    let result = storage.append_verified_proposal(&proposal, |context| {
+        Ok::<_, Infallible>(vec![
+            evidence(
+                VerificationKind::FundingTransaction,
+                context.ledger_time_ms(),
+            );
+            limit + 1
+        ])
+    });
+    assert!(matches!(
+        result,
+        Err(VerifiedAppendError::Storage(
+            StorageError::VerifierEvidenceLimitExceeded {
+                limit: found_limit,
+                found,
+            }
+        )) if found_limit == limit && found == limit + 1
+    ));
+    let connection = Connection::open(&path).expect("raw connection");
+    for table in [
+        "ledger_entries",
+        "verification_evidence",
+        "channel_snapshots",
+        "verified_requests",
+    ] {
+        let count: i64 = connection
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))
+            .expect("table count");
+        assert_eq!(count, 0, "{table} must remain empty");
+    }
+    drop(connection);
+    storage
+        .append_verified_proposal(&proposal, accept_proposal)
+        .expect("same proposal remains retryable");
+}
+
+#[test]
+fn verifier_rejection_rolls_back_and_leaves_the_digest_retryable() {
+    let directory = TempDir::new().expect("temp dir");
+    let path = directory.path().join("verifier-rollback.db");
+    let storage = SqliteStorage::open(&path).expect("open storage");
+    let proposal = without_evidence(open_entry(channel(23), 10));
+
+    let rejected = storage.append_verified_proposal(&proposal, |_| {
+        Err::<Vec<VerificationEvidence>, _>("rejected by test verifier")
+    });
+    assert!(matches!(
+        rejected,
+        Err(VerifiedAppendError::Verification("rejected by test verifier"))
+    ));
+    let connection = Connection::open(&path).expect("raw connection");
+    for table in [
+        "ledger_entries",
+        "verification_evidence",
+        "channel_snapshots",
+        "verified_requests",
+    ] {
+        let count: i64 = connection
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))
+            .expect("table count");
+        assert_eq!(count, 0, "{table} must roll back");
+    }
+    drop(connection);
+
+    let retry = storage
+        .append_verified_proposal(&proposal, accept_proposal)
+        .expect("retry after verifier rejection");
+    assert!(!retry.replayed);
+}
+
+#[test]
+fn evidence_persistence_failure_rolls_back_every_verified_append_record() {
+    let directory = TempDir::new().expect("temp dir");
+    let path = directory.path().join("evidence-rollback.db");
+    let storage = SqliteStorage::open(&path).expect("open storage");
+    let connection = Connection::open(&path).expect("raw connection");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER test_reject_evidence
+             BEFORE INSERT ON verification_evidence
+             BEGIN SELECT RAISE(ABORT, 'injected evidence failure'); END;",
+        )
+        .expect("install failure trigger");
+    let proposal = without_evidence(open_entry(channel(24), 10));
+
+    assert!(matches!(
+        storage.append_verified_proposal(&proposal, accept_proposal),
+        Err(VerifiedAppendError::Storage(StorageError::Database(_)))
+    ));
+    for table in [
+        "ledger_entries",
+        "verification_evidence",
+        "channel_snapshots",
+        "verified_requests",
+    ] {
+        let count: i64 = connection
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))
+            .expect("table count");
+        assert_eq!(count, 0, "{table} must roll back");
+    }
+    connection
+        .execute_batch("DROP TRIGGER test_reject_evidence")
+        .expect("drop failure trigger");
+    storage
+        .append_verified_proposal(&proposal, accept_proposal)
+        .expect("append after rollback");
+}
+
+#[test]
+fn request_mapping_failure_rolls_back_entry_evidence_and_snapshot() {
+    let directory = TempDir::new().expect("temp dir");
+    let path = directory.path().join("request-rollback.db");
+    let storage = SqliteStorage::open(&path).expect("open storage");
+    let connection = Connection::open(&path).expect("raw connection");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER test_reject_request_mapping
+             BEFORE INSERT ON verified_requests
+             BEGIN SELECT RAISE(ABORT, 'injected request mapping failure'); END;",
+        )
+        .expect("install failure trigger");
+    let proposal = without_evidence(open_entry(channel(28), 10));
+
+    assert!(matches!(
+        storage.append_verified_proposal(&proposal, accept_proposal),
+        Err(VerifiedAppendError::Storage(StorageError::Database(_)))
+    ));
+    for table in [
+        "ledger_entries",
+        "verification_evidence",
+        "channel_snapshots",
+        "verified_requests",
+    ] {
+        let count: i64 = connection
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))
+            .expect("table count");
+        assert_eq!(count, 0, "{table} must roll back");
+    }
+}
+
+#[test]
+fn concurrent_verified_retries_invoke_the_verifier_exactly_once() {
+    let directory = TempDir::new().expect("temp dir");
+    let path = directory.path().join("verified-race.db");
+    drop(SqliteStorage::open(&path).expect("initialize storage"));
+    let proposal = Arc::new(without_evidence(open_entry(channel(25), 10)));
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let barrier = Arc::new(Barrier::new(3));
+    let mut handles = Vec::new();
+    for _ in 0..2 {
+        let path = path.clone();
+        let proposal = Arc::clone(&proposal);
+        let invocations = Arc::clone(&invocations);
+        let barrier = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            let storage = SqliteStorage::open(path).expect("open concurrent storage");
+            barrier.wait();
+            storage.append_verified_proposal(&proposal, |context| {
+                invocations.fetch_add(1, Ordering::SeqCst);
+                accept_proposal(context)
+            })
+        }));
+    }
+    barrier.wait();
+    let outcomes: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("join writer").expect("verified retry"))
+        .collect();
+
+    assert_eq!(invocations.load(Ordering::SeqCst), 1);
+    assert_eq!(outcomes.iter().filter(|outcome| outcome.replayed).count(), 1);
+    assert_eq!(outcomes[0].proposal_digest, outcomes[1].proposal_digest);
+    assert_eq!(outcomes[0].entry_hash, outcomes[1].entry_hash);
+    assert_eq!(outcomes[0].snapshot, outcomes[1].snapshot);
+}
+
+#[test]
+fn transfer_callback_receives_the_exact_pending_invoice_head() {
+    let directory = TempDir::new().expect("temp dir");
+    let storage = SqliteStorage::open(directory.path().join("pending-head.db")).expect("open storage");
+    let opened = storage
+        .append_entry(&open_entry(channel(26), 10))
+        .expect("open channel");
+    let invoice_proposal = without_evidence(invoice_entry(
+        &opened.snapshot,
+        "invoice-head",
+        "holder:next",
+        "invoice-head-request",
+        20,
+    ));
+    let invoiced = storage
+        .append_verified_proposal(&invoice_proposal, accept_proposal)
+        .expect("append invoice");
+    let transfer_proposal = without_evidence(transfer_entry(&invoiced.snapshot, "invoice-head", "holder:next", 30));
+
+    let transferred = storage
+        .append_verified_proposal(&transfer_proposal, |context| {
+            let snapshot = context.snapshot().expect("authoritative snapshot");
+            let invoice_head = context.pending_invoice_head().expect("pending invoice head");
+            assert_eq!(invoice_head.channel_id, snapshot.channel_id);
+            assert_eq!(invoice_head.sequence, snapshot.last_sequence);
+            assert_eq!(invoice_head.entry_hash(), snapshot.head_hash);
+            let ChannelEvent::Invoice(invoice) = &invoice_head.event else {
+                panic!("pending head must be an invoice")
+            };
+            assert_eq!(invoice.invoice_id.as_str(), "invoice-head");
+            accept_proposal(context)
+        })
+        .expect("append transfer");
+    assert_eq!(transferred.snapshot.current_holder, participant("holder:next"));
+    assert!(transferred.snapshot.pending_invoice.is_none());
+    storage.integrity_check().expect("integrity after transfer");
+}
+
+#[test]
+fn verified_ledger_time_is_sampled_after_waiting_for_the_writer_lock() {
+    let directory = TempDir::new().expect("temp dir");
+    let path = directory.path().join("verified-ledger-time.db");
+    let storage = Arc::new(SqliteStorage::open(&path).expect("open storage"));
+    let blocker = Connection::open(&path).expect("blocking connection");
+    blocker.execute_batch("BEGIN IMMEDIATE").expect("hold writer lock");
+    let proposal = without_evidence(open_entry(channel(27), 10));
+    let (time_sender, time_receiver) = mpsc::channel();
+    let append_storage = Arc::clone(&storage);
+    let handle = thread::spawn(move || {
+        append_storage.append_verified_proposal(&proposal, |context| {
+            time_sender.send(context.ledger_time_ms()).expect("send callback time");
+            accept_proposal(context)
+        })
+    });
+    thread::sleep(Duration::from_millis(75));
+    let released_at_ms = u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_millis(),
+    )
+    .expect("timestamp fits u64");
+    blocker.execute_batch("COMMIT").expect("release writer lock");
+
+    let outcome = handle.join().expect("join append").expect("append after wait");
+    let callback_time = time_receiver.recv().expect("callback time");
+    assert!(callback_time >= released_at_ms);
+    assert_eq!(outcome.snapshot.opened_at_ms, callback_time);
+}
+
+#[test]
 fn simultaneous_first_open_applies_the_initial_migration_once() {
     let directory = TempDir::new().expect("temp dir");
     for attempt in 0..12 {
@@ -418,8 +822,81 @@ fn simultaneous_first_open_applies_the_initial_migration_once() {
         let migrations: i64 = connection
             .query_row("SELECT count(*) FROM schema_migrations", [], |row| row.get(0))
             .expect("count migrations");
-        assert_eq!(migrations, 1);
+        assert_eq!(migrations, CURRENT_SCHEMA_VERSION);
     }
+}
+
+#[test]
+fn version_one_database_is_upgraded_to_verified_append_schema() {
+    let directory = TempDir::new().expect("temp dir");
+    let path = directory.path().join("upgrade-v1.db");
+    drop(SqliteStorage::open(&path).expect("create current database"));
+    let connection = Connection::open(&path).expect("raw connection");
+    connection
+        .execute_batch(
+            "DROP TABLE verified_requests;
+             DROP TABLE verification_evidence;
+             DELETE FROM schema_migrations WHERE version = 2;
+             PRAGMA user_version = 1;",
+        )
+        .expect("construct version-one fixture");
+    drop(connection);
+
+    drop(SqliteStorage::open(&path).expect("upgrade version-one database"));
+    let connection = Connection::open(&path).expect("inspect upgraded database");
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("schema version");
+    let migrations: i64 = connection
+        .query_row("SELECT count(*) FROM schema_migrations", [], |row| row.get(0))
+        .expect("migration count");
+    let verified_tables: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM sqlite_schema
+             WHERE type = 'table' AND name IN ('verified_requests', 'verification_evidence')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("verified table count");
+    assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    assert_eq!(migrations, CURRENT_SCHEMA_VERSION);
+    assert_eq!(verified_tables, 2);
+}
+
+#[test]
+fn upgraded_version_one_request_key_fails_before_verification() {
+    let directory = TempDir::new().expect("temp dir");
+    let path = directory.path().join("upgrade-v1-request.db");
+    let imported_entry = open_entry(channel(31), 10);
+    let storage = SqliteStorage::open(&path).expect("create current database");
+    storage.append_entry(&imported_entry).expect("append imported entry");
+    drop(storage);
+
+    let connection = Connection::open(&path).expect("raw connection");
+    connection
+        .execute_batch(
+            "DROP TABLE verified_requests;
+             DROP TABLE verification_evidence;
+             DELETE FROM schema_migrations WHERE version = 2;
+             PRAGMA user_version = 1;",
+        )
+        .expect("construct populated version-one fixture");
+    drop(connection);
+
+    let storage = SqliteStorage::open(&path).expect("upgrade populated version-one database");
+    let proposal = without_evidence(imported_entry);
+    let invoked = AtomicBool::new(false);
+    let result = storage.append_verified_proposal(&proposal, |_| {
+        invoked.store(true, Ordering::SeqCst);
+        Ok::<_, Infallible>(Vec::new())
+    });
+    assert!(matches!(
+        result,
+        Err(VerifiedAppendError::Storage(
+            StorageError::MissingVerifiedRequestMapping
+        ))
+    ));
+    assert!(!invoked.load(Ordering::SeqCst));
 }
 
 #[test]

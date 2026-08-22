@@ -9,9 +9,14 @@ use secp::Scalar;
 use thunderbolt_core::paillier::{add_ciphertexts, encrypt_plaintext, random_nonce_in_group};
 use thunderbolt_core::threshold::{create_threshold_refresh_distribution, ThresholdMemberPublicKey};
 use thunderbolt_core::zkp::types::scalar_to_big_number;
-use thunderbolt_core::zkp::{prove_transfer, TransferStatement, TransferWitness};
+use thunderbolt_core::zkp::{
+    prove_share_encryption, prove_transfer, ShareEncryptionStatement, ShareEncryptionWitness, TransferStatement,
+    TransferWitness,
+};
 use thunderbolt_protocol::EntryHash;
-use thunderbolt_wire::{BindingContext, CanonicalDigest, PointHex, ThresholdEnvelopeV1, TransferEnvelopeV1};
+use thunderbolt_wire::{
+    BindingContext, CanonicalDigest, PointHex, ShareEnvelopeV1, ThresholdEnvelopeV1, TransferEnvelopeV1,
+};
 
 use crate::insecure_regtest::dealer_bootstrap;
 use crate::*;
@@ -22,6 +27,8 @@ static FIXTURE: LazyLock<std::result::Result<TestFixture, String>> =
 struct TestFixture {
     descriptor: CommitteeDescriptor,
     secrets: Vec<MemberSecretBytes>,
+    recipient_share: ShareEnvelopeV1,
+    mismatched_recipient_share: ShareEnvelopeV1,
     threshold_refresh: ThresholdEnvelopeV1,
     transfer: TransferEnvelopeV1,
     commitment: CommittedTransfer,
@@ -177,12 +184,49 @@ fn build_fixture() -> std::result::Result<TestFixture, Box<dyn Error + Send + Sy
         refresh,
         &recipients,
     )?;
-    let threshold_refresh = ThresholdEnvelopeV1::from_core(invoice_binding, &distribution)?;
+    let threshold_refresh = ThresholdEnvelopeV1::from_core(invoice_binding.clone(), &distribution)?;
 
     let bob_secret_key = DecryptionKey::random().ok_or_else(|| TestError("Bob key generation failed".to_owned()))?;
     let bob_key = EncryptionKey::from(&bob_secret_key);
     let invoice_nonce = random_nonce_in_group(&bob_key);
     let invoice_ciphertext = encrypt_plaintext(&bob_key, &scalar_to_big_number(refresh), &invoice_nonce)?;
+    let recipient_statement = ShareEncryptionStatement {
+        context: invoice_binding.proof_context()?,
+        anchor_base,
+        recipient_key: bob_key.clone(),
+        member_id: RECIPIENT_SHARE_MEMBER_ID,
+        committed_point: distribution.delta,
+        ciphertext: invoice_ciphertext.clone(),
+    };
+    let recipient_proof = prove_share_encryption(
+        &recipient_statement,
+        &ShareEncryptionWitness {
+            secret: refresh,
+            nonce: invoice_nonce,
+        },
+    )?;
+    let recipient_share = ShareEnvelopeV1::from_core(invoice_binding.clone(), &recipient_statement, &recipient_proof)?;
+
+    let wrong_refresh = scalar(6)?;
+    let wrong_nonce = random_nonce_in_group(&bob_key);
+    let wrong_ciphertext = encrypt_plaintext(&bob_key, &scalar_to_big_number(wrong_refresh), &wrong_nonce)?;
+    let wrong_statement = ShareEncryptionStatement {
+        context: invoice_binding.proof_context()?,
+        anchor_base,
+        recipient_key: bob_key.clone(),
+        member_id: RECIPIENT_SHARE_MEMBER_ID,
+        committed_point: anchor_base * wrong_refresh,
+        ciphertext: wrong_ciphertext,
+    };
+    let wrong_proof = prove_share_encryption(
+        &wrong_statement,
+        &ShareEncryptionWitness {
+            secret: wrong_refresh,
+            nonce: wrong_nonce,
+        },
+    )?;
+    let mismatched_recipient_share =
+        ShareEnvelopeV1::from_core(invoice_binding.clone(), &wrong_statement, &wrong_proof)?;
     let holder_secret = scalar(11)?;
     let holder_nonce = random_nonce_in_group(&bob_key);
     let holder_component = encrypt_plaintext(&bob_key, &scalar_to_big_number(holder_secret), &holder_nonce)?;
@@ -222,6 +266,7 @@ fn build_fixture() -> std::result::Result<TestFixture, Box<dyn Error + Send + Sy
         &next_anchor,
     )?;
     let commitment = CommittedTransfer::new(
+        recipient_share.canonical_digest()?,
         threshold_refresh.canonical_digest()?,
         transfer.canonical_digest()?,
         EntryHash::from_bytes([0xa1; 32]),
@@ -233,6 +278,8 @@ fn build_fixture() -> std::result::Result<TestFixture, Box<dyn Error + Send + Sy
     Ok(TestFixture {
         descriptor,
         secrets,
+        recipient_share,
+        mismatched_recipient_share,
         threshold_refresh,
         transfer,
         commitment,
@@ -269,6 +316,7 @@ fn apply_fixture(
     fixture: &TestFixture,
 ) -> Result<UpdateAcknowledgement> {
     engine.apply_committed_refresh(
+        &fixture.recipient_share,
         &fixture.threshold_refresh,
         &fixture.transfer,
         &StaticLedgerVerifier {
@@ -276,6 +324,28 @@ fn apply_fixture(
         },
         &(),
     )
+}
+
+fn commitment_for(
+    fixture: &TestFixture,
+    recipient_share: &ShareEnvelopeV1,
+    threshold_refresh: &ThresholdEnvelopeV1,
+) -> std::result::Result<CommittedTransfer, TestCaseError> {
+    CommittedTransfer::new(
+        recipient_share
+            .canonical_digest()
+            .map_err(|error| TestCaseError::fail(error.to_string()))?,
+        threshold_refresh
+            .canonical_digest()
+            .map_err(|error| TestCaseError::fail(error.to_string()))?,
+        *fixture.commitment.transfer_digest(),
+        fixture.commitment.invoice_entry_hash(),
+        fixture.commitment.transfer_entry_hash(),
+        fixture.commitment.committed_head_hash(),
+        fixture.commitment.transfer_sequence(),
+        fixture.commitment.transfer_step(),
+    )
+    .map_err(|error| TestCaseError::fail(error.to_string()))
 }
 
 proptest! {
@@ -308,15 +378,81 @@ proptest! {
                 .base_point_mul()
                 .serialize())
                 .map_err(|error| TestCaseError::fail(error.to_string()))?;
+        let commitment = commitment_for(fixture, &fixture.recipient_share, &threshold)?;
         let mut engine = engine_for(fixture, member_index, MemoryVault::default())?;
         let result = engine.apply_committed_refresh(
+            &fixture.recipient_share,
             &threshold,
             &fixture.transfer,
-            &StaticLedgerVerifier { commitment: fixture.commitment },
+            &StaticLedgerVerifier { commitment },
             &(),
         );
         prop_assert!(result.is_err());
         prop_assert!(engine.pending_refresh().is_none());
+        prop_assert_eq!(engine.durable_revision(), 0);
+    }
+
+    #[test]
+    fn recipient_share_proof_tamper_is_rejected_even_when_receipt_binds_it(
+        member_index in 0_usize..3,
+        replacement in 100_u8..130,
+    ) {
+        let fixture = fixture()?;
+        let mut recipient = fixture.recipient_share.clone();
+        recipient.proof.a_point = PointHex::from_bytes(
+            "test.tampered_recipient_point",
+            scalar(replacement)
+                .map_err(|error| TestCaseError::fail(error.to_string()))?
+                .base_point_mul()
+                .serialize(),
+        ).map_err(|error| TestCaseError::fail(error.to_string()))?;
+        let commitment = commitment_for(fixture, &recipient, &fixture.threshold_refresh)?;
+        let mut engine = engine_for(fixture, member_index, MemoryVault::default())?;
+        let result = engine.apply_committed_refresh(
+            &recipient,
+            &fixture.threshold_refresh,
+            &fixture.transfer,
+            &StaticLedgerVerifier { commitment },
+            &(),
+        );
+        prop_assert!(matches!(result, Err(CommitteeError::Wire(_))));
+        prop_assert!(engine.pending_refresh().is_none());
+        prop_assert_eq!(engine.durable_revision(), 0);
+    }
+
+    #[test]
+    fn valid_but_mismatched_recipient_share_is_rejected(member_index in 0_usize..3) {
+        let fixture = fixture()?;
+        let recipient = &fixture.mismatched_recipient_share;
+        let commitment = commitment_for(fixture, recipient, &fixture.threshold_refresh)?;
+        let mut engine = engine_for(fixture, member_index, MemoryVault::default())?;
+        let result = engine.apply_committed_refresh(
+            recipient,
+            &fixture.threshold_refresh,
+            &fixture.transfer,
+            &StaticLedgerVerifier { commitment },
+            &(),
+        );
+        prop_assert!(matches!(result, Err(CommitteeError::RecipientDeltaMismatch)));
+        prop_assert!(engine.pending_refresh().is_none());
+        prop_assert_eq!(engine.durable_revision(), 0);
+    }
+
+    #[test]
+    fn recipient_share_must_use_reserved_identifier(member_index in 0_usize..3, wrong_id in 1_u32..1000) {
+        let fixture = fixture()?;
+        let mut recipient = fixture.recipient_share.clone();
+        recipient.statement.member_id = wrong_id;
+        let commitment = commitment_for(fixture, &recipient, &fixture.threshold_refresh)?;
+        let mut engine = engine_for(fixture, member_index, MemoryVault::default())?;
+        let result = engine.apply_committed_refresh(
+            &recipient,
+            &fixture.threshold_refresh,
+            &fixture.transfer,
+            &StaticLedgerVerifier { commitment },
+            &(),
+        );
+        prop_assert!(matches!(result, Err(CommitteeError::WrongRecipientShareId)));
         prop_assert_eq!(engine.durable_revision(), 0);
     }
 
@@ -343,12 +479,17 @@ proptest! {
         epoch_offset in 1_u64..100,
     ) {
         let fixture = fixture()?;
+        let mut recipient = fixture.recipient_share.clone();
         let mut threshold = fixture.threshold_refresh.clone();
+        let mut transfer = fixture.transfer.clone();
+        recipient.binding.committee_epoch = recipient.binding.committee_epoch.saturating_add(epoch_offset);
         threshold.binding.committee_epoch = threshold.binding.committee_epoch.saturating_add(epoch_offset);
+        transfer.binding.committee_epoch = transfer.binding.committee_epoch.saturating_add(epoch_offset);
         let mut engine = engine_for(fixture, member_index, MemoryVault::default())?;
         let result = engine.apply_committed_refresh(
+            &recipient,
             &threshold,
-            &fixture.transfer,
+            &transfer,
             &StaticLedgerVerifier { commitment: fixture.commitment },
             &(),
         );
@@ -414,6 +555,7 @@ proptest! {
             threshold_digest[0] ^= 1;
         }
         let commitment = CommittedTransfer::new(
+            *fixture.commitment.recipient_share_digest(),
             threshold_digest,
             transfer_digest,
             fixture.commitment.invoice_entry_hash(),
@@ -424,6 +566,7 @@ proptest! {
         ).map_err(|error| TestCaseError::fail(error.to_string()))?;
         let mut engine = engine_for(fixture, member_index, MemoryVault::default())?;
         let result = engine.apply_committed_refresh(
+            &fixture.recipient_share,
             &fixture.threshold_refresh,
             &fixture.transfer,
             &StaticLedgerVerifier { commitment },

@@ -17,9 +17,10 @@ use crate::{CommitteeError, Result};
 pub struct CommitteeMemberId(u32);
 
 impl CommitteeMemberId {
-    /// Creates a positive committee-member identifier.
+    /// Creates a positive committee-member identifier distinct from the
+    /// protocol-reserved recipient proof identifier.
     pub fn new(value: u32) -> Result<Self> {
-        if value == 0 {
+        if value == 0 || value == crate::RECIPIENT_SHARE_MEMBER_ID {
             return Err(CommitteeError::InvalidMemberId);
         }
         Ok(Self(value))

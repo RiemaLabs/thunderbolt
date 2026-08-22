@@ -2,6 +2,72 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+/// Details of a channel-scoped idempotency-key conflict.
+#[derive(Debug)]
+pub struct VerifiedRequestConflict {
+    pub channel_id: String,
+    pub idempotency_key: String,
+    pub existing_actor_id: String,
+    pub proposed_actor_id: String,
+    pub existing_digest: String,
+    pub proposed_digest: String,
+}
+
+impl std::fmt::Display for VerifiedRequestConflict {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "verified request key conflict for channel {}, idempotency key {}: \
+             existing actor {} and proposal {}, proposed actor {} and proposal {}",
+            self.channel_id,
+            self.idempotency_key,
+            self.existing_actor_id,
+            self.existing_digest,
+            self.proposed_actor_id,
+            self.proposed_digest,
+        )
+    }
+}
+
+/// Failure returned by transaction-scoped proposal verification and append.
+///
+/// Verification failures preserve the caller's error type. Storage failures
+/// cover proposal validation, database access, reduction, commit, and rollback.
+#[derive(Debug)]
+pub enum VerifiedAppendError<E> {
+    /// The storage layer rejected or failed the operation.
+    Storage(StorageError),
+    /// The caller-supplied trusted verifier rejected the proposal.
+    Verification(E),
+}
+
+impl<E> From<StorageError> for VerifiedAppendError<E> {
+    fn from(error: StorageError) -> Self {
+        Self::Storage(error)
+    }
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for VerifiedAppendError<E> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Storage(error) => error.fmt(formatter),
+            Self::Verification(error) => write!(formatter, "proposal verification failed: {error}"),
+        }
+    }
+}
+
+impl<E> std::error::Error for VerifiedAppendError<E>
+where
+    E: std::error::Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Storage(error) => Some(error),
+            Self::Verification(error) => Some(error),
+        }
+    }
+}
+
 /// Errors returned by the durable storage layer.
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -50,6 +116,24 @@ pub enum StorageError {
 
     #[error("invalid storage input: {0}")]
     InvalidInput(String),
+
+    #[error("client-supplied verification evidence is forbidden for verified append")]
+    ClientVerificationEvidence,
+
+    #[error("trusted verifier returned {found} evidence records, exceeding the configured limit {limit}")]
+    VerifierEvidenceLimitExceeded { limit: usize, found: usize },
+
+    #[error("proposal digest is already committed to inconsistent stored data: {0}")]
+    InvalidVerifiedReplay(String),
+
+    #[error("{0}")]
+    VerifiedRequestConflict(Box<VerifiedRequestConflict>),
+
+    #[error("proposal references invoice {invoice_id}, but it is not the immutable pending invoice head")]
+    PendingInvoiceReference { invoice_id: String },
+
+    #[error("verified proposal was previously committed without an atomic request mapping")]
+    MissingVerifiedRequestMapping,
 
     #[error("one serialized {kind} is {bytes} bytes, exceeding the {limit}-byte page budget")]
     PageItemTooLarge {

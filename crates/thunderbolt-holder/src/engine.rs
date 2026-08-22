@@ -159,7 +159,7 @@ impl<V: SecretVault> HolderEngine<V> {
         }
 
         let refresh_scalar = scalar_from_secret(&material.refresh)?;
-        let refresh_integer = scalar_to_big_number(refresh_scalar);
+        let refresh_integer = Zeroizing::new(scalar_to_big_number(refresh_scalar));
         let bob_key = EncryptionKey::from(&material.decryption_key);
         validate_protocol_encryption_key(&bob_key).map_err(|error| crypto_error("recipient key validation", error))?;
         let bob_ciphertext = encrypt_plaintext(&bob_key, &refresh_integer, &material.bob_nonce)
@@ -320,7 +320,7 @@ impl<V: SecretVault> HolderEngine<V> {
             MaybePoint::Valid(point) => point,
             MaybePoint::Infinity => return Err(HolderError::PointAtInfinity),
         };
-        let holder_integer = scalar_to_big_number(holder_secret);
+        let holder_integer = Zeroizing::new(scalar_to_big_number(holder_secret));
         let holder_component = encrypt_plaintext(&invoice_statement.bob_key, &holder_integer, &holder_nonce)
             .map_err(|error| crypto_error("next-holder credential encryption", error))?;
         let next_holder_ciphertext = add_ciphertexts(
@@ -494,7 +494,7 @@ impl<V: SecretVault> HolderEngine<V> {
                         operation: "next-holder credential decryption",
                     })?,
             );
-            let integer = BigNumber::from_slice(plaintext.as_slice());
+            let integer = Zeroizing::new(BigNumber::from_slice(plaintext.as_slice()));
             let scalar = match reduce_big_number_mod_curve_order(&integer)
                 .map_err(|error| crypto_error("decrypted credential reduction", error))?
             {

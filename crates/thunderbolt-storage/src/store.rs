@@ -8,13 +8,14 @@ use rusqlite::backup::Backup;
 use rusqlite::{
     params, Connection, ErrorCode, OpenFlags, OptionalExtension, Row, Rows, Transaction, TransactionBehavior,
 };
+use sha2::{Digest as _, Sha256};
 use tempfile::NamedTempFile;
 use thunderbolt_protocol::{
-    ApplyDisposition, ChannelId, ChannelReducer, ChannelSnapshot, EntryHash, HistoryContext, IdempotencyKey,
-    LedgerEntry, ProtocolLimits,
+    ApplyDisposition, ChannelEvent, ChannelId, ChannelReducer, ChannelSnapshot, EntryHash, HistoryContext,
+    IdempotencyKey, LedgerEntry, ProtocolLimits, VerificationEvidence,
 };
 
-use crate::error::{Result, StorageError};
+use crate::error::{Result, StorageError, VerifiedAppendError, VerifiedRequestConflict};
 use crate::migrations;
 
 /// Recommended page size for operator-facing reads.
@@ -27,6 +28,7 @@ const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_BUSY_TIMEOUT: Duration = Duration::from_secs(60);
 const BACKUP_PAGES_PER_STEP: i32 = 128;
 const BACKUP_STEP_PAUSE: Duration = Duration::from_millis(5);
+const PROPOSAL_DIGEST_DOMAIN: &[u8] = b"thunderbolt/verified-proposal/v1\0";
 
 /// Connection durability, lock-wait, and protocol resource limits.
 #[derive(Clone, Debug)]
@@ -54,6 +56,85 @@ pub struct AppendOutcome {
     pub snapshot: ChannelSnapshot,
     /// True when the exact entry was already committed under its key.
     pub replayed: bool,
+}
+
+/// Stable SHA-256 commitment to an evidence-free ledger proposal.
+///
+/// Verification evidence is deliberately excluded so retries remain stable
+/// across verifier execution and process restarts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProposalDigest([u8; 32]);
+
+impl ProposalDigest {
+    /// Computes the domain-separated digest of a proposal that contains no
+    /// client-supplied verification evidence.
+    pub fn from_proposal(proposal: &LedgerEntry) -> Result<Self> {
+        ensure_unverified_proposal(proposal)?;
+        Ok(proposal_digest_unchecked(proposal))
+    }
+
+    /// Returns the committed digest bytes.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Display for ProposalDigest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in self.0 {
+            write!(formatter, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+/// Result of a transaction-scoped verified append.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedAppendOutcome {
+    /// Stable evidence-free proposal digest used for request deduplication.
+    pub proposal_digest: ProposalDigest,
+    /// Committed channel-local sequence.
+    pub sequence: u64,
+    /// Canonical hash of the entry after node evidence was installed.
+    pub entry_hash: EntryHash,
+    /// Exact post-transition snapshot recorded with the request mapping.
+    pub snapshot: ChannelSnapshot,
+    /// True when this proposal digest was already committed atomically.
+    pub replayed: bool,
+}
+
+/// Immutable state exposed to the trusted verification callback.
+///
+/// The context exists only while the SQLite `BEGIN IMMEDIATE` transaction and
+/// writer lock are held. Callbacks must not re-enter the same storage handle.
+#[derive(Debug)]
+pub struct VerifiedProposalContext<'a> {
+    proposal: &'a LedgerEntry,
+    snapshot: Option<&'a ChannelSnapshot>,
+    pending_invoice_head: Option<&'a LedgerEntry>,
+    ledger_time_ms: u64,
+}
+
+impl<'a> VerifiedProposalContext<'a> {
+    /// Returns the exact evidence-free proposal being evaluated.
+    pub const fn proposal(&self) -> &'a LedgerEntry {
+        self.proposal
+    }
+
+    /// Returns the authoritative channel snapshot read under the writer lock.
+    pub const fn snapshot(&self) -> Option<&'a ChannelSnapshot> {
+        self.snapshot
+    }
+
+    /// Returns the immutable pending Invoice head referenced by a Transfer.
+    pub const fn pending_invoice_head(&self) -> Option<&'a LedgerEntry> {
+        self.pending_invoice_head
+    }
+
+    /// Returns the trusted ledger timestamp sampled under the writer lock.
+    pub const fn ledger_time_ms(&self) -> u64 {
+        self.ledger_time_ms
+    }
 }
 
 /// Counts returned after both SQLite and protocol-level checks pass.
@@ -138,6 +219,44 @@ impl SqliteStorage {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let operation = append_in_transaction(&transaction, &self.reducer, &self.path, entry, &prepared);
         finish_transaction(transaction, operation)
+    }
+
+    /// Verifies and appends an evidence-free proposal under one writer-locked
+    /// SQLite transaction.
+    ///
+    /// The proposal digest and channel-scoped idempotency key are checked
+    /// before the callback. An exact committed retry returns its stored outcome
+    /// without invoking `verify`; reuse of that key by a different proposal is
+    /// a conflict. For a new proposal, storage loads the
+    /// authoritative snapshot and, for a Transfer, its referenced immutable
+    /// pending Invoice head. It then samples trusted ledger time and invokes
+    /// `verify` while the `BEGIN IMMEDIATE` lock is still held. Only evidence
+    /// returned by that callback is installed.
+    ///
+    /// Verifier rejection, reduction failure, or any persistence failure rolls
+    /// back the entry, evidence rows, snapshot, and proposal mapping together.
+    pub fn append_verified_proposal<F, E>(
+        &self,
+        proposal: &LedgerEntry,
+        verify: F,
+    ) -> std::result::Result<VerifiedAppendOutcome, VerifiedAppendError<E>>
+    where
+        F: FnOnce(VerifiedProposalContext<'_>) -> std::result::Result<Vec<VerificationEvidence>, E>,
+    {
+        let proposal_digest = ProposalDigest::from_proposal(proposal)?;
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::from)?;
+        let operation = append_verified_in_transaction(
+            &transaction,
+            &self.reducer,
+            &self.path,
+            proposal,
+            proposal_digest,
+            verify,
+        );
+        finish_verified_transaction(transaction, operation)
     }
 
     /// Returns the latest materialized snapshot for a channel.
@@ -348,18 +467,115 @@ fn append_in_transaction(
 ) -> Result<AppendOutcome> {
     migrations::validate_current(transaction, path, reducer.limits())?;
     let current = load_channel(transaction, &prepared.channel_id)?;
-    let existing_idempotency_hash = lookup_idempotency_hash(transaction, prepared)?;
-    let invoice_id_already_used = invoice_id_already_used(transaction, prepared)?;
     // Sample trusted ledger time only after BEGIN IMMEDIATE has acquired the
     // writer lock and immediately before reduction. Time spent waiting behind
     // another request or process must count toward expiry decisions.
     let recorded_at_ms = now_unix_millis()?;
+    reduce_and_persist(transaction, reducer, entry, prepared, current.as_ref(), recorded_at_ms)
+}
+
+fn append_verified_in_transaction<F, E>(
+    transaction: &Transaction<'_>,
+    reducer: &ChannelReducer,
+    path: &Path,
+    proposal: &LedgerEntry,
+    proposal_digest: ProposalDigest,
+    verify: F,
+) -> std::result::Result<VerifiedAppendOutcome, VerifiedAppendError<E>>
+where
+    F: FnOnce(VerifiedProposalContext<'_>) -> std::result::Result<Vec<VerificationEvidence>, E>,
+{
+    migrations::validate_current(transaction, path, reducer.limits())?;
+    if let Some(replay) = load_verified_replay(transaction, proposal_digest, proposal)? {
+        return Ok(replay);
+    }
+    reject_verified_request_key_conflict(transaction, proposal_digest, proposal)?;
+
+    let channel_id = proposal.channel_id.to_string();
+    let current = load_channel(transaction, &channel_id)?;
+    let pending_invoice_head = load_referenced_pending_invoice(transaction, current.as_ref(), proposal)?;
+    // This sample occurs after BEGIN IMMEDIATE, request deduplication, and all
+    // authoritative state reads. The exact value is reused by verification,
+    // reduction, evidence persistence, and the request mapping.
+    let recorded_at_ms = now_unix_millis()?;
+    let ledger_time_ms = from_sql_integer("recorded_at_ms", recorded_at_ms)?;
+    let evidence = verify(VerifiedProposalContext {
+        proposal,
+        snapshot: current.as_ref(),
+        pending_invoice_head: pending_invoice_head.as_ref(),
+        ledger_time_ms,
+    })
+    .map_err(VerifiedAppendError::Verification)?;
+    let evidence_limit = reducer.limits().max_verifications_per_event;
+    if evidence.len() > evidence_limit {
+        return Err(StorageError::VerifierEvidenceLimitExceeded {
+            limit: evidence_limit,
+            found: evidence.len(),
+        }
+        .into());
+    }
+
+    let mut verified_entry = proposal.clone();
+    install_verification_evidence(&mut verified_entry, evidence);
+    let prepared = PreparedEntry::new(&verified_entry)?;
+    let outcome = reduce_and_persist(
+        transaction,
+        reducer,
+        &verified_entry,
+        &prepared,
+        current.as_ref(),
+        recorded_at_ms,
+    )?;
+    if outcome.replayed {
+        return Err(StorageError::MissingVerifiedRequestMapping.into());
+    }
+
+    persist_verification_evidence(transaction, &prepared, &verified_entry)?;
+    let snapshot_json = serde_json::to_vec(&outcome.snapshot).map_err(StorageError::from)?;
+    transaction
+        .execute(
+            "INSERT INTO verified_requests(
+             proposal_digest, channel_id, actor_id, idempotency_key, sequence,
+             entry_hash, snapshot_json, recorded_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                proposal_digest.as_bytes().as_slice(),
+                &prepared.channel_id,
+                proposal.actor.participant_id.to_string(),
+                &prepared.idempotency_key,
+                prepared.sequence_sql,
+                prepared.entry_hash.as_bytes().as_slice(),
+                snapshot_json,
+                recorded_at_ms,
+            ],
+        )
+        .map_err(StorageError::from)?;
+
+    Ok(VerifiedAppendOutcome {
+        proposal_digest,
+        sequence: outcome.sequence,
+        entry_hash: outcome.entry_hash,
+        snapshot: outcome.snapshot,
+        replayed: false,
+    })
+}
+
+fn reduce_and_persist(
+    transaction: &Transaction<'_>,
+    reducer: &ChannelReducer,
+    entry: &LedgerEntry,
+    prepared: &PreparedEntry,
+    current: Option<&ChannelSnapshot>,
+    recorded_at_ms: i64,
+) -> Result<AppendOutcome> {
+    let existing_idempotency_hash = lookup_idempotency_hash(transaction, prepared)?;
+    let invoice_id_already_used = invoice_id_already_used(transaction, prepared)?;
     let history = HistoryContext {
         existing_idempotency_hash,
         invoice_id_already_used,
         ledger_time_ms: from_sql_integer("recorded_at_ms", recorded_at_ms)?,
     };
-    let reduction = reducer.apply(current.as_ref(), entry, history)?;
+    let reduction = reducer.apply(current, entry, history)?;
     match reduction.disposition {
         ApplyDisposition::Replay => {
             return Ok(AppendOutcome {
@@ -426,7 +642,7 @@ fn append_in_transaction(
             return Err(StorageError::SequenceConflict {
                 channel_id: prepared.channel_id.clone(),
                 expected: previous_sequence,
-                actual: current.as_ref().map(|snapshot| snapshot.last_sequence).unwrap_or(0),
+                actual: current.map(|snapshot| snapshot.last_sequence).unwrap_or(0),
             });
         }
     }
@@ -436,6 +652,297 @@ fn append_in_transaction(
         snapshot: reduction.snapshot,
         replayed: false,
     })
+}
+
+fn ensure_unverified_proposal(proposal: &LedgerEntry) -> Result<()> {
+    if proposal.event.verification().is_empty() {
+        Ok(())
+    } else {
+        Err(StorageError::ClientVerificationEvidence)
+    }
+}
+
+fn proposal_digest_unchecked(proposal: &LedgerEntry) -> ProposalDigest {
+    let canonical = proposal.canonical_bytes();
+    let mut hasher = Sha256::new();
+    hasher.update(PROPOSAL_DIGEST_DOMAIN);
+    hasher.update((canonical.len() as u64).to_be_bytes());
+    hasher.update(canonical);
+    ProposalDigest(hasher.finalize().into())
+}
+
+fn install_verification_evidence(entry: &mut LedgerEntry, evidence: Vec<VerificationEvidence>) {
+    match &mut entry.event {
+        ChannelEvent::Open(event) => event.verification = evidence,
+        ChannelEvent::Invoice(event) => event.verification = evidence,
+        ChannelEvent::Transfer(event) => event.verification = evidence,
+        ChannelEvent::Finalize(event) => event.verification = evidence,
+    }
+}
+
+fn load_referenced_pending_invoice(
+    transaction: &Transaction<'_>,
+    current: Option<&ChannelSnapshot>,
+    proposal: &LedgerEntry,
+) -> Result<Option<LedgerEntry>> {
+    let ChannelEvent::Transfer(transfer) = &proposal.event else {
+        return Ok(None);
+    };
+    let requested_invoice_id = transfer.invoice_id.to_string();
+    let snapshot = current.ok_or_else(|| StorageError::PendingInvoiceReference {
+        invoice_id: requested_invoice_id.clone(),
+    })?;
+    let pending = snapshot
+        .pending_invoice
+        .as_ref()
+        .filter(|pending| pending.invoice_id == transfer.invoice_id)
+        .ok_or_else(|| StorageError::PendingInvoiceReference {
+            invoice_id: requested_invoice_id.clone(),
+        })?;
+    let invoice_entry = transaction
+        .query_row(
+            "SELECT entry_json FROM ledger_entries
+             WHERE channel_id = ?1 AND created_invoice_id = ?2",
+            params![proposal.channel_id.to_string(), requested_invoice_id],
+            deserialize_entry_row,
+        )
+        .optional()?
+        .ok_or_else(|| {
+            StorageError::CorruptData("pending invoice snapshot has no immutable ledger entry".to_string())
+        })?;
+    let ChannelEvent::Invoice(invoice) = &invoice_entry.event else {
+        return Err(StorageError::CorruptData(
+            "created invoice index refers to a non-Invoice event".to_string(),
+        ));
+    };
+    if invoice_entry.channel_id != snapshot.channel_id
+        || invoice_entry.sequence != snapshot.last_sequence
+        || invoice_entry.entry_hash() != snapshot.head_hash
+        || invoice.invoice_id != pending.invoice_id
+        || invoice.recipient != pending.recipient
+        || invoice.expires_at_ms != pending.expires_at_ms
+    {
+        return Err(StorageError::CorruptData(
+            "pending invoice entry differs from the authoritative snapshot head".to_string(),
+        ));
+    }
+    Ok(Some(invoice_entry))
+}
+
+fn persist_verification_evidence(
+    transaction: &Transaction<'_>,
+    prepared: &PreparedEntry,
+    entry: &LedgerEntry,
+) -> Result<()> {
+    for (index, evidence) in entry.event.verification().iter().enumerate() {
+        let index = i64::try_from(index)
+            .map_err(|_| StorageError::InvalidInput("verification evidence index is too large".to_string()))?;
+        let evidence_json = serde_json::to_vec(evidence)?;
+        transaction.execute(
+            "INSERT INTO verification_evidence(channel_id, sequence, evidence_index, evidence_json)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![&prepared.channel_id, prepared.sequence_sql, index, evidence_json,],
+        )?;
+    }
+    Ok(())
+}
+
+fn reject_verified_request_key_conflict(
+    transaction: &Connection,
+    proposal_digest: ProposalDigest,
+    proposal: &LedgerEntry,
+) -> Result<()> {
+    let channel_id = proposal.channel_id.to_string();
+    let idempotency_key = proposal.idempotency_key.to_string();
+    let existing = transaction
+        .query_row(
+            "SELECT proposal_digest, actor_id FROM verified_requests
+             WHERE channel_id = ?1 AND idempotency_key = ?2",
+            params![&channel_id, &idempotency_key],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    if let Some((existing_digest, existing_actor_id)) = existing {
+        let existing_digest: [u8; 32] = existing_digest
+            .try_into()
+            .map_err(|_| StorageError::CorruptData("verified request proposal digest is not 32 bytes".to_string()))?;
+        let existing_digest = ProposalDigest(existing_digest);
+        if existing_digest == proposal_digest {
+            return Err(StorageError::InvalidVerifiedReplay(
+                "exact proposal mapping exists but could not be loaded".to_string(),
+            ));
+        }
+        return Err(verified_request_conflict(
+            proposal,
+            existing_actor_id,
+            existing_digest,
+            proposal_digest,
+        ));
+    }
+
+    // Databases upgraded from schema v1 and trusted imports can contain a
+    // ledger idempotency key without a schema-v2 request mapping. Detect that
+    // before verifier execution so lost-response recovery cannot trigger
+    // repeated expensive proof verification.
+    let existing_entry = transaction
+        .query_row(
+            "SELECT entry_json FROM ledger_entries
+             WHERE channel_id = ?1 AND idempotency_key = ?2",
+            params![&channel_id, &idempotency_key],
+            deserialize_entry_row,
+        )
+        .optional()?;
+    let Some(existing_entry) = existing_entry else {
+        return Ok(());
+    };
+    let existing_actor_id = existing_entry.actor.participant_id.to_string();
+    let mut existing_proposal = existing_entry;
+    install_verification_evidence(&mut existing_proposal, Vec::new());
+    let existing_digest = proposal_digest_unchecked(&existing_proposal);
+    if existing_digest == proposal_digest {
+        return Err(StorageError::MissingVerifiedRequestMapping);
+    }
+    Err(verified_request_conflict(
+        proposal,
+        existing_actor_id,
+        existing_digest,
+        proposal_digest,
+    ))
+}
+
+fn verified_request_conflict(
+    proposal: &LedgerEntry,
+    existing_actor_id: String,
+    existing_digest: ProposalDigest,
+    proposed_digest: ProposalDigest,
+) -> StorageError {
+    StorageError::VerifiedRequestConflict(Box::new(VerifiedRequestConflict {
+        channel_id: proposal.channel_id.to_string(),
+        idempotency_key: proposal.idempotency_key.to_string(),
+        existing_actor_id,
+        proposed_actor_id: proposal.actor.participant_id.to_string(),
+        existing_digest: existing_digest.to_string(),
+        proposed_digest: proposed_digest.to_string(),
+    }))
+}
+
+fn load_verified_replay(
+    transaction: &Connection,
+    proposal_digest: ProposalDigest,
+    proposal: &LedgerEntry,
+) -> Result<Option<VerifiedAppendOutcome>> {
+    let row = transaction
+        .query_row(
+            "SELECT request.channel_id, request.actor_id, request.idempotency_key,
+                    request.sequence, request.entry_hash,
+                    request.snapshot_json, request.recorded_at_ms, entry.entry_json,
+                    entry.recorded_at_ms
+             FROM verified_requests AS request
+             JOIN ledger_entries AS entry
+               ON entry.channel_id = request.channel_id
+              AND entry.sequence = request.sequence
+              AND entry.entry_hash = request.entry_hash
+             WHERE request.proposal_digest = ?1",
+            [proposal_digest.as_bytes().as_slice()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, Vec<u8>>(7)?,
+                    row.get::<_, i64>(8)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        channel_id,
+        actor_id,
+        idempotency_key,
+        sequence_sql,
+        entry_hash,
+        snapshot_json,
+        request_time,
+        entry_json,
+        entry_time,
+    )) = row
+    else {
+        return Ok(None);
+    };
+    if request_time != entry_time {
+        return Err(StorageError::InvalidVerifiedReplay(
+            "request and ledger timestamps differ".to_string(),
+        ));
+    }
+
+    let sequence = from_sql_integer("verified request sequence", sequence_sql)?;
+    let entry_hash = entry_hash_from_blob("verified request entry hash", entry_hash)?;
+    let entry: LedgerEntry = deserialize_protocol_json(&entry_json, "verified request entry")?;
+    let snapshot: ChannelSnapshot = deserialize_protocol_json(&snapshot_json, "verified request snapshot")?;
+    snapshot.validate()?;
+
+    let mut stored_proposal = entry.clone();
+    install_verification_evidence(&mut stored_proposal, Vec::new());
+    if stored_proposal != *proposal
+        || proposal_digest_unchecked(&stored_proposal) != proposal_digest
+        || channel_id != proposal.channel_id.to_string()
+        || actor_id != proposal.actor.participant_id.to_string()
+        || idempotency_key != proposal.idempotency_key.to_string()
+        || sequence != entry.sequence
+        || entry_hash != entry.entry_hash()
+        || snapshot.channel_id != proposal.channel_id
+        || snapshot.last_sequence != sequence
+        || snapshot.head_hash != entry_hash
+        || snapshot.last_occurred_at_ms != from_sql_integer("verified request time", request_time)?
+    {
+        return Err(StorageError::InvalidVerifiedReplay(
+            "proposal mapping does not match its immutable entry and snapshot".to_string(),
+        ));
+    }
+    let stored_evidence = load_verification_evidence(transaction, &channel_id, sequence_sql)?;
+    if stored_evidence != entry.event.verification() {
+        return Err(StorageError::InvalidVerifiedReplay(
+            "stored evidence rows differ from the immutable entry".to_string(),
+        ));
+    }
+
+    Ok(Some(VerifiedAppendOutcome {
+        proposal_digest,
+        sequence,
+        entry_hash,
+        snapshot,
+        replayed: true,
+    }))
+}
+
+fn load_verification_evidence(
+    connection: &Connection,
+    channel_id: &str,
+    sequence: i64,
+) -> Result<Vec<VerificationEvidence>> {
+    let mut statement = connection.prepare(
+        "SELECT evidence_index, evidence_json FROM verification_evidence
+         WHERE channel_id = ?1 AND sequence = ?2 ORDER BY evidence_index",
+    )?;
+    let mut rows = statement.query(params![channel_id, sequence])?;
+    let mut evidence = Vec::new();
+    while let Some(row) = rows.next()? {
+        let stored_index: i64 = row.get(0)?;
+        let expected_index = i64::try_from(evidence.len())
+            .map_err(|_| StorageError::CorruptData("verification evidence index overflow".to_string()))?;
+        if stored_index != expected_index {
+            return Err(StorageError::CorruptData(
+                "verification evidence indices are not contiguous".to_string(),
+            ));
+        }
+        let bytes: Vec<u8> = row.get(1)?;
+        evidence.push(deserialize_protocol_json(&bytes, "verification evidence")?);
+    }
+    Ok(evidence)
 }
 
 fn lookup_idempotency_hash(transaction: &Transaction<'_>, prepared: &PreparedEntry) -> Result<Option<EntryHash>> {
@@ -479,6 +986,34 @@ fn finish_transaction<T>(transaction: Transaction<'_>, operation: Result<T>) -> 
                 operation_error: operation_error.to_string(),
                 rollback_error,
             }),
+        },
+    }
+}
+
+fn finish_verified_transaction<T, E>(
+    transaction: Transaction<'_>,
+    operation: std::result::Result<T, VerifiedAppendError<E>>,
+) -> std::result::Result<T, VerifiedAppendError<E>> {
+    match operation {
+        Ok(value) => {
+            transaction
+                .commit()
+                .map_err(StorageError::from)
+                .map_err(VerifiedAppendError::Storage)?;
+            Ok(value)
+        }
+        Err(operation_error) => match transaction.rollback() {
+            Ok(()) => Err(operation_error),
+            Err(rollback_error) => {
+                let operation_error = match operation_error {
+                    VerifiedAppendError::Storage(error) => error.to_string(),
+                    VerifiedAppendError::Verification(_) => "proposal verification failed".to_string(),
+                };
+                Err(VerifiedAppendError::Storage(StorageError::RollbackFailed {
+                    operation_error,
+                    rollback_error,
+                }))
+            }
         },
     }
 }
@@ -575,6 +1110,11 @@ fn integrity_check_snapshot(connection: &Connection, reducer: &ChannelReducer, p
             failures.push(error.to_string());
         }
     }
+    drop(rows);
+    drop(statement);
+    if let Err(error) = validate_verified_request_records(connection) {
+        failures.push(error.to_string());
+    }
     if failures.is_empty() {
         Ok(IntegrityReport {
             channels_checked,
@@ -583,6 +1123,55 @@ fn integrity_check_snapshot(connection: &Connection, reducer: &ChannelReducer, p
     } else {
         Err(StorageError::IntegrityCheckFailed(failures))
     }
+}
+
+fn validate_verified_request_records(connection: &Connection) -> Result<()> {
+    let orphaned_evidence: bool = connection.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM verification_evidence AS evidence
+             LEFT JOIN verified_requests AS request
+               ON request.channel_id = evidence.channel_id
+              AND request.sequence = evidence.sequence
+             WHERE request.proposal_digest IS NULL
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if orphaned_evidence {
+        return Err(StorageError::CorruptData(
+            "verification evidence exists without a verified request mapping".to_string(),
+        ));
+    }
+
+    let mut statement = connection.prepare("SELECT proposal_digest FROM verified_requests ORDER BY proposal_digest")?;
+    let digests = statement
+        .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for digest in digests {
+        let digest: [u8; 32] = digest
+            .try_into()
+            .map_err(|_| StorageError::CorruptData("verified proposal digest is not 32 bytes".to_string()))?;
+        let digest = ProposalDigest(digest);
+        let entry_json: Vec<u8> = connection.query_row(
+            "SELECT entry.entry_json
+             FROM verified_requests AS request
+             JOIN ledger_entries AS entry
+               ON entry.channel_id = request.channel_id
+              AND entry.sequence = request.sequence
+              AND entry.entry_hash = request.entry_hash
+             WHERE request.proposal_digest = ?1",
+            [digest.as_bytes().as_slice()],
+            |row| row.get(0),
+        )?;
+        let mut proposal: LedgerEntry = deserialize_protocol_json(&entry_json, "verified request entry")?;
+        install_verification_evidence(&mut proposal, Vec::new());
+        if load_verified_replay(connection, digest, &proposal)?.is_none() {
+            return Err(StorageError::CorruptData(
+                "verified request disappeared from a stable integrity snapshot".to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn sqlite_integrity_failures(connection: &Connection) -> Result<Vec<String>> {

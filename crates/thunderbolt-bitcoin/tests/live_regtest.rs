@@ -103,15 +103,14 @@ async fn live_regtest_backend_contract_and_reorg() -> Result<(), Box<dyn Error>>
         .get_tx_out(outpoint)
         .await?
         .ok_or("live funding outpoint is spent or missing")?;
+    assert!(
+        live_output.coinbase,
+        "live funding fixture must be a mined coinbase output"
+    );
     assert_eq!(live_output.value, raw_output.value);
     assert_eq!(live_output.script_pubkey, raw_output.script_pubkey);
 
-    let expectation = FundingExpectation {
-        outpoint,
-        script_pubkey: raw_output.script_pubkey.clone(),
-        amount: raw_output.value,
-        min_confirmations: 1,
-    };
+    let expectation = FundingExpectation::new(outpoint, raw_output.script_pubkey.clone(), raw_output.value, 1)?;
     let observation = FundingObservation::from_get_tx_out(outpoint, Some(live_output));
     validate_funding_outpoint(&expectation, &observation)?;
 
@@ -138,6 +137,6 @@ async fn live_regtest_backend_contract_and_reorg() -> Result<(), Box<dyn Error>>
         .get_tx_out(outpoint)
         .await?
         .ok_or("funding outpoint disappeared after the tip reorganization")?;
-    assert_eq!(final_output.value, Amount::from_sat(expectation.amount.to_sat()));
+    assert_eq!(final_output.value, Amount::from_sat(expectation.amount().to_sat()));
     Ok(())
 }

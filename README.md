@@ -87,8 +87,8 @@ crates/
   thunderbolt-committee/ One-share committee member engine
   thunderbolt-verifier/ Trusted Invoice and Transfer verification bridge
   thunderbolt-keystore/ Encrypted participant secret vault
-  thunderbolt-core/    Proofs, Paillier operations, threshold primitives,
-                       and Bitcoin transaction building blocks
+  thunderbolt-core/    Proofs, Paillier operations, and public threshold
+                       distribution primitives
   thunderbolt-protocol/ Deterministic Ledger entries and channel reducer
   thunderbolt-wire/    Bounded, versioned public proof-message encoding
   thunderbolt-storage/ Durable SQLite Ledger entries and channel snapshots
@@ -96,13 +96,16 @@ crates/
   thunderbolt-node/    Loopback JSON API and Ledger service runtime
   thunderboltd/        Reference Ledger daemon
   thunderbolt-cli/     Operator control client
-  bitcoin-utils/       Bitcoin key, address, and account utilities
+  bitcoin-utils/       Research-only legacy Bitcoin account utilities
   thunderbolt-eval/    Research benchmarks and regression harnesses
 research/benchmarks/   Lightning, Groth16, and SP1 comparison harnesses
 research/artifacts/    Published benchmark outputs and reproduction scripts
 ```
 
 The research harness is useful for regression testing, but it is not a deployable multi-process network.
+The old static two-key Taproot transaction prototype and the single-process
+committee fixture are disabled in normal builds. Research tests must opt into
+the `legacy-research` and `insecure-regression` features explicitly.
 
 ## Quickstart
 

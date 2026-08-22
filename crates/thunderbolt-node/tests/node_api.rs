@@ -3,18 +3,24 @@ use std::fs;
 use std::future::pending;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::header::AUTHORIZATION;
 use reqwest::{Client, StatusCode};
 use tempfile::TempDir;
 use thunderbolt_config::{Config, Environment, Network, NodeRole, TokenConfig, TokenScope};
-use thunderbolt_node::{AppendResponse, EventPage, NodeOptions, NodeServer};
+use thunderbolt_node::{
+    AppendResponse, EventPage, InvoiceProposalContext, NodeOptions, NodeServer, ProposalVerifier,
+    ProposalVerifierError, TransferProposalContext, VerifiedProposalEvidence,
+};
 use thunderbolt_protocol::{
     Actor, ActorRole, Artifact, BitcoinTxid, ChannelEvent, ChannelId, Committee, Digest, EntryHash, FinalizeEvent,
     IdempotencyKey, ImplementationId, InvoiceEvent, InvoiceId, LedgerEntry, OpenEvent, ParticipantId, TransferEvent,
     VerificationEvidence, VerificationKind,
 };
+use thunderbolt_storage::SqliteStorage;
 use tokio::task::JoinHandle;
 
 const ADMIN_TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -35,6 +41,18 @@ impl RunningNode {
         let server = NodeServer::from_listener(listener, config, options)
             .await
             .expect("construct node server");
+        let address = server.local_addr().expect("read local address");
+        let task = tokio::spawn(server.run(pending()));
+        Self { address, task }
+    }
+
+    async fn launch_with_verifier(config: Config, verifier: Arc<dyn ProposalVerifier>) -> Self {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind verifier loopback listener");
+        let server = NodeServer::from_listener_with_verifier(listener, config, NodeOptions::default(), verifier)
+            .await
+            .expect("construct verified node server");
         let address = server.local_addr().expect("read local address");
         let task = tokio::spawn(server.run(pending()));
         Self { address, task }
@@ -129,6 +147,23 @@ async fn authenticated_lifecycle_is_idempotent_durable_bounded_and_graceful() {
     assert_eq!(response.status(), StatusCode::CREATED);
     let open_result: AppendResponse = response.json().await.expect("decode open result");
     assert!(!open_result.replayed);
+    let committed_open: LedgerEntry = client
+        .get(node.url(&format!("/v1/channels/{channel_id}/events/0")))
+        .header(AUTHORIZATION, format!("Bearer {ADMIN_TOKEN}"))
+        .send()
+        .await
+        .expect("committed demo event response")
+        .error_for_status()
+        .expect("committed demo event status")
+        .json()
+        .await
+        .expect("decode committed demo event");
+    assert!(committed_open
+        .event
+        .verification()
+        .iter()
+        .all(|evidence| evidence.verified_at_ms == open_result.snapshot.opened_at_ms));
+    assert_ne!(open_result.snapshot.opened_at_ms, open.occurred_at_ms);
 
     let replay = post_entry(&client, &node, &open, ALICE_TOKEN).await;
     assert_eq!(replay.status(), StatusCode::OK);
@@ -224,6 +259,213 @@ async fn authenticated_lifecycle_is_idempotent_durable_bounded_and_graceful() {
         .error_for_status()
         .expect("restart stop status");
     restarted.expect_clean_stop().await;
+}
+
+#[derive(Clone, Debug)]
+struct RecordingVerifier {
+    state: Arc<RecordingVerifierState>,
+}
+
+#[derive(Debug, Default)]
+struct RecordingVerifierState {
+    invoice_calls: AtomicUsize,
+    transfer_calls: AtomicUsize,
+    reject_invoice: AtomicBool,
+    invoice_context: Mutex<Option<InvoiceContextRecord>>,
+    transfer_context: Mutex<Option<TransferContextRecord>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct InvoiceContextRecord {
+    proposal_sequence: u64,
+    snapshot_sequence: u64,
+    snapshot_hash: EntryHash,
+    ledger_time_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+struct TransferContextRecord {
+    snapshot_sequence: u64,
+    snapshot_hash: EntryHash,
+    pending_sequence: u64,
+    pending_hash: EntryHash,
+    pending_invoice_id: String,
+    ledger_time_ms: u64,
+}
+
+impl ProposalVerifier for RecordingVerifier {
+    fn verify_invoice(
+        &self,
+        context: InvoiceProposalContext<'_>,
+    ) -> Result<VerifiedProposalEvidence, ProposalVerifierError> {
+        self.state.invoice_calls.fetch_add(1, Ordering::SeqCst);
+        *self.state.invoice_context.lock().expect("invoice context lock") = Some(InvoiceContextRecord {
+            proposal_sequence: context.proposal().sequence,
+            snapshot_sequence: context.snapshot().last_sequence,
+            snapshot_hash: context.snapshot().head_hash,
+            ledger_time_ms: context.ledger_time_ms(),
+        });
+        if self.state.reject_invoice.load(Ordering::SeqCst) {
+            return Err(ProposalVerifierError::Rejected {
+                reason: "injected verifier rejection",
+            });
+        }
+        VerifiedProposalEvidence::invoice(
+            test_evidence(VerificationKind::InvoiceConsistencyProof, context.ledger_time_ms(), 21),
+            context.ledger_time_ms(),
+        )
+    }
+
+    fn verify_transfer(
+        &self,
+        context: TransferProposalContext<'_>,
+    ) -> Result<VerifiedProposalEvidence, ProposalVerifierError> {
+        self.state.transfer_calls.fetch_add(1, Ordering::SeqCst);
+        *self.state.transfer_context.lock().expect("transfer context lock") = Some(TransferContextRecord {
+            snapshot_sequence: context.snapshot().last_sequence,
+            snapshot_hash: context.snapshot().head_hash,
+            pending_sequence: context.pending_invoice_head().sequence,
+            pending_hash: context.pending_invoice_head().entry_hash(),
+            pending_invoice_id: context.pending_invoice().invoice_id.to_string(),
+            ledger_time_ms: context.ledger_time_ms(),
+        });
+        VerifiedProposalEvidence::transfer(
+            test_evidence(VerificationKind::TransferConsistencyProof, context.ledger_time_ms(), 22),
+            test_evidence(VerificationKind::AnchorTransition, context.ledger_time_ms(), 23),
+            context.ledger_time_ms(),
+        )
+    }
+}
+
+#[tokio::test]
+async fn verified_append_deduplicates_before_callback_and_uses_authoritative_context() {
+    let temporary = TempDir::new().expect("create temporary verified-node directory");
+    let config = test_config(temporary.path(), Environment::Development, Network::Regtest, 4_096);
+    let channel_id = ChannelId::new(BitcoinTxid::from_bytes([10; 32]), 2);
+    let storage = SqliteStorage::open(&config.paths.database_path).expect("open seed storage");
+    let mut open = open_entry(channel_id);
+    install_test_evidence(&mut open);
+    let opened = storage.append_entry(&open).expect("seed trusted Open");
+    drop(storage);
+
+    let verifier_state = Arc::new(RecordingVerifierState::default());
+    let verifier: Arc<dyn ProposalVerifier> = Arc::new(RecordingVerifier {
+        state: Arc::clone(&verifier_state),
+    });
+    let node = RunningNode::launch_with_verifier(config, verifier).await;
+    let client = Client::new();
+
+    let unsupported_open = open_entry(ChannelId::new(BitcoinTxid::from_bytes([11; 32]), 0));
+    assert_eq!(
+        post_entry(&client, &node, &unsupported_open, ALICE_TOKEN)
+            .await
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(verifier_state.invoice_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(verifier_state.transfer_calls.load(Ordering::SeqCst), 0);
+
+    let mut invoice = invoice_entry(channel_id, opened.entry_hash);
+    invoice.occurred_at_ms = unix_time_ms();
+    let mut client_evidence = invoice.clone();
+    client_evidence.idempotency_key = idempotency("client-evidence");
+    if let ChannelEvent::Invoice(event) = &mut client_evidence.event {
+        event.verification.push(test_evidence(
+            VerificationKind::InvoiceConsistencyProof,
+            client_evidence.occurred_at_ms,
+            24,
+        ));
+    }
+    assert_eq!(
+        post_entry(&client, &node, &client_evidence, BOB_TOKEN).await.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(verifier_state.invoice_calls.load(Ordering::SeqCst), 0);
+
+    verifier_state.reject_invoice.store(true, Ordering::SeqCst);
+    assert_eq!(
+        post_entry(&client, &node, &invoice, BOB_TOKEN).await.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(verifier_state.invoice_calls.load(Ordering::SeqCst), 1);
+    let snapshot_after_rejection = client
+        .get(node.url(&format!("/v1/channels/{channel_id}")))
+        .header(AUTHORIZATION, format!("Bearer {ADMIN_TOKEN}"))
+        .send()
+        .await
+        .expect("snapshot after rejection")
+        .error_for_status()
+        .expect("snapshot status after rejection")
+        .json::<thunderbolt_protocol::ChannelSnapshot>()
+        .await
+        .expect("decode snapshot after rejection");
+    assert_eq!(snapshot_after_rejection.last_sequence, 0);
+
+    verifier_state.reject_invoice.store(false, Ordering::SeqCst);
+    let invoice_response = post_entry(&client, &node, &invoice, BOB_TOKEN).await;
+    assert_eq!(invoice_response.status(), StatusCode::CREATED);
+    let invoice_result: AppendResponse = invoice_response.json().await.expect("decode verified invoice");
+    assert_eq!(verifier_state.invoice_calls.load(Ordering::SeqCst), 2);
+
+    let exact_replay = post_entry(&client, &node, &invoice, BOB_TOKEN).await;
+    assert_eq!(exact_replay.status(), StatusCode::OK);
+    assert_eq!(verifier_state.invoice_calls.load(Ordering::SeqCst), 2);
+
+    let mut conflict = invoice.clone();
+    conflict.occurred_at_ms = conflict.occurred_at_ms.saturating_add(1);
+    assert_eq!(
+        post_entry(&client, &node, &conflict, BOB_TOKEN).await.status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(verifier_state.invoice_calls.load(Ordering::SeqCst), 2);
+
+    let invoice_context = verifier_state
+        .invoice_context
+        .lock()
+        .expect("invoice context lock")
+        .expect("recorded invoice context");
+    assert_eq!(invoice_context.proposal_sequence, 1);
+    assert_eq!(invoice_context.snapshot_sequence, 0);
+    assert_eq!(invoice_context.snapshot_hash, opened.entry_hash);
+    assert!(invoice_context.ledger_time_ms >= invoice.occurred_at_ms);
+
+    let mut transfer = transfer_entry(channel_id, invoice_result.entry_hash);
+    transfer.occurred_at_ms = unix_time_ms();
+    let transfer_response = post_entry(&client, &node, &transfer, ALICE_TOKEN).await;
+    assert_eq!(transfer_response.status(), StatusCode::CREATED);
+    let transfer_result: AppendResponse = transfer_response.json().await.expect("decode verified transfer");
+    assert_eq!(verifier_state.transfer_calls.load(Ordering::SeqCst), 1);
+    let transfer_context = verifier_state
+        .transfer_context
+        .lock()
+        .expect("transfer context lock")
+        .clone()
+        .expect("recorded transfer context");
+    assert_eq!(transfer_context.snapshot_sequence, 1);
+    assert_eq!(transfer_context.snapshot_hash, invoice_result.entry_hash);
+    assert_eq!(transfer_context.pending_sequence, 1);
+    assert_eq!(transfer_context.pending_hash, invoice_result.entry_hash);
+    assert_eq!(transfer_context.pending_invoice_id, "invoice-1");
+    assert!(transfer_context.ledger_time_ms >= transfer.occurred_at_ms);
+
+    let mut finalize = finalize_entry(channel_id, transfer_result.entry_hash);
+    finalize.occurred_at_ms = unix_time_ms();
+    assert_eq!(
+        post_entry(&client, &node, &finalize, BOB_TOKEN).await.status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(verifier_state.transfer_calls.load(Ordering::SeqCst), 1);
+
+    client
+        .post(node.url("/v1/admin/stop"))
+        .header(AUTHORIZATION, format!("Bearer {ADMIN_TOKEN}"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("verified node stop response")
+        .error_for_status()
+        .expect("verified node stop status");
+    node.expect_clean_stop().await;
 }
 
 #[tokio::test]
@@ -443,6 +685,46 @@ fn idempotency(value: &str) -> IdempotencyKey {
 
 fn artifact(value: u8) -> Artifact {
     Artifact::new(vec![value]).expect("artifact")
+}
+
+fn test_evidence(kind: VerificationKind, verified_at_ms: u64, digest_byte: u8) -> VerificationEvidence {
+    VerificationEvidence::verified(
+        kind,
+        participant("trusted-test-verifier"),
+        ImplementationId::new("trusted-test-verifier/v1").expect("implementation id"),
+        Digest::from_bytes([digest_byte; 32]),
+        verified_at_ms,
+    )
+}
+
+fn install_test_evidence(entry: &mut LedgerEntry) {
+    let evidence: Vec<_> = entry
+        .event
+        .required_verifications()
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, kind)| {
+            let digest_byte = u8::try_from(index + 1).expect("small evidence count");
+            test_evidence(kind, entry.occurred_at_ms, digest_byte)
+        })
+        .collect();
+    match &mut entry.event {
+        ChannelEvent::Open(event) => event.verification = evidence,
+        ChannelEvent::Invoice(event) => event.verification = evidence,
+        ChannelEvent::Transfer(event) => event.verification = evidence,
+        ChannelEvent::Finalize(event) => event.verification = evidence,
+    }
+}
+
+fn unix_time_ms() -> u64 {
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after Unix epoch")
+            .as_millis(),
+    )
+    .expect("Unix time fits u64")
 }
 
 trait ChannelPhaseName {

@@ -1,3 +1,4 @@
+use bitcoin::constants::COINBASE_MATURITY;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, Txid};
 
 use crate::{TxOutInfo, ValidationError};
@@ -9,13 +10,59 @@ const MAX_OUTPUT_COUNT: u16 = 64;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FundingExpectation {
     /// Exact funding outpoint.
-    pub outpoint: OutPoint,
+    outpoint: OutPoint,
     /// Exact funding script.
-    pub script_pubkey: ScriptBuf,
+    script_pubkey: ScriptBuf,
     /// Exact funding amount.
-    pub amount: Amount,
+    amount: Amount,
     /// Minimum accepted confirmation count.
-    pub min_confirmations: u64,
+    min_confirmations: u64,
+}
+
+impl FundingExpectation {
+    /// Creates a funding policy that cannot accept an unconfirmed output.
+    pub fn new(
+        outpoint: OutPoint,
+        script_pubkey: ScriptBuf,
+        amount: Amount,
+        min_confirmations: u64,
+    ) -> std::result::Result<Self, ValidationError> {
+        if min_confirmations == 0 {
+            return Err(ValidationError::InvalidFundingExpectation(
+                "minimum confirmations must be at least one",
+            ));
+        }
+        Ok(Self {
+            outpoint,
+            script_pubkey,
+            amount,
+            min_confirmations,
+        })
+    }
+
+    /// Exact funding outpoint.
+    #[must_use]
+    pub const fn outpoint(&self) -> OutPoint {
+        self.outpoint
+    }
+
+    /// Exact funding output script.
+    #[must_use]
+    pub fn script_pubkey(&self) -> &ScriptBuf {
+        &self.script_pubkey
+    }
+
+    /// Exact funding amount.
+    #[must_use]
+    pub const fn amount(&self) -> Amount {
+        self.amount
+    }
+
+    /// Minimum accepted confirmation count for a non-coinbase output.
+    #[must_use]
+    pub const fn min_confirmations(&self) -> u64 {
+        self.min_confirmations
+    }
 }
 
 /// Bitcoin-observed state of an outpoint.
@@ -62,10 +109,16 @@ pub fn validate_funding_outpoint(
     if output.value != expected.amount {
         return Err(ValidationError::FundingAmountMismatch);
     }
-    if output.confirmations < expected.min_confirmations {
+    let coinbase_maturity = u64::from(COINBASE_MATURITY);
+    let required_confirmations = if output.coinbase {
+        expected.min_confirmations.max(coinbase_maturity)
+    } else {
+        expected.min_confirmations
+    };
+    if output.confirmations < required_confirmations {
         return Err(ValidationError::FundingConfirmations {
             actual: output.confirmations,
-            required: expected.min_confirmations,
+            required: required_confirmations,
         });
     }
     Ok(())
@@ -400,14 +453,14 @@ mod tests {
         fn funding_validator_rejects_any_amount_delta(
             amount in 1_u64..2_100_000_000_000_000_u64,
             delta in 1_u64..1_000_000_u64,
-            confirmations in 0_u64..1_000_u64,
+            confirmations in 1_u64..1_000_u64,
         ) {
-            let expected = FundingExpectation {
-                outpoint: outpoint(),
-                script_pubkey: script(2),
-                amount: Amount::from_sat(amount),
-                min_confirmations: confirmations,
-            };
+            let expected = FundingExpectation::new(
+                outpoint(),
+                script(2),
+                Amount::from_sat(amount),
+                confirmations,
+            )?;
             let wrong_amount = amount.saturating_add(delta);
             let observation = FundingObservation {
                 outpoint: outpoint(),
@@ -430,27 +483,22 @@ mod tests {
             candidate_vout in any::<u32>(),
             amount in 1_u64..2_100_000_000_000_000_u64,
         ) {
-            let expected = FundingExpectation {
-                outpoint: outpoint(),
-                script_pubkey: script(4),
-                amount: Amount::from_sat(amount),
-                min_confirmations: 1,
-            };
-            let different_vout = if candidate_vout == expected.outpoint.vout {
+            let expected = FundingExpectation::new(outpoint(), script(4), Amount::from_sat(amount), 1)?;
+            let different_vout = if candidate_vout == expected.outpoint().vout {
                 candidate_vout.wrapping_add(1)
             } else {
                 candidate_vout
             };
             let observation = FundingObservation {
                 outpoint: OutPoint {
-                    txid: expected.outpoint.txid,
+                    txid: expected.outpoint().txid,
                     vout: different_vout,
                 },
                 state: FundingState::Unspent(TxOutInfo {
                     best_block: BlockHash::all_zeros(),
                     confirmations: 1,
-                    value: expected.amount,
-                    script_pubkey: expected.script_pubkey.clone(),
+                    value: expected.amount(),
+                    script_pubkey: expected.script_pubkey().clone(),
                     coinbase: false,
                 }),
             };
@@ -462,13 +510,43 @@ mod tests {
     }
 
     #[test]
-    fn spent_funding_is_rejected() {
-        let expected = FundingExpectation {
+    fn funding_expectation_rejects_zero_confirmations() {
+        assert_eq!(
+            FundingExpectation::new(outpoint(), script(3), Amount::from_sat(50_000), 0),
+            Err(ValidationError::InvalidFundingExpectation(
+                "minimum confirmations must be at least one"
+            ))
+        );
+    }
+
+    #[test]
+    fn coinbase_maturity_boundary_is_exact() -> std::result::Result<(), ValidationError> {
+        let expected = FundingExpectation::new(outpoint(), script(3), Amount::from_sat(50_000), 1)?;
+        let observation = |confirmations| FundingObservation {
             outpoint: outpoint(),
-            script_pubkey: script(3),
-            amount: Amount::from_sat(50_000),
-            min_confirmations: 1,
+            state: FundingState::Unspent(TxOutInfo {
+                best_block: BlockHash::all_zeros(),
+                confirmations,
+                value: expected.amount(),
+                script_pubkey: expected.script_pubkey().clone(),
+                coinbase: true,
+            }),
         };
+        let maturity = u64::from(COINBASE_MATURITY);
+        assert_eq!(
+            validate_funding_outpoint(&expected, &observation(maturity - 1)),
+            Err(ValidationError::FundingConfirmations {
+                actual: maturity - 1,
+                required: maturity,
+            })
+        );
+        assert_eq!(validate_funding_outpoint(&expected, &observation(maturity)), Ok(()));
+        Ok(())
+    }
+
+    #[test]
+    fn spent_funding_is_rejected() -> std::result::Result<(), ValidationError> {
+        let expected = FundingExpectation::new(outpoint(), script(3), Amount::from_sat(50_000), 1)?;
         let observation = FundingObservation {
             outpoint: outpoint(),
             state: FundingState::SpentOrMissing,
@@ -477,5 +555,6 @@ mod tests {
             validate_funding_outpoint(&expected, &observation),
             Err(ValidationError::FundingSpentOrMissing)
         );
+        Ok(())
     }
 }

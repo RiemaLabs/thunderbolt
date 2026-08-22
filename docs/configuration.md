@@ -99,7 +99,7 @@ The Unix socket path is reserved for the target local control interface. The cur
 
 ### `committee`
 
-`committee.members` accepts 1 through 1024 members. `committee.signing_threshold` must be at least 1 and cannot exceed the member count. These values describe expected topology but do not contain any share.
+`committee.members` accepts 1 through 256 members, matching the public wire format. `committee.signing_threshold` must be at least 1 and cannot exceed the member count. These values describe expected topology but do not contain any share.
 
 `committee.epoch` is a positive monotonic roster and share version. Protocol messages from another epoch fail closed even when their proofs are otherwise valid.
 

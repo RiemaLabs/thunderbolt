@@ -11,7 +11,7 @@ use crate::{DeploymentId, InvoiceId, Result, WireError};
 pub const PROTOCOL_VERSION_V2: u16 = 2;
 /// Exact byte width of a canonical funding outpoint.
 pub const FUNDING_OUTPOINT_BYTES: usize = 36;
-/// Exact byte width of every version 2 suite or descriptor identifier.
+/// Exact byte width of every version 2 suite, descriptor, or chain identifier.
 pub const BINDING_ID_BYTES: usize = 32;
 
 macro_rules! fixed_binding_id {
@@ -76,6 +76,11 @@ fixed_binding_id!(
     "protocol_suite_id"
 );
 fixed_binding_id!(
+    /// Display-order bytes of the exact Bitcoin genesis block pinned by the deployment.
+    BitcoinGenesisHashV2,
+    "bitcoin_genesis_hash"
+);
+fixed_binding_id!(
     /// Digest of the complete, ordered committee descriptor for this epoch.
     CommitteeDescriptorDigestV2,
     "committee_descriptor_digest"
@@ -92,20 +97,40 @@ fixed_binding_id!(
 /// output index in big-endian order. This matches
 /// `thunderbolt_protocol::ChannelId::canonical_bytes` without introducing a
 /// dependency from the wire crate back to the protocol crate.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FundingOutpointV2 {
     txid: HexBytes<32, 32>,
     vout: u32,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FundingOutpointV2Input {
+    txid: HexBytes<32, 32>,
+    vout: u32,
+}
+
+impl<'de> Deserialize<'de> for FundingOutpointV2 {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let input = FundingOutpointV2Input::deserialize(deserializer)?;
+        Self::new(input.txid.as_bytes(), input.vout).map_err(serde::de::Error::custom)
+    }
+}
+
 impl FundingOutpointV2 {
     /// Constructs an outpoint from a display-order transaction id and vout.
     pub fn new(txid: impl AsRef<[u8]>, vout: u32) -> Result<Self> {
-        Ok(Self {
-            txid: HexBytes::from_bytes("funding_outpoint.txid", txid)?,
-            vout,
-        })
+        let txid = HexBytes::from_bytes("funding_outpoint.txid", txid)?;
+        if vout == u32::MAX && txid.as_bytes().iter().all(|byte| *byte == 0) {
+            return Err(WireError::InvalidBinding {
+                reason: "funding outpoint must not be Bitcoin's null outpoint",
+            });
+        }
+        Ok(Self { txid, vout })
     }
 
     /// Parses the canonical 36-byte funding-outpoint encoding.
@@ -154,6 +179,7 @@ pub struct ChannelBindingV2 {
     pub protocol_version: u16,
     pub protocol_suite_id: ProtocolSuiteIdV2,
     pub network: Network,
+    pub bitcoin_genesis_hash: BitcoinGenesisHashV2,
     pub deployment_id: DeploymentId,
     pub funding_outpoint: FundingOutpointV2,
     pub committee_epoch: u64,
@@ -167,6 +193,7 @@ struct ChannelBindingV2Input {
     protocol_version: u16,
     protocol_suite_id: ProtocolSuiteIdV2,
     network: Network,
+    bitcoin_genesis_hash: BitcoinGenesisHashV2,
     deployment_id: DeploymentId,
     funding_outpoint: FundingOutpointV2,
     committee_epoch: u64,
@@ -184,6 +211,7 @@ impl<'de> Deserialize<'de> for ChannelBindingV2 {
             protocol_version: input.protocol_version,
             protocol_suite_id: input.protocol_suite_id,
             network: input.network,
+            bitcoin_genesis_hash: input.bitcoin_genesis_hash,
             deployment_id: input.deployment_id,
             funding_outpoint: input.funding_outpoint,
             committee_epoch: input.committee_epoch,
@@ -201,6 +229,7 @@ impl ChannelBindingV2 {
     pub fn new(
         protocol_suite_id: ProtocolSuiteIdV2,
         network: Network,
+        bitcoin_genesis_hash: BitcoinGenesisHashV2,
         deployment_id: impl AsRef<[u8]>,
         funding_outpoint: FundingOutpointV2,
         committee_epoch: u64,
@@ -211,6 +240,7 @@ impl ChannelBindingV2 {
             protocol_version: PROTOCOL_VERSION_V2,
             protocol_suite_id,
             network,
+            bitcoin_genesis_hash,
             deployment_id: DeploymentId::from_bytes("deployment_id", deployment_id)?,
             funding_outpoint,
             committee_epoch,
@@ -229,6 +259,7 @@ impl ChannelBindingV2 {
         append_len_prefixed(&mut hasher, &self.protocol_version.to_be_bytes());
         append_len_prefixed(&mut hasher, self.protocol_suite_id.as_bytes());
         append_len_prefixed(&mut hasher, &[network_code(self.network)]);
+        append_len_prefixed(&mut hasher, self.bitcoin_genesis_hash.as_bytes());
         append_len_prefixed(&mut hasher, self.deployment_id.as_bytes());
         append_len_prefixed(&mut hasher, &self.funding_outpoint.canonical_bytes());
         append_len_prefixed(&mut hasher, &self.committee_epoch.to_be_bytes());
@@ -241,6 +272,7 @@ impl ChannelBindingV2 {
         hasher.u16(self.protocol_version);
         hasher.bytes(self.protocol_suite_id.as_bytes());
         hasher.u8(network_code(self.network));
+        hasher.bytes(self.bitcoin_genesis_hash.as_bytes());
         hasher.bytes(self.deployment_id.as_bytes());
         hasher.bytes(&self.funding_outpoint.canonical_bytes());
         hasher.u64(self.committee_epoch);
@@ -279,7 +311,7 @@ impl CanonicalDigest for ChannelBindingV2 {
 ///
 /// The tagged enum makes it impossible to construct an invoice with a step or
 /// a transfer without one through the public constructors or JSON codec.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OperationBindingV2 {
     Invoice {
@@ -291,6 +323,43 @@ pub enum OperationBindingV2 {
         invoice_id: InvoiceId,
         step: u64,
     },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+enum OperationBindingV2Input {
+    Invoice {
+        channel: ChannelBindingV2,
+        invoice_id: InvoiceId,
+    },
+    Transfer {
+        channel: ChannelBindingV2,
+        invoice_id: InvoiceId,
+        step: u64,
+    },
+}
+
+impl<'de> Deserialize<'de> for OperationBindingV2 {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let input = OperationBindingV2Input::deserialize(deserializer)?;
+        let binding = match input {
+            OperationBindingV2Input::Invoice { channel, invoice_id } => Self::Invoice { channel, invoice_id },
+            OperationBindingV2Input::Transfer {
+                channel,
+                invoice_id,
+                step,
+            } => Self::Transfer {
+                channel,
+                invoice_id,
+                step,
+            },
+        };
+        binding.validate_wire().map_err(serde::de::Error::custom)?;
+        Ok(binding)
+    }
 }
 
 impl OperationBindingV2 {
@@ -306,6 +375,11 @@ impl OperationBindingV2 {
     /// Creates a transfer binding over a stable channel context.
     pub fn transfer(channel: ChannelBindingV2, invoice_id: impl AsRef<[u8]>, step: u64) -> Result<Self> {
         channel.validate_wire()?;
+        if step == 0 {
+            return Err(WireError::InvalidBinding {
+                reason: "transfer step must be positive",
+            });
+        }
         Ok(Self::Transfer {
             channel,
             invoice_id: InvoiceId::from_bytes("invoice_id", invoice_id)?,
@@ -362,7 +436,13 @@ impl OperationBindingV2 {
 
 impl ValidateWire for OperationBindingV2 {
     fn validate_wire(&self) -> Result<()> {
-        self.channel().validate_wire()
+        self.channel().validate_wire()?;
+        if matches!(self, Self::Transfer { step: 0, .. }) {
+            return Err(WireError::InvalidBinding {
+                reason: "transfer step must be positive",
+            });
+        }
+        Ok(())
     }
 }
 

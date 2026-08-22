@@ -1,9 +1,9 @@
 use bitcoin::Network;
 use proptest::prelude::*;
 use thunderbolt_wire::{
-    from_json_slice, to_json_vec, AnchorParameterSuiteIdV2, BindingContext, CanonicalDigest, ChannelBindingV2,
-    CommitteeDescriptorDigestV2, DeploymentId, FundingOutpointV2, OperationBindingV2, ProtocolSuiteIdV2, WireError,
-    FUNDING_OUTPOINT_BYTES,
+    from_json_slice, to_json_vec, AnchorParameterSuiteIdV2, BindingContext, BitcoinGenesisHashV2, CanonicalDigest,
+    ChannelBindingV2, CommitteeDescriptorDigestV2, DeploymentId, FundingOutpointV2, OperationBindingV2,
+    ProtocolSuiteIdV2, ValidateWire, WireError, FUNDING_OUTPOINT_BYTES,
 };
 
 fn nonzero(mut bytes: [u8; 32]) -> [u8; 32] {
@@ -15,6 +15,7 @@ fn channel_fixture() -> ChannelBindingV2 {
     ChannelBindingV2::new(
         ProtocolSuiteIdV2::from_bytes([0x11; 32]).expect("suite id"),
         Network::Regtest,
+        BitcoinGenesisHashV2::from_bytes([0x55; 32]).expect("Bitcoin genesis hash"),
         b"local-deployment",
         FundingOutpointV2::new([0x44; 32], 0x5566_7788).expect("outpoint"),
         7,
@@ -38,6 +39,7 @@ fn channel_strategy() -> impl Strategy<Value = ChannelBindingV2> {
     (
         any::<[u8; 32]>(),
         network_strategy(),
+        any::<[u8; 32]>(),
         prop::collection::vec(any::<u8>(), 1..=64),
         any::<[u8; 32]>(),
         any::<u32>(),
@@ -45,18 +47,22 @@ fn channel_strategy() -> impl Strategy<Value = ChannelBindingV2> {
         any::<[u8; 32]>(),
         any::<[u8; 32]>(),
     )
-        .prop_map(|(suite, network, deployment, txid, vout, epoch, committee, anchor)| {
-            ChannelBindingV2::new(
-                ProtocolSuiteIdV2::from_bytes(nonzero(suite)).expect("generated suite id"),
-                network,
-                deployment,
-                FundingOutpointV2::new(txid, vout).expect("generated outpoint"),
-                epoch,
-                CommitteeDescriptorDigestV2::from_bytes(nonzero(committee)).expect("generated committee descriptor"),
-                AnchorParameterSuiteIdV2::from_bytes(nonzero(anchor)).expect("generated anchor suite"),
-            )
-            .expect("generated channel binding")
-        })
+        .prop_map(
+            |(suite, network, genesis, deployment, txid, vout, epoch, committee, anchor)| {
+                ChannelBindingV2::new(
+                    ProtocolSuiteIdV2::from_bytes(nonzero(suite)).expect("generated suite id"),
+                    network,
+                    BitcoinGenesisHashV2::from_bytes(nonzero(genesis)).expect("generated Bitcoin genesis hash"),
+                    deployment,
+                    FundingOutpointV2::new(txid, vout).expect("generated outpoint"),
+                    epoch,
+                    CommitteeDescriptorDigestV2::from_bytes(nonzero(committee))
+                        .expect("generated committee descriptor"),
+                    AnchorParameterSuiteIdV2::from_bytes(nonzero(anchor)).expect("generated anchor suite"),
+                )
+                .expect("generated channel binding")
+            },
+        )
 }
 
 proptest! {
@@ -66,7 +72,7 @@ proptest! {
     fn operation_codec_round_trips_and_context_stays_stable(
         channel in channel_strategy(),
         invoice_id in prop::collection::vec(any::<u8>(), 1..=128),
-        step in any::<u64>(),
+        step in 1_u64..=u64::MAX,
     ) {
         let invoice = OperationBindingV2::invoice(channel.clone(), &invoice_id).expect("invoice binding");
         let transfer = OperationBindingV2::transfer(channel, &invoice_id, step).expect("transfer binding");
@@ -122,6 +128,10 @@ fn every_stable_field_is_authenticated() {
     let mut changed = original.clone();
     changed.network = Network::Signet;
     assert_ne!(changed.context_id().expect("network context"), expected);
+
+    let mut changed = original.clone();
+    changed.bitcoin_genesis_hash = BitcoinGenesisHashV2::from_bytes([0x56; 32]).expect("Bitcoin genesis hash");
+    assert_ne!(changed.context_id().expect("genesis context"), expected);
 
     let mut changed = original.clone();
     changed.deployment_id = DeploymentId::from_bytes("deployment_id", b"other-deployment").expect("deployment id");
@@ -182,6 +192,7 @@ fn operation_fields_do_not_change_the_stable_context() {
 fn invalid_version_epoch_ids_and_operation_shapes_are_rejected() {
     for all_zero in [
         ProtocolSuiteIdV2::from_bytes([0_u8; 32]).is_err(),
+        BitcoinGenesisHashV2::from_bytes([0_u8; 32]).is_err(),
         CommitteeDescriptorDigestV2::from_bytes([0_u8; 32]).is_err(),
         AnchorParameterSuiteIdV2::from_bytes([0_u8; 32]).is_err(),
     ] {
@@ -209,6 +220,28 @@ fn invalid_version_epoch_ids_and_operation_shapes_are_rejected() {
 }
 
 #[test]
+fn transfer_step_zero_is_rejected_at_every_public_boundary() {
+    let channel = channel_fixture();
+    assert!(OperationBindingV2::transfer(channel.clone(), b"invoice-a", 0).is_err());
+
+    let valid = OperationBindingV2::transfer(channel, b"invoice-a", 1).expect("transfer binding");
+    let mut value = serde_json::to_value(&valid).expect("transfer JSON");
+    value["step"] = serde_json::json!(0);
+    let bytes = serde_json::to_vec(&value).expect("JSON bytes");
+    assert!(serde_json::from_slice::<OperationBindingV2>(&bytes).is_err());
+    assert!(from_json_slice::<OperationBindingV2>(&bytes).is_err());
+
+    let mut mutated = valid;
+    let OperationBindingV2::Transfer { step, .. } = &mut mutated else {
+        panic!("fixture is a transfer");
+    };
+    *step = 0;
+    assert!(mutated.validate_wire().is_err());
+    assert!(mutated.proof_context().is_err());
+    assert!(mutated.canonical_digest().is_err());
+}
+
+#[test]
 fn funding_outpoint_has_one_exact_canonical_encoding() {
     let outpoint = FundingOutpointV2::new([0xab; 32], 0x0102_0304).expect("outpoint");
     let bytes = outpoint.canonical_bytes();
@@ -221,6 +254,23 @@ fn funding_outpoint_has_one_exact_canonical_encoding() {
     );
     assert!(FundingOutpointV2::from_canonical_bytes([0_u8; FUNDING_OUTPOINT_BYTES - 1]).is_err());
     assert!(FundingOutpointV2::from_canonical_bytes([0_u8; FUNDING_OUTPOINT_BYTES + 1]).is_err());
+}
+
+#[test]
+fn bitcoin_null_outpoint_is_rejected_without_banning_synthetic_txids() {
+    assert!(FundingOutpointV2::new([0_u8; 32], u32::MAX).is_err());
+
+    let mut null_bytes = [0_u8; FUNDING_OUTPOINT_BYTES];
+    null_bytes[32..].copy_from_slice(&u32::MAX.to_be_bytes());
+    assert!(FundingOutpointV2::from_canonical_bytes(null_bytes).is_err());
+
+    let null_json = serde_json::json!({
+        "txid": "00".repeat(32),
+        "vout": u32::MAX,
+    });
+    assert!(serde_json::from_value::<FundingOutpointV2>(null_json).is_err());
+
+    assert!(FundingOutpointV2::new([0_u8; 32], 0).is_ok());
 }
 
 #[test]
@@ -241,14 +291,14 @@ fn version_one_and_version_two_hashes_are_locked() {
     );
     assert_eq!(
         hex::encode(channel.context_id().expect("v2 context")),
-        "8f37a2450fc4e6a778291d79cf30c3aaeb588f438950eca0fda4b827e8578413"
+        "8fb450a9f25bb41aa67058a79c3543a3b79862a87393af3503d7f26f60bdceae"
     );
     assert_eq!(
         hex::encode(channel.canonical_digest().expect("v2 digest")),
-        "788924b1be5eb557780f8be572b6841d46b3cd59898aa869cfb15837da5c758c"
+        "455c02b3c1e7206c97d6e2a3c72e00d6e47965381b83ee324d78c0256dec672d"
     );
     assert_eq!(
         hex::encode(operation.canonical_digest().expect("v2 operation digest")),
-        "204c3717036205c3e99fdb1b2282bd5bd5cf03e99afa2d1dcdb920df9d06a20e"
+        "5f644086f6f4746c149a057693a9fcc5c5fcdf2a6f8ffb23376443f603b6da95"
     );
 }

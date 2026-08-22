@@ -729,8 +729,8 @@ fn validate_admin_tls(config: &Config, errors: &mut Vec<String>) {
 }
 
 fn validate_committee(committee: &CommitteeConfig, errors: &mut Vec<String>) {
-    if committee.members == 0 || committee.members > 1_024 {
-        errors.push("committee.members must be between 1 and 1024".to_owned());
+    if committee.members == 0 || committee.members > 256 {
+        errors.push("committee.members must be between 1 and 256".to_owned());
     }
     if committee.signing_threshold == 0 || committee.signing_threshold > committee.members {
         errors.push("committee.signing_threshold must be between 1 and committee.members".to_owned());
@@ -1051,6 +1051,14 @@ remote_http = false
         let error = config.validate().expect_err("missing proof bindings must fail");
         assert!(error.to_string().contains("deployment.id"));
         assert!(error.to_string().contains("committee.epoch"));
+    }
+
+    #[test]
+    fn committee_size_matches_the_wire_roster_limit() {
+        let mut config = Config::default();
+        config.committee.members = 257;
+        let error = config.validate().expect_err("oversized committee roster must fail");
+        assert!(error.to_string().contains("between 1 and 256"));
     }
 
     #[test]

@@ -19,8 +19,8 @@ pub use binding::{
     MAX_INVOICE_ID_BYTES, PROTOCOL_VERSION,
 };
 pub use binding_v2::{
-    AnchorParameterSuiteIdV2, ChannelBindingV2, CommitteeDescriptorDigestV2, FundingOutpointV2, OperationBindingV2,
-    ProtocolSuiteIdV2, BINDING_ID_BYTES, FUNDING_OUTPOINT_BYTES, PROTOCOL_VERSION_V2,
+    AnchorParameterSuiteIdV2, BitcoinGenesisHashV2, ChannelBindingV2, CommitteeDescriptorDigestV2, FundingOutpointV2,
+    OperationBindingV2, ProtocolSuiteIdV2, BINDING_ID_BYTES, FUNDING_OUTPOINT_BYTES, PROTOCOL_VERSION_V2,
 };
 pub use codec::{
     from_json_slice, to_json_vec, CanonicalDigest, PaillierCiphertextHex, PaillierNonceHex, PaillierPublicKeyHex,
@@ -32,5 +32,8 @@ pub use hex::{CanonicalInteger, HexBytes};
 pub use invoice::{InvoiceEnvelopeV1, InvoiceProofV1, InvoiceStatementV1};
 pub use message::PublicMessageV1;
 pub use share::{ShareEnvelopeV1, ShareProofV1, ShareStatementV1};
-pub use threshold::{ThresholdDistributionV1, ThresholdEncryptedShareV1, ThresholdEnvelopeV1, MAX_COMMITTEE_MEMBERS};
+pub use threshold::{
+    ThresholdDistributionV1, ThresholdEncryptedShareV1, ThresholdEnvelopeV1, MAX_COMMITTEE_MEMBERS,
+    RECIPIENT_SHARE_MEMBER_ID,
+};
 pub use transfer::{AnchorTransitionV1, TransferEnvelopeV1, TransferProofV1, TransferStatementV1};
