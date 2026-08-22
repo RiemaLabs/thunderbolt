@@ -8,6 +8,7 @@ default-members = [
     "crates/thunderbolt-core",
     "crates/thunderbolt-holder",
     "crates/thunderbolt-keystore",
+    "crates/thunderbolt-ledger",
     "crates/thunderbolt-node",
     "crates/thunderbolt-protocol",
     "crates/thunderbolt-storage",

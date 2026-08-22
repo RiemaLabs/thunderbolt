@@ -1,4 +1,4 @@
-use crate::{Artifact, MAX_BITCOIN_SUPPLY_SAT, MAX_COMMITTEE_MEMBERS};
+use crate::{Artifact, MAX_BITCOIN_SUPPLY_SAT};
 use core::{fmt, str::FromStr};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest as _, Sha256};
@@ -23,6 +23,8 @@ pub const ABSOLUTE_MAX_PENDING_INVOICES_V2: usize = 32;
 pub const DEFAULT_MAX_INVOICE_TTL_MS_V2: u64 = 86_400_000;
 /// Absolute maximum Invoice lifetime: 30 days.
 pub const ABSOLUTE_MAX_INVOICE_TTL_MS_V2: u64 = 2_592_000_000;
+/// Maximum committee topology supported by the active threshold wire suite.
+pub const MAX_COMMITTEE_MEMBERS_V2: u16 = 256;
 
 /// Canonical 32-byte version-two materialized-state hash.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -511,7 +513,7 @@ pub(crate) fn validate_capacity(capacity_sat: u64) -> Result<(), V2Error> {
 }
 
 pub(crate) fn validate_committee_topology(member_count: u16, threshold: u16) -> Result<(), V2Error> {
-    if member_count == 0 || member_count > MAX_COMMITTEE_MEMBERS || threshold == 0 || threshold > member_count {
+    if member_count == 0 || member_count > MAX_COMMITTEE_MEMBERS_V2 || threshold == 0 || threshold > member_count {
         return Err(V2Error::InvalidCommitteeTopology);
     }
     Ok(())

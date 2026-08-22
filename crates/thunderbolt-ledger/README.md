@@ -4,7 +4,7 @@
 for Bitcoin Thunderbolt. It is suitable for a replicated state machine, but it
 is not itself a network, consensus engine, ABCI server, database, or verifier.
 
-## What is committed
+## What is signed
 
 An actor submits a `SignedProposalV2` containing:
 
@@ -25,11 +25,11 @@ containing only authenticated typed fields and the exact entry hash. Raw
 verifier evidence, witnesses, decrypted shares, and private protocol state are
 outside this contract.
 
-## Block commitment
+## Block execution commitment
 
 The consensus layer supplies a positive height, a positive block time in Unix
 milliseconds, a prior application hash, and proposal order. No local clock is
-read. The block time is recorded in each committed-entry metadata record and
+read. The block time is recorded in each executed-entry metadata record and
 is available to deterministic event verification, including invoice expiry.
 
 The ordered Merkle tree uses separate empty, leaf, and internal-node domains.
@@ -55,6 +55,18 @@ Every labeled item is length-prefixed. Empty blocks have a defined Merkle root
 and still advance the application hash. A block accepts at most 1,024 entries
 and 8 MiB of total canonical event bytes.
 
+`ExecutedBlockV2` is deliberately named for what it proves: deterministic,
+self-consistent application execution. It is not proof that validators reached
+consensus. `validate_successor` checks the same Ledger chain, exact next height,
+prior application hash, and monotonic block time against a trusted previous
+execution. Ordered inclusion proofs authenticate entry metadata to an executed
+block's Merkle root.
+
+Neither API supplies validator signatures, a quorum certificate, or a trusted
+header chain. A CometBFT quorum or light-client receipt is a separate future
+capability and must be verified before an operator treats execution output as
+consensus-final.
+
 ## Integration boundary
 
 The future ABCI application must still:
@@ -62,10 +74,14 @@ The future ABCI application must still:
 - compare `ledger_chain_id` with its configured consensus chain;
 - validate the first proposal for each channel against the persisted channel
   head, then use the same-block predecessor checks here;
+- persist a durable, cross-block `request_digest -> entry_hash` mapping and
+  reject the same request digest if it ever names a different entry hash;
 - verify that block height, prior application hash, and prior consensus time
-  extend its finalized state;
+  extend trusted executed state with `validate_successor`;
 - decode canonical event bytes into the exact typed event schema and run the
-  protocol-v2 reducer before committing a finalized block atomically.
+  protocol-v2 reducer before storing an executed block atomically;
+- verify a future CometBFT quorum or light-client receipt separately before
+  exposing any consensus-finality capability.
 
 Key rotation and key recovery are not specified by protocol v2. The governance
 process for authorizing either operation is also undecided. This crate does not

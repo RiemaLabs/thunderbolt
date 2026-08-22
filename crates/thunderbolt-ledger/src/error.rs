@@ -40,10 +40,17 @@ pub enum LedgerContractError {
     #[error("actor request id is not bound to the proposal channel and actor")]
     RequestBindingMismatch,
 
-    /// A pending or finalized block violated a deterministic block invariant.
+    /// A pending or executed block violated a deterministic block invariant.
     #[error("invalid protocol-v2 block: {reason}")]
     InvalidBlock {
         /// Stable invariant failure description.
+        reason: &'static str,
+    },
+
+    /// An ordered entry-Merkle inclusion proof was malformed or invalid.
+    #[error("invalid protocol-v2 entry inclusion proof: {reason}")]
+    InvalidMerkleProof {
+        /// Stable proof failure description.
         reason: &'static str,
     },
 

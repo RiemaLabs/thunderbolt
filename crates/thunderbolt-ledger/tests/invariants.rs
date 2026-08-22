@@ -3,7 +3,7 @@ mod common;
 use serde_json::Value;
 use thunderbolt_ledger::{
     entry_merkle_root_v2, ActorKeyAlgorithmV2, ActorRoleV2, AppHashV2, CanonicalEventV2, ClientRequestNonceV2,
-    EntryHashV2, EventKindV2, FinalizedBlockV2, LedgerChainIdV2, PendingBlockV2, ProposalBodyV2, EVENT_BYTES_MAX,
+    EntryHashV2, EventKindV2, ExecutedBlockV2, LedgerChainIdV2, PendingBlockV2, ProposalBodyV2, EVENT_BYTES_MAX,
     LEDGER_CHAIN_ID_MAX,
 };
 
@@ -127,7 +127,7 @@ fn opening_and_successor_chain_shape_is_fail_closed() {
     );
     let mut first_block = PendingBlockV2::new(chain_id.clone(), 1, 100, AppHashV2::zero()).expect("first block");
     first_block.push(open.clone()).expect("opening proposal");
-    let first_block = first_block.finalize().expect("first finalized block");
+    let first_block = first_block.execute().expect("first executed block");
     let predecessor = first_block.entries()[0].metadata();
 
     let invoice_body = ProposalBodyV2::new(
@@ -183,7 +183,7 @@ fn consensus_time_is_external_positive_and_monotonic() {
         .expect("genesis has no prior time");
     assert!(first.validate_previous_block_time(Some(99)).is_err());
 
-    let first = first.finalize().expect("empty first block");
+    let first = first.execute().expect("empty first block");
     let second = PendingBlockV2::new(chain_id, 2, 100, first.app_hash().clone()).expect("second block");
     second
         .validate_previous_block_time(Some(100))
@@ -193,7 +193,52 @@ fn consensus_time_is_external_positive_and_monotonic() {
 }
 
 #[test]
-fn finalized_block_serde_recomputes_metadata_root_time_and_app_hash() {
+fn successor_validation_binds_chain_height_app_hash_and_time() {
+    let chain_id = LedgerChainIdV2::new("tb-successor").expect("chain id");
+    let previous = PendingBlockV2::new(chain_id.clone(), 1, 100, AppHashV2::zero())
+        .expect("first pending block")
+        .execute()
+        .expect("first execution");
+
+    let correct =
+        PendingBlockV2::new(chain_id.clone(), 2, 100, previous.app_hash().clone()).expect("correct successor");
+    correct
+        .validate_successor(&previous)
+        .expect("exact successor continuity");
+    let correct = correct.execute().expect("second execution");
+    correct
+        .validate_successor(&previous)
+        .expect("executed successor continuity");
+
+    let wrong_chain = PendingBlockV2::new(
+        LedgerChainIdV2::new("tb-other").expect("other chain"),
+        2,
+        100,
+        previous.app_hash().clone(),
+    )
+    .expect("shape-valid other chain");
+    assert!(wrong_chain.validate_successor(&previous).is_err());
+
+    let wrong_height =
+        PendingBlockV2::new(chain_id.clone(), 3, 100, previous.app_hash().clone()).expect("shape-valid height gap");
+    assert!(wrong_height.validate_successor(&previous).is_err());
+
+    let wrong_hash = PendingBlockV2::new(
+        chain_id.clone(),
+        2,
+        100,
+        AppHashV2::from_bytes([0x99; 32]).expect("nonzero app hash"),
+    )
+    .expect("shape-valid wrong hash");
+    assert!(wrong_hash.validate_successor(&previous).is_err());
+
+    let backwards_time =
+        PendingBlockV2::new(chain_id, 2, 99, previous.app_hash().clone()).expect("shape-valid backwards time");
+    assert!(backwards_time.validate_successor(&previous).is_err());
+}
+
+#[test]
+fn executed_block_serde_recomputes_metadata_root_time_and_app_hash() {
     let proposal = signed_open("tb-serde", [1; 32], 0, 1, 1, ActorRoleV2::Holder, vec![1; 16], vec![1]);
     let mut block = PendingBlockV2::new(
         LedgerChainIdV2::new("tb-serde").expect("chain id"),
@@ -203,22 +248,22 @@ fn finalized_block_serde_recomputes_metadata_root_time_and_app_hash() {
     )
     .expect("block");
     block.push(proposal).expect("proposal");
-    let block = block.finalize().expect("finalized block");
+    let block = block.execute().expect("executed block");
 
     let mut value = serde_json::to_value(&block).expect("block value");
     value["block_time_ms"] = Value::from(124);
-    assert!(serde_json::from_value::<FinalizedBlockV2>(value).is_err());
+    assert!(serde_json::from_value::<ExecutedBlockV2>(value).is_err());
 
     let mut value = serde_json::to_value(&block).expect("block value");
     value["entry_merkle_root"] = Value::String("00".repeat(32));
-    assert!(serde_json::from_value::<FinalizedBlockV2>(value).is_err());
+    assert!(serde_json::from_value::<ExecutedBlockV2>(value).is_err());
 
     let mut value = serde_json::to_value(&block).expect("block value");
     value
         .as_object_mut()
         .expect("block object")
         .insert("unknown".to_owned(), Value::Bool(true));
-    assert!(serde_json::from_value::<FinalizedBlockV2>(value).is_err());
+    assert!(serde_json::from_value::<ExecutedBlockV2>(value).is_err());
 }
 
 #[test]
@@ -231,8 +276,8 @@ fn empty_block_has_a_defined_merkle_root_and_application_hash() {
         AppHashV2::zero(),
     )
     .expect("empty pending block")
-    .finalize()
-    .expect("empty finalized block");
+    .execute()
+    .expect("empty executed block");
     assert!(block.entries().is_empty());
     assert_eq!(block.entry_merkle_root(), &empty_root);
     assert!(!block.app_hash().is_zero());

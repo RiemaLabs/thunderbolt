@@ -82,12 +82,12 @@ fixed_digest_type!(
     "proposal_digest"
 );
 fixed_digest_type!(
-    /// Stable hash of a committed channel entry.
+    /// Stable hash of an executed channel entry.
     EntryHashV2,
     "entry_hash"
 );
 fixed_digest_type!(
-    /// Incremental replicated application hash after a finalized block.
+    /// Incremental replicated application hash after an executed block.
     AppHashV2,
     "app_hash"
 );
@@ -112,9 +112,14 @@ fixed_digest_type!(
     "event_digest"
 );
 fixed_digest_type!(
-    /// Ordered Merkle root of all committed entries in one block.
+    /// Ordered Merkle root of all executed entries in one block.
     EntryMerkleRootV2,
     "entry_merkle_root"
+);
+fixed_digest_type!(
+    /// Hash of one internal or sibling node in the ordered entry Merkle tree.
+    MerkleNodeHashV2,
+    "merkle_node_hash"
 );
 
 /// Consensus Ledger chain id included in every replay-protection domain.
@@ -200,7 +205,7 @@ impl EntryHashV2 {
 }
 
 impl AppHashV2 {
-    /// Sentinel application hash before the first finalized block.
+    /// Sentinel application hash before the first executed block.
     pub const ZERO_BYTES: [u8; 32] = [0; 32];
 
     /// Returns the initial application-hash sentinel.

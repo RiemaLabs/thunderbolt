@@ -43,18 +43,17 @@ checkpoint with `None -> checkpoint`, and only then unlocks secret records.
 Normal open requires the file checkpoint to equal the external checkpoint
 before the recovery handle exposes any private record.
 
-After each transaction, the adapter obtains the exact candidate checkpoint and
-performs an external compare-and-swap from the prior checkpoint. It always
-reads the store back: an error whose write became durable is accepted only when
-the exact candidate is current. No acknowledgement, nonce reservation, or
-successful engine CAS returns before this check.
+Every read and write runs inside the keystore's fenced transaction callback.
+Callback output is withheld until the encrypted replacement and exact external
+checkpoint CAS both succeed. A replay carries no freshly recomputed output and
+is therefore rejected by this adapter. No acknowledgement, nonce reservation,
+state read, or successful engine CAS escapes before anchoring.
 
-If the local write succeeds but checkpoint CAS does not, the adapter records
-the non-secret candidate, drops the decrypted vault, and poisons itself. Restart
-reconciliation requires the independently retained prior checkpoint and exact
-candidate. Cold-start inference from `R = F + 1` is forbidden. After the known
-candidate wins checkpoint CAS, the adapter unlocks the vault and verifies its
-engine/idempotency records before returning state.
+Normal open requires exact checkpoint equality. Generic `R = F + 1` recovery
+is forbidden because `RecoveryVault` intentionally exposes no private
+AdapterState before anchoring; advancing an unverified candidate could pin the
+external checkpoint to an unrelated AEAD-valid fork. Any unresolved candidate
+therefore fails closed for explicit operator/control-plane recovery.
 
 ## Nonce ordering
 
@@ -72,9 +71,11 @@ return. A tombstone cannot be replaced or removed.
 - Engine plaintext stays in `VaultPlaintext` or `Zeroizing<Vec<u8>>` buffers.
   Moving an encoded buffer into `SecretValue` transfers its allocation directly;
   error paths zeroize both source and destination wrappers.
-- Decrypted keystore views are copied immediately into zeroizing allocations
-  before parsing. No plaintext is written to temporary files, backups, floor
-  records, transaction IDs, or error strings.
+- Decrypted keystore views exist only inside fenced callbacks and are copied
+  immediately into zeroizing allocations before parsing. The state record and
+  every descriptor-bound idempotency record are validated before callback
+  output or checkpoint advancement. No plaintext is written to temporary files,
+  backups, checkpoint records, transaction IDs, or error strings.
 - External checkpoints hash randomized authenticated ciphertext, not plaintext.
   Request IDs contain only cryptographic digests of high-entropy secret state.
 - On any ambiguous keystore write, checkpoint mismatch, identity mismatch, or
@@ -84,10 +85,14 @@ return. A tombstone cannot be replaced or removed.
 ## Operational limits
 
 The keystore bounds one record to 512 KiB and retains at most 4,096 records and
-transaction receipts. The committee engine's replay journal must be rotated or
-compacted before reaching those limits. Receipt pruning requires an anchored
-checkpoint and a separate durable request-history policy; nonce tombstones must
-never be pruned.
+transaction receipts. `prune_finalized_history` first prunes receipts through an
+explicit externally finalized revision, then canonically removes the supplied
+finalized idempotency-record set. The caller must retain durable request history;
+nonce tombstones are never pruned.
+
+The encrypted engine replay journal itself is not compacted. Reaching the
+512 KiB state-record ceiling still requires epoch rotation or a future
+proof-preserving journal compactor and remains a production liveness blocker.
 
 A production `RollbackFloorStore` must live in an independent authenticated
 trust domain such as an HSM-backed monotonic service or replicated control

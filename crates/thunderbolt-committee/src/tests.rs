@@ -16,8 +16,9 @@ use thunderbolt_core::zkp::{
     TransferWitness,
 };
 use thunderbolt_keystore::{
-    CheckpointCasOutcome, CommitteeSessionNonce, KdfParams, Password, RecordStatus, RollbackFloorStore,
-    VaultCheckpoint, VaultIdentity, VaultRevision, MIN_ARGON2_ITERATIONS, MIN_ARGON2_MEMORY_KIB,
+    AnchoredTransactOutcome, CheckpointCasOutcome, CommitteeSessionNonce, ExpectedRecord, KdfParams, Password,
+    RecordKey, RecordNamespace, RecordStatus, RollbackFloorStore, SecretValue, TransactionId, Vault, VaultCheckpoint,
+    VaultIdentity, VaultRevision, MIN_ARGON2_ITERATIONS, MIN_ARGON2_MEMORY_KIB,
 };
 use thunderbolt_protocol::EntryHash;
 use thunderbolt_wire::{
@@ -740,7 +741,10 @@ fn keystore_adapter_provisions_opens_applies_and_replays() -> std::result::Resul
     let replay = apply_fixture(&mut reopened, fixture)?;
     assert_eq!(replay, acknowledgement);
     assert_eq!(reopened.durable_revision(), 2);
-    assert_eq!(reopened.into_vault().floor_revision()?, physical_revision);
+    assert_eq!(
+        reopened.into_vault().floor_revision()?,
+        VaultRevision::new(physical_revision.get() + 1)
+    );
     Ok(())
 }
 
@@ -756,9 +760,7 @@ fn keystore_adapter_rejects_engine_cas_conflicts_without_advancing_floor() -> st
     let result = CommitteeVault::compare_and_swap(&mut adapter, 9, entry);
     assert!(matches!(
         result,
-        Err(VaultStoreError::Conflict {
-            current_revision: Some(0)
-        })
+        Err(VaultStoreError::Conflict { current_revision: None })
     ));
     assert_eq!(adapter.floor_revision()?, before);
     let loaded = CommitteeVault::load(&mut adapter)?.ok_or("missing adapter record")?;
@@ -776,7 +778,7 @@ fn keystore_adapter_rejects_engine_cas_conflicts_without_advancing_floor() -> st
 }
 
 #[test]
-fn keystore_adapter_recovers_pending_and_applied_floor_failures() -> std::result::Result<(), Box<dyn Error>> {
+fn keystore_adapter_refuses_unanchored_pending_and_applied_candidates() -> std::result::Result<(), Box<dyn Error>> {
     let fixture = fixture_for_example()?;
     for (case, failed_revision) in [("pending", 2_u64), ("applied", 3_u64)] {
         let directory = TempDir::new()?;
@@ -787,28 +789,110 @@ fn keystore_adapter_recovers_pending_and_applied_floor_failures() -> std::result
             apply_fixture(&mut engine, fixture).is_err(),
             "{case} failure must fail closed"
         );
-        let adapter = engine.into_vault();
-        let candidate = adapter.recovery_candidate().ok_or("missing recovery candidate")?;
-        drop(adapter);
-        let identity = committee_keystore_identity(&fixture.descriptor, fixture.secrets[0].member_id)?;
-        let expected = floor.load_checkpoint(identity)?.ok_or("missing expected checkpoint")?;
-
-        let adapter = KeystoreCommitteeVault::reconcile_candidate(
+        drop(engine.into_vault());
+        let reopened = KeystoreCommitteeVault::open(
             directory.path().join("committee.vault"),
             &fixture.descriptor,
             fixture.secrets[0].member_id,
             keystore_password()?,
             floor,
-            expected,
-            candidate,
-        )?;
-        let mut recovered = CommitteeMemberEngine::open(adapter, fixture.descriptor.clone())?;
-        let acknowledgement = apply_fixture(&mut recovered, fixture)?;
-        assert_eq!(acknowledgement.durable_revision(), 2);
-        let replay = apply_fixture(&mut recovered, fixture)?;
-        assert_eq!(replay, acknowledgement);
-        assert_eq!(recovered.durable_revision(), 2);
+        );
+        assert!(matches!(reopened, Err(KeystoreCommitteeVaultError::FloorMismatch)));
     }
+    Ok(())
+}
+
+#[test]
+fn keystore_adapter_preserves_empty_load_until_provisioned() -> std::result::Result<(), Box<dyn Error>> {
+    let fixture = fixture_for_example()?;
+    let directory = TempDir::new()?;
+    let floor = TestFloorStore::default();
+    let mut adapter = KeystoreCommitteeVault::create(
+        directory.path().join("committee.vault"),
+        &fixture.descriptor,
+        fixture.secrets[0].member_id,
+        keystore_password()?,
+        keystore_params()?,
+        floor,
+    )?;
+    assert!(CommitteeVault::load(&mut adapter)?.is_none());
+    assert!(CommitteeMemberEngine::open(adapter, fixture.descriptor.clone()).is_err());
+    Ok(())
+}
+
+#[test]
+fn keystore_adapter_rejects_orphan_records_without_engine_state() -> std::result::Result<(), Box<dyn Error>> {
+    let fixture = fixture_for_example()?;
+    let directory = TempDir::new()?;
+    let path = directory.path().join("committee.vault");
+    let floor = TestFloorStore::default();
+    let adapter = KeystoreCommitteeVault::create(
+        &path,
+        &fixture.descriptor,
+        fixture.secrets[0].member_id,
+        keystore_password()?,
+        keystore_params()?,
+        floor.clone(),
+    )?;
+    let identity = adapter.identity();
+    drop(adapter);
+    let mut raw = Vault::open_anchored(&path, identity, keystore_password()?, &floor)?;
+    let expected = raw.checkpoint()?;
+    let outcome = raw.transact(expected, TransactionId::new([0xe1; 32]), &floor, |transaction| {
+        transaction.compare_and_swap(
+            RecordKey::new(RecordNamespace::AdapterState, b"orphan-adapter".to_vec())?,
+            ExpectedRecord::Absent,
+            SecretValue::from_bytes(vec![0xe2; 32])?,
+        )?;
+        transaction.compare_and_swap(
+            RecordKey::session_nonce(b"orphan-nonce".to_vec())?,
+            ExpectedRecord::Absent,
+            SecretValue::from_bytes(vec![0xe3; 32])?,
+        )?;
+        Ok(())
+    })?;
+    assert!(matches!(outcome, AnchoredTransactOutcome::Applied { .. }));
+    drop(raw);
+    let mut adapter = KeystoreCommitteeVault::open(
+        &path,
+        &fixture.descriptor,
+        fixture.secrets[0].member_id,
+        keystore_password()?,
+        floor.clone(),
+    )?;
+    assert!(CommitteeVault::load(&mut adapter).is_err());
+    drop(adapter);
+    let adapter = KeystoreCommitteeVault::open(
+        &path,
+        &fixture.descriptor,
+        fixture.secrets[0].member_id,
+        keystore_password()?,
+        floor,
+    )?;
+    let package = package_for(fixture, 0, fixture.descriptor.clone()).map_err(|error| TestError(error.to_string()))?;
+    assert!(CommitteeMemberEngine::provision(adapter, package).is_err());
+    Ok(())
+}
+
+#[test]
+fn keystore_adapter_prunes_finalized_history_canonically() -> std::result::Result<(), Box<dyn Error>> {
+    let fixture = fixture_for_example()?;
+    let directory = TempDir::new()?;
+    let floor = TestFloorStore::default();
+    let engine = real_engine(fixture, 0, &directory, floor)?;
+    let mut adapter = engine.into_vault();
+    let finalized = adapter
+        .current_request_digest()?
+        .ok_or("missing provision request digest")?;
+    let mut engine = CommitteeMemberEngine::open(adapter, fixture.descriptor.clone())?;
+    apply_fixture(&mut engine, fixture)?;
+    let mut adapter = engine.into_vault();
+    let before = adapter.checkpoint()?;
+    let through = before.revision();
+    let after = adapter.prune_finalized_history(through, &[finalized, finalized])?;
+    assert!(after.revision() > before.revision());
+    let reopened = CommitteeMemberEngine::open(adapter, fixture.descriptor.clone())?;
+    assert_eq!(reopened.durable_revision(), 2);
     Ok(())
 }
 

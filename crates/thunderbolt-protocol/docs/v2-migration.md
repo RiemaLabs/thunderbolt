@@ -12,7 +12,8 @@ funding outpoint, committee epoch and descriptor digest, and anchor parameter
 suite. V1 free-string actors, participant ids, and idempotency keys are not v2
 authorization inputs. Actor-scoped request digests provide replay identity. The
 Open event fixes the member count and threshold carried in materialized state;
-the trusted Open verifier must match that topology to the bound descriptor.
+the trusted Open verifier must match that topology to the bound descriptor. The
+active v2 threshold wire suite caps the topology at 256 members.
 
 The v2 reducer implements deterministic application rules for a bounded set of
 concurrent Invoice events, one selected Transfer, and total-order Finalize. A
@@ -33,8 +34,8 @@ payload required by the Transfer verifier.
 
 Ledger block time is positive trusted consensus input, not client evidence. The
 reducer accepts time only through a proposal position in a validated pending
-block or through recomputed finalized-entry metadata, and it pins one expected
-Ledger chain id.
+block or through recomputed executed-entry metadata, and it pins one expected
+Ledger chain id. Ledger execution alone does not assert Byzantine finality.
 Proofs and the bounded raw closing transaction are untrusted event inputs.
 Authentication and cryptographic acceptance arrive through typed trusted
 capabilities; serialized events cannot assert a `verified` result. Finalize's

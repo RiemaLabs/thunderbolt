@@ -2,7 +2,9 @@ mod common;
 
 use proptest::prelude::*;
 use serde_json::Value;
-use thunderbolt_ledger::{ActorRoleV2, AppHashV2, FinalizedBlockV2, LedgerChainIdV2, PendingBlockV2, SignedProposalV2};
+use thunderbolt_ledger::{
+    ActorRoleV2, AppHashV2, EntryMerkleProofV2, ExecutedBlockV2, LedgerChainIdV2, PendingBlockV2, SignedProposalV2,
+};
 
 use common::signed_open;
 
@@ -36,7 +38,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(96))]
 
     #[test]
-    fn signed_proposal_and_finalized_block_serde_round_trip(
+    fn signed_proposal_and_executed_block_serde_round_trip(
         proposal in signed_proposal_strategy(),
         block_time_ms in 1_u64..=u64::MAX,
     ) {
@@ -50,10 +52,10 @@ proptest! {
         let chain_id = proposal.body().ledger_chain_id().clone();
         let mut pending = PendingBlockV2::new(chain_id, 1, block_time_ms, AppHashV2::zero())?;
         pending.push(proposal)?;
-        let finalized = pending.finalize()?;
-        let encoded = serde_json::to_vec(&finalized).expect("finalized block JSON");
-        let decoded: FinalizedBlockV2 = serde_json::from_slice(&encoded).expect("validated block decode");
-        prop_assert_eq!(decoded, finalized);
+        let executed = pending.execute()?;
+        let encoded = serde_json::to_vec(&executed).expect("executed block JSON");
+        let decoded: ExecutedBlockV2 = serde_json::from_slice(&encoded).expect("validated block decode");
+        prop_assert_eq!(decoded, executed);
     }
 
     #[test]
@@ -112,16 +114,78 @@ proptest! {
         for proposal in &proposals {
             forward.push(proposal.clone())?;
         }
-        let forward = forward.finalize()?;
+        let forward = forward.execute()?;
 
         let mut reverse = PendingBlockV2::new(chain_id, 1, block_time_ms, AppHashV2::zero())?;
         for proposal in proposals.iter().rev() {
             reverse.push(proposal.clone())?;
         }
-        let reverse = reverse.finalize()?;
+        let reverse = reverse.execute()?;
 
         prop_assert_ne!(forward.entry_merkle_root(), reverse.entry_merkle_root());
         prop_assert_ne!(forward.app_hash(), reverse.app_hash());
+    }
+
+    #[test]
+    fn ordered_merkle_inclusion_proofs_round_trip_and_reject_tampering(
+        chain_suffix in "[a-z0-9]{1,20}",
+        payloads in prop::collection::vec(prop::collection::vec(any::<u8>(), 1..=128), 2..=12),
+        requested_index in any::<usize>(),
+        tamper_target in 0_u8..4,
+        block_time_ms in 1_u64..=u64::MAX,
+    ) {
+        let chain_text = format!("tb-{chain_suffix}");
+        let chain_id = LedgerChainIdV2::new(&chain_text)?;
+        let mut pending = PendingBlockV2::new(chain_id, 1, block_time_ms, AppHashV2::zero())?;
+        for (index, payload) in payloads.iter().enumerate() {
+            let discriminator = u64::try_from(index).expect("small property-test index") + 1;
+            let mut txid = [0_u8; 32];
+            txid[24..].copy_from_slice(&discriminator.to_be_bytes());
+            let mut nonce = vec![0x77; 16];
+            nonce[8..].copy_from_slice(&discriminator.to_be_bytes());
+            pending.push(signed_open(
+                &chain_text,
+                txid,
+                u32::try_from(index).expect("small property-test index"),
+                1,
+                discriminator,
+                ActorRoleV2::Holder,
+                nonce,
+                payload.clone(),
+            ))?;
+        }
+        let executed = pending.execute()?;
+        let leaf_index = requested_index % executed.entries().len();
+        let metadata = executed.entries()[leaf_index].metadata();
+        let proof = executed.entry_proof(leaf_index)?;
+        proof.verify(metadata, &executed)?;
+
+        let encoded = serde_json::to_vec(&proof).expect("proof JSON");
+        let decoded: EntryMerkleProofV2 = serde_json::from_slice(&encoded).expect("proof decode");
+        prop_assert_eq!(&decoded, &proof);
+        decoded.verify(metadata, &executed)?;
+
+        let mut value = serde_json::to_value(&proof).expect("proof value");
+        match tamper_target {
+            0 => mutate_first_hex_nibble(&mut value["siblings"][0]["hash"]),
+            1 => {
+                let side = value["siblings"][0]["side"].as_str().expect("sibling side");
+                value["siblings"][0]["side"] = Value::String(
+                    if side == "left" { "right" } else { "left" }.to_owned(),
+                );
+            }
+            2 => {
+                let other = (leaf_index + 1) % executed.entries().len();
+                value["leaf_index"] = Value::from(u64::try_from(other).expect("small property-test index"));
+            }
+            _ => value["leaf_count"] = Value::from(1),
+        }
+        if let Ok(tampered) = serde_json::from_value::<EntryMerkleProofV2>(value) {
+            prop_assert!(tampered.verify(metadata, &executed).is_err());
+        }
+
+        let other = (leaf_index + 1) % executed.entries().len();
+        prop_assert!(proof.verify(executed.entries()[other].metadata(), &executed).is_err());
     }
 }
 

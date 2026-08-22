@@ -264,8 +264,8 @@ impl ProposalBodyV2 {
         EntryHashV2::from_bytes(transcript.digest())
     }
 
-    /// Checks this proposal against the last committed metadata for its channel.
-    pub fn validate_predecessor(&self, predecessor: Option<&CommittedEntryMetadataV2>) -> Result<()> {
+    /// Checks this proposal against the last executed metadata for its channel.
+    pub fn validate_predecessor(&self, predecessor: Option<&ExecutedEntryMetadataV2>) -> Result<()> {
         match predecessor {
             None if self.sequence == 0 && self.previous_entry_hash.is_zero() => Ok(()),
             None => Err(LedgerContractError::InvalidProposal {
@@ -407,7 +407,7 @@ impl SignedProposalV2 {
 ///
 /// This capability can only be obtained by verifying a [`SignedProposalV2`].
 /// Consensus block height and time remain properties of [`crate::PendingBlockV2`]
-/// and [`crate::FinalizedBlockV2`], not actor-controlled proposal fields.
+/// and [`crate::ExecutedBlockV2`], not actor-controlled proposal fields.
 #[derive(Clone, Debug)]
 pub struct VerifiedProposalViewV2<'a> {
     ledger_chain_id: &'a LedgerChainIdV2,
@@ -474,13 +474,13 @@ impl<'a> VerifiedProposalViewV2<'a> {
     }
 }
 
-/// Deterministic, query-friendly metadata for one committed entry.
+/// Deterministic, query-friendly metadata for one executed entry.
 ///
 /// Every field is derived from a verified proposal and its exact block
 /// position. Deserialization recomputes and compares the complete value.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct CommittedEntryMetadataV2 {
+pub struct ExecutedEntryMetadataV2 {
     block_height: u64,
     block_time_ms: u64,
     block_index: u32,
@@ -497,7 +497,7 @@ pub struct CommittedEntryMetadataV2 {
     event_digest: EventDigestV2,
 }
 
-impl CommittedEntryMetadataV2 {
+impl ExecutedEntryMetadataV2 {
     pub(crate) fn derive(
         block_height: u64,
         block_time_ms: u64,
@@ -534,7 +534,7 @@ impl CommittedEntryMetadataV2 {
         })
     }
 
-    /// Returns the finalized block height.
+    /// Returns the executed block height.
     pub const fn block_height(&self) -> u64 {
         self.block_height
     }
@@ -564,7 +564,7 @@ impl CommittedEntryMetadataV2 {
         self.sequence
     }
 
-    /// Returns the prior committed channel entry hash.
+    /// Returns the prior executed channel entry hash.
     pub const fn previous_entry_hash(&self) -> &EntryHashV2 {
         &self.previous_entry_hash
     }
@@ -605,24 +605,24 @@ impl CommittedEntryMetadataV2 {
     }
 }
 
-/// A verified signed proposal paired with recomputable committed metadata.
+/// A verified signed proposal paired with recomputable executed metadata.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct CommittedEntryV2 {
+pub struct ExecutedEntryV2 {
     proposal: SignedProposalV2,
-    metadata: CommittedEntryMetadataV2,
+    metadata: ExecutedEntryMetadataV2,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CommittedEntryInput {
+struct ExecutedEntryInput {
     proposal: SignedProposalV2,
-    metadata: CommittedEntryMetadataV2Input,
+    metadata: ExecutedEntryMetadataV2Input,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CommittedEntryMetadataV2Input {
+struct ExecutedEntryMetadataV2Input {
     block_height: u64,
     block_time_ms: u64,
     block_index: u32,
@@ -639,9 +639,9 @@ struct CommittedEntryMetadataV2Input {
     event_digest: EventDigestV2,
 }
 
-impl CommittedEntryMetadataV2Input {
-    fn into_metadata(self) -> CommittedEntryMetadataV2 {
-        CommittedEntryMetadataV2 {
+impl ExecutedEntryMetadataV2Input {
+    fn into_metadata(self) -> ExecutedEntryMetadataV2 {
+        ExecutedEntryMetadataV2 {
             block_height: self.block_height,
             block_time_ms: self.block_time_ms,
             block_index: self.block_index,
@@ -660,12 +660,12 @@ impl CommittedEntryMetadataV2Input {
     }
 }
 
-impl<'de> Deserialize<'de> for CommittedEntryV2 {
+impl<'de> Deserialize<'de> for ExecutedEntryV2 {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let input = CommittedEntryInput::deserialize(deserializer)?;
+        let input = ExecutedEntryInput::deserialize(deserializer)?;
         let supplied_metadata = input.metadata.into_metadata();
         let entry = Self::derive(
             supplied_metadata.block_height,
@@ -676,21 +676,21 @@ impl<'de> Deserialize<'de> for CommittedEntryV2 {
         .map_err(serde::de::Error::custom)?;
         if entry.metadata != supplied_metadata {
             return Err(serde::de::Error::custom(LedgerContractError::InvalidBlock {
-                reason: "committed entry metadata does not match proposal",
+                reason: "executed entry metadata does not match proposal",
             }));
         }
         Ok(entry)
     }
 }
 
-impl CommittedEntryV2 {
+impl ExecutedEntryV2 {
     pub(crate) fn derive(
         block_height: u64,
         block_time_ms: u64,
         block_index: u32,
         proposal: SignedProposalV2,
     ) -> Result<Self> {
-        let metadata = CommittedEntryMetadataV2::derive(block_height, block_time_ms, block_index, &proposal)?;
+        let metadata = ExecutedEntryMetadataV2::derive(block_height, block_time_ms, block_index, &proposal)?;
         Ok(Self { proposal, metadata })
     }
 
@@ -699,8 +699,8 @@ impl CommittedEntryV2 {
         &self.proposal
     }
 
-    /// Returns deterministic committed metadata.
-    pub const fn metadata(&self) -> &CommittedEntryMetadataV2 {
+    /// Returns deterministic executed metadata.
+    pub const fn metadata(&self) -> &ExecutedEntryMetadataV2 {
         &self.metadata
     }
 }

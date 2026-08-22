@@ -2172,8 +2172,10 @@ dependencies = [
  "serde",
  "serde_bare",
  "sha2",
+ "tempfile",
  "thiserror",
  "thunderbolt-core",
+ "thunderbolt-keystore",
  "thunderbolt-protocol",
  "thunderbolt-wire",
  "zeroize",
@@ -2224,8 +2226,11 @@ dependencies = [
  "proptest",
  "secp",
  "sha2",
+ "static_assertions",
+ "tempfile",
  "thiserror",
  "thunderbolt-core",
+ "thunderbolt-keystore",
  "thunderbolt-protocol",
  "thunderbolt-wire",
  "zeroize",
@@ -2247,6 +2252,21 @@ dependencies = [
  "tempfile",
  "thiserror",
  "zeroize",
+]
+
+[[package]]
+name = "thunderbolt-ledger"
+version = "1.0.0-rc.1"
+dependencies = [
+ "bitcoin",
+ "hex",
+ "proptest",
+ "secp256k1 0.31.1",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "thunderbolt-wire",
 ]
 
 [[package]]
@@ -2289,10 +2309,15 @@ dependencies = [
 name = "thunderbolt-protocol"
 version = "1.0.0-rc.1"
 dependencies = [
+ "bitcoin",
+ "proptest",
+ "secp256k1 0.31.1",
  "serde",
  "serde_json",
  "sha2",
  "thiserror",
+ "thunderbolt-ledger",
+ "thunderbolt-wire",
 ]
 
 [[package]]

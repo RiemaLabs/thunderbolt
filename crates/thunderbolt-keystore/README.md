@@ -24,7 +24,12 @@ The vault deliberately exposes a narrow API:
 - namespaced keys separate wallet, Paillier, channel, invoice, credential,
   committee-share, signing-nonce, and adapter-owned state.
 - `Vault::transact` checks the authenticated vault revision and every expected
-  record version before atomically replacing multiple records.
+  record version before atomically replacing multiple records, then advances
+  the exact external checkpoint before returning.
+- secret reads exist only inside the transaction callback. Owned callback output
+  is withheld until checkpoint CAS succeeds and is dropped on failure. Even a
+  read-only callback writes a receipt and advances the checkpoint, preventing a
+  copied stale vault from releasing output.
 - caller-chosen transaction identifiers are persisted with a canonical digest
   of the expected versions and mutations. Exact retries are idempotent;
   same-identifier, different-mutation retries fail closed.
@@ -65,7 +70,9 @@ This crate intentionally does not implement the trait with a local file: a file
 stored with the vault or covered by the same backup cannot detect rollback of
 that trust domain. The restricted recovery handle exposes only identity and
 checkpoint. It cannot read or mutate records until the independent store
-confirms the exact checkpoint.
+confirms the exact checkpoint. Transaction callbacks must not perform external
+side effects themselves; they return owned values for release by the caller
+only after the library finishes the external checkpoint transition.
 
 On Unix, vault, backup, temporary, and lock files are opened with
 `O_NOFOLLOW | O_CLOEXEC`. The implementation rejects symlinks, non-regular

@@ -462,6 +462,15 @@ fn pending_invoice_set_obeys_configured_bound() {
 }
 
 #[test]
+fn committee_topology_matches_active_wire_bound() {
+    assert!(super::types::validate_committee_topology(MAX_COMMITTEE_MEMBERS_V2, 171).is_ok());
+    assert_eq!(
+        super::types::validate_committee_topology(MAX_COMMITTEE_MEMBERS_V2 + 1, 171).expect_err("257 members rejected"),
+        V2Error::InvalidCommitteeTopology
+    );
+}
+
+#[test]
 fn reducer_rejects_another_ledger_chain() {
     let reducer = V2Reducer::new(
         LedgerChainIdV2::new("another-regtest-chain").expect("other chain"),
@@ -477,7 +486,7 @@ fn reducer_rejects_another_ledger_chain() {
 }
 
 #[test]
-fn finalized_committed_entry_issues_consensus_capability() {
+fn executed_entry_issues_consensus_capability() {
     let reducer = test_reducer();
     let event = open_event();
     let signed = proposal(&event, 0, EntryHashV2::zero(), 1, ActorRoleV2::Holder, 84);
@@ -489,12 +498,11 @@ fn finalized_committed_entry_issues_consensus_capability() {
     )
     .expect("pending block");
     block.push(signed).expect("proposal accepted");
-    let finalized = block.finalize().expect("finalized block");
-    let consensus =
-        ConsensusEntryV2::from_committed_entry(&finalized.entries()[0], &event).expect("committed capability");
+    let executed = block.execute().expect("executed block");
+    let consensus = ConsensusEntryV2::from_executed_entry(&executed.entries()[0], &event).expect("executed capability");
     let reduction = reducer
         .apply(None, &consensus, HistoryContextV2::fresh(), &AcceptAll)
-        .expect("committed Open applies");
+        .expect("executed Open applies");
     assert_eq!(reduction.snapshot.opened_at_ms, 1_000);
     assert_eq!(consensus.block_height(), 1);
     assert_eq!(consensus.block_index(), 0);

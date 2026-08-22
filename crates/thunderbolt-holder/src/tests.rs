@@ -10,8 +10,10 @@ use secp::{MaybeScalar, Scalar};
 use static_assertions::assert_not_impl_any;
 use tempfile::TempDir;
 use thunderbolt_keystore::{
-    CheckpointCasOutcome, CommitteeDescriptorDigest, KdfParams, NodeId, Password, RollbackFloorStore, VaultCheckpoint,
-    VaultIdentity, MIN_ARGON2_ITERATIONS, MIN_ARGON2_MEMORY_KIB,
+    AnchoredMutationError, CheckpointCasOutcome, CommitteeDescriptorDigest, ExpectedRecord, KdfParams, KeystoreError,
+    NodeId, Password, RecordKey, RecordNamespace, RecoveryVault, RollbackFloorStore, SecretValue, TransactionId, Vault,
+    VaultCheckpoint, VaultIdentity, VaultRevision, MAX_TRANSACTION_RECEIPTS, MIN_ARGON2_ITERATIONS,
+    MIN_ARGON2_MEMORY_KIB,
 };
 use thunderbolt_protocol::{BitcoinTxid, ChannelId, Digest, EntryHash, InvoiceId};
 use thunderbolt_wire::{
@@ -52,6 +54,11 @@ impl TestFloor {
         let mut state = self.state.lock().map_err(|_| TestFloorError)?;
         state.fail_after_advance = true;
         Ok(())
+    }
+
+    fn checkpoint(&self) -> Result<Option<VaultCheckpoint>, TestFloorError> {
+        let state = self.state.lock().map_err(|_| TestFloorError)?;
+        Ok(state.checkpoint)
     }
 }
 
@@ -1084,42 +1091,131 @@ fn keystore_checkpoint_cas_rejects_divergent_copied_paths() -> Result<(), Box<dy
     let _ = bootstrap.initialize_with_fixture_seed([0x87; 32])?;
     bootstrap.into_vault().backup_to(&second_path)?;
 
-    let mut first = reopen_keystore_adapter(&first_path, 0x86, floor.clone())?;
-    let mut second = reopen_keystore_adapter(&second_path, 0x86, floor.clone())?;
-    let first_channel = keystore_channel(71)?;
-    let first_secret = scalar(43)?;
-    let second_channel = keystore_channel(72)?;
-    let second_secret = scalar(47)?;
-    let mut first_transaction = first.begin()?;
-    let mut second_transaction = second.begin()?;
-    first_transaction.insert_credential(CredentialRecord::new(
-        CredentialKey {
-            channel: first_channel.key(),
-            step: 0,
-        },
-        zeroize::Zeroizing::new(first_secret.serialize()),
-        first_channel.anchor_base() * first_secret,
-        genesis_ack(71),
-    ))?;
-    second_transaction.insert_credential(CredentialRecord::new(
-        CredentialKey {
-            channel: second_channel.key(),
-            step: 0,
-        },
-        zeroize::Zeroizing::new(second_secret.serialize()),
-        second_channel.anchor_base() * second_secret,
-        genesis_ack(72),
-    ))?;
-    first_transaction.commit()?;
-    let forked = second_transaction.commit();
-    assert!(matches!(forked, Err(VaultError::CommitFailed)));
-    drop(second);
+    let first = reopen_keystore_adapter(&first_path, 0x86, floor.clone())?;
     assert!(matches!(
         reopen_keystore_adapter(&second_path, 0x86, floor),
         Err(error) if matches!(error.downcast_ref::<HolderError>(), Some(HolderError::Vault(VaultError::Conflict)))
     ));
     let mut first = HolderEngine::new(first);
+    let first_channel = keystore_channel(71)?;
+    let first_secret = scalar(43)?;
+    let _ = first.install_genesis_credential(GenesisCredential::new(
+        first_channel.clone(),
+        CredentialSecret::from_bytes(first_secret.serialize())?,
+        first_channel.anchor_base() * first_secret,
+        genesis_ack(71),
+    )?)?;
     assert!(first.credential_summary(&first_channel, 0)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn keystore_failed_inserts_remain_non_mutating_after_commit() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("failed-inserts.vault");
+    let floor = TestFloor::default();
+    let mut engine = HolderEngine::new(create_keystore_adapter(&path, 0x88, floor.clone())?);
+    let _ = engine.initialize_with_fixture_seed([0x89; 32])?;
+    let channel = keystore_channel(73)?;
+    let invoice_id = invoice_id(73)?;
+    let holder_secret = scalar(53)?;
+    let _ = engine.install_genesis_credential(GenesisCredential::new(
+        channel.clone(),
+        CredentialSecret::from_bytes(holder_secret.serialize())?,
+        channel.anchor_base() * holder_secret,
+        genesis_ack(73),
+    )?)?;
+    let prepared_invoice = prepared_invoice(&mut engine, &channel, &invoice_id, scalar(11)?)?;
+    let invoice_digest = prepared_invoice.envelope().canonical_digest()?;
+    let committed_invoice = CommittedInvoice::new(
+        prepared_invoice.envelope().clone(),
+        1,
+        acknowledgement(invoice_digest, 1, 0x8a),
+    )?;
+    let verified = engine.verify_committed_invoice(&channel, &invoice_id, committed_invoice)?;
+    let prepared_transfer = engine.create_transfer_with_fixture_nonce(&verified, BigNumber::from(23_u32))?;
+    let invoice_key = prepared_invoice.private_record().0;
+    let credential_key = prepared_transfer.source_credential();
+    let outbound_key = credential_key;
+    let mut adapter = engine.into_vault();
+
+    let (original_invoice, original_credential, original_outbound) = {
+        let transaction = adapter.begin()?;
+        let invoice = transaction
+            .invoice(&invoice_key)
+            .ok_or("missing original invoice")?
+            .clone();
+        let credential = transaction
+            .credential(&credential_key)
+            .ok_or("missing original credential")?
+            .clone();
+        let outbound = transaction
+            .outbound_transfer(&outbound_key)
+            .ok_or("missing original outbound transfer")?
+            .clone();
+        transaction.commit()?;
+        (invoice, credential, outbound)
+    };
+    let revision_before_conflict = adapter.revision()?;
+
+    let transfer_digest = prepared_transfer.envelope().canonical_digest()?;
+    let transfer_acknowledgement = acknowledgement(transfer_digest, 2, 0x8b);
+    let mut rejected_invoice = original_invoice.clone();
+    rejected_invoice.restore_state(InvoiceState::Prepared);
+    let mut rejected_credential = original_credential.clone();
+    rejected_credential.restore_state(CredentialState::Transferred(transfer_acknowledgement.clone()));
+    let mut rejected_outbound = original_outbound.clone();
+    rejected_outbound.restore_acknowledgement(Some(transfer_acknowledgement));
+
+    {
+        let mut transaction = adapter.begin()?;
+        assert!(matches!(
+            transaction.insert_invoice(rejected_invoice),
+            Err(VaultError::Conflict)
+        ));
+        assert!(matches!(
+            transaction.insert_credential(rejected_credential),
+            Err(VaultError::Conflict)
+        ));
+        assert!(matches!(
+            transaction.insert_outbound_transfer(rejected_outbound),
+            Err(VaultError::Conflict)
+        ));
+        transaction.commit()?;
+    }
+    assert_eq!(
+        adapter.revision()?.get(),
+        revision_before_conflict
+            .get()
+            .checked_add(1)
+            .ok_or("test revision exhausted")?
+    );
+    drop(adapter);
+
+    let mut adapter = reopen_keystore_adapter(&path, 0x88, floor)?;
+    let transaction = adapter.begin()?;
+    assert_eq!(
+        transaction
+            .invoice(&invoice_key)
+            .ok_or("invoice lost after conflict")?
+            .state(),
+        original_invoice.state()
+    );
+    assert_eq!(
+        transaction
+            .credential(&credential_key)
+            .ok_or("credential lost after conflict")?
+            .state(),
+        original_credential.state()
+    );
+    assert_eq!(
+        transaction
+            .outbound_transfer(&outbound_key)
+            .ok_or("outbound transfer lost after conflict")?
+            .acknowledgement(),
+        original_outbound.acknowledgement()
+    );
+    transaction.commit()?;
     Ok(())
 }
 
@@ -1144,6 +1240,236 @@ fn keystore_identity_accepts_raw_deployment_names_and_rejects_testnet4() -> Resu
         ),
         Err(HolderError::InvalidInput { .. })
     ));
+    Ok(())
+}
+
+#[test]
+fn keystore_open_completes_exact_empty_revision_zero_bootstrap() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("crashed-after-c0.vault");
+    let floor = TestFloor::default();
+    let identity = keystore_identity(0x98)?;
+    let recovery = RecoveryVault::create(&path, identity, keystore_password()?, keystore_params()?)?;
+    let checkpoint = recovery.checkpoint();
+    assert_eq!(checkpoint.revision().get(), 0);
+    assert!(matches!(
+        floor.compare_and_swap_checkpoint(identity, None, checkpoint)?,
+        CheckpointCasOutcome::Advanced
+    ));
+    drop(recovery);
+
+    let mut engine = HolderEngine::new(reopen_keystore_adapter(&path, 0x98, floor.clone())?);
+    let expected = engine.initialize_with_fixture_seed([0x99; 32])?;
+    drop(engine);
+    let mut engine = HolderEngine::new(reopen_keystore_adapter(&path, 0x98, floor)?);
+    assert_eq!(engine.identity()?, expected);
+    Ok(())
+}
+
+#[test]
+fn keystore_open_rejects_missing_manifest_and_unindexed_adapter_state() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+
+    let missing_path = directory.path().join("missing-manifest.vault");
+    let missing_floor = TestFloor::default();
+    let mut engine = HolderEngine::new(create_keystore_adapter(&missing_path, 0x8e, missing_floor.clone())?);
+    let _ = engine.initialize_with_fixture_seed([0x8f; 32])?;
+    drop(engine);
+    let mut raw = Vault::open_anchored(
+        &missing_path,
+        keystore_identity(0x8e)?,
+        keystore_password()?,
+        &missing_floor,
+    )?;
+    let manifest_key = RecordKey::new(
+        RecordNamespace::AdapterState,
+        b"bitcoin-thunderbolt/holder/identity/v1".to_vec(),
+    )?;
+    let checkpoint = raw.checkpoint()?;
+    let _ = raw.transact(
+        checkpoint,
+        TransactionId::new([0x90; 32]),
+        &missing_floor,
+        |transaction| {
+            let version = transaction
+                .get(&manifest_key)
+                .ok_or(thunderbolt_keystore::KeystoreError::InvalidFormat)?
+                .version();
+            transaction.remove(manifest_key, version)?;
+            Ok(())
+        },
+    )?;
+    drop(raw);
+    let missing_floor_before = missing_floor.checkpoint()?;
+    let missing_file_before =
+        RecoveryVault::open(&missing_path, keystore_identity(0x8e)?, keystore_password()?)?.checkpoint();
+    assert!(matches!(
+        reopen_keystore_adapter(&missing_path, 0x8e, missing_floor.clone()),
+        Err(error) if matches!(error.downcast_ref::<HolderError>(), Some(HolderError::Vault(VaultError::CorruptRecord)))
+    ));
+    assert_eq!(missing_floor.checkpoint()?, missing_floor_before);
+    assert_eq!(
+        RecoveryVault::open(&missing_path, keystore_identity(0x8e)?, keystore_password()?,)?.checkpoint(),
+        missing_file_before
+    );
+
+    let generic_path = directory.path().join("generic-state.vault");
+    let generic_floor = TestFloor::default();
+    let mut engine = HolderEngine::new(create_keystore_adapter(&generic_path, 0x91, generic_floor.clone())?);
+    let _ = engine.initialize_with_fixture_seed([0x92; 32])?;
+    drop(engine);
+    let mut raw = Vault::open_anchored(
+        &generic_path,
+        keystore_identity(0x91)?,
+        keystore_password()?,
+        &generic_floor,
+    )?;
+    let generic_key = RecordKey::new(RecordNamespace::AdapterState, b"unindexed-generic-state".to_vec())?;
+    let checkpoint = raw.checkpoint()?;
+    let _ = raw.transact(
+        checkpoint,
+        TransactionId::new([0x93; 32]),
+        &generic_floor,
+        |transaction| {
+            transaction.compare_and_swap(
+                generic_key,
+                ExpectedRecord::Absent,
+                SecretValue::from_bytes(vec![0x94; 32])?,
+            )?;
+            Ok(())
+        },
+    )?;
+    drop(raw);
+    let generic_floor_before = generic_floor.checkpoint()?;
+    let generic_file_before =
+        RecoveryVault::open(&generic_path, keystore_identity(0x91)?, keystore_password()?)?.checkpoint();
+    assert!(matches!(
+        reopen_keystore_adapter(&generic_path, 0x91, generic_floor.clone()),
+        Err(error) if matches!(error.downcast_ref::<HolderError>(), Some(HolderError::Vault(VaultError::CorruptRecord)))
+    ));
+    assert_eq!(generic_floor.checkpoint()?, generic_floor_before);
+    assert_eq!(
+        RecoveryVault::open(&generic_path, keystore_identity(0x91)?, keystore_password()?,)?.checkpoint(),
+        generic_file_before
+    );
+    Ok(())
+}
+
+#[test]
+fn keystore_receipt_pruning_is_checkpoint_anchored_and_restart_safe() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("receipt-pruning.vault");
+    let floor = TestFloor::default();
+    let mut engine = HolderEngine::new(create_keystore_adapter(&path, 0x8c, floor.clone())?);
+    let expected_identity = engine.initialize_with_fixture_seed([0x8d; 32])?;
+    assert_eq!(engine.identity()?, expected_identity);
+    let mut adapter = engine.into_vault();
+    let before = adapter.revision()?;
+    let through = VaultRevision::new(before.get().checked_sub(1).ok_or("missing receipt revision")?);
+    let after = adapter.prune_finalized_receipts(through)?;
+    assert!(after > before);
+    drop(adapter);
+
+    let mut engine = HolderEngine::new(reopen_keystore_adapter(&path, 0x8c, floor)?);
+    assert_eq!(engine.identity()?, expected_identity);
+    Ok(())
+}
+
+#[test]
+fn keystore_hard_receipt_cap_requires_finalized_prune_before_restart() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("receipt-cap.vault");
+    let floor = TestFloor::default();
+    let mut engine = HolderEngine::new(create_keystore_adapter(&path, 0x9a, floor.clone())?);
+    let expected_identity = engine.initialize_with_fixture_seed([0x9b; 32])?;
+    drop(engine);
+
+    let identity = keystore_identity(0x9a)?;
+    let mut raw = Vault::open_anchored(&path, identity, keystore_password()?, &floor)?;
+    let mut saturated = false;
+    for index in 0..=MAX_TRANSACTION_RECEIPTS {
+        let mut transaction_id = [0_u8; 32];
+        transaction_id[0] = 0xa5;
+        transaction_id[24..].copy_from_slice(
+            &u64::try_from(index)
+                .map_err(|_| "receipt index does not fit u64")?
+                .to_be_bytes(),
+        );
+        let checkpoint = raw.checkpoint()?;
+        match raw.transact(checkpoint, TransactionId::new(transaction_id), &floor, |_| Ok(())) {
+            Ok(_) => {}
+            Err(AnchoredMutationError::Keystore(KeystoreError::TransactionReceiptLimitExceeded)) => {
+                saturated = true;
+                break;
+            }
+            Err(error) => return Err(Box::new(error)),
+        }
+    }
+    assert!(saturated, "did not reach the hard transaction receipt cap");
+    let saturated_checkpoint = raw.checkpoint()?;
+    drop(raw);
+
+    assert!(matches!(
+        reopen_keystore_adapter(&path, 0x9a, floor.clone()),
+        Err(error) if matches!(error.downcast_ref::<HolderError>(), Some(HolderError::Vault(VaultError::CommitFailed)))
+    ));
+    let adapter = KeystoreSecretVault::open_with_finalized_prune(
+        &path,
+        identity,
+        keystore_password()?,
+        floor.clone(),
+        saturated_checkpoint.revision(),
+    )?;
+    let mut engine = HolderEngine::new(adapter);
+    assert_eq!(engine.identity()?, expected_identity);
+    drop(engine);
+
+    let mut engine = HolderEngine::new(reopen_keystore_adapter(&path, 0x9a, floor)?);
+    assert_eq!(engine.identity()?, expected_identity);
+    Ok(())
+}
+
+#[test]
+fn keystore_open_rejects_legacy_v1_adapter_records() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("legacy-v1.vault");
+    let floor = TestFloor::default();
+    let mut engine = HolderEngine::new(create_keystore_adapter(&path, 0x95, floor.clone())?);
+    let _ = engine.initialize_with_fixture_seed([0x96; 32])?;
+    drop(engine);
+
+    let mut raw = Vault::open_anchored(&path, keystore_identity(0x95)?, keystore_password()?, &floor)?;
+    let manifest_key = RecordKey::new(
+        RecordNamespace::AdapterState,
+        b"bitcoin-thunderbolt/holder/identity/v1".to_vec(),
+    )?;
+    let mut legacy = Vec::new();
+    legacy.extend_from_slice(b"TBHID001");
+    legacy.extend_from_slice(&1_u16.to_be_bytes());
+    legacy.extend_from_slice(&[0x96; 32]);
+    legacy.extend_from_slice(&0_u32.to_be_bytes());
+    legacy.extend_from_slice(&0_u32.to_be_bytes());
+    legacy.extend_from_slice(&0_u32.to_be_bytes());
+    let checkpoint = raw.checkpoint()?;
+    let _ = raw.transact(checkpoint, TransactionId::new([0x97; 32]), &floor, |transaction| {
+        let version = transaction
+            .get(&manifest_key)
+            .ok_or(thunderbolt_keystore::KeystoreError::InvalidFormat)?
+            .version();
+        transaction.compare_and_swap(
+            manifest_key,
+            ExpectedRecord::Version(version),
+            SecretValue::from_bytes(legacy)?,
+        )?;
+        Ok(())
+    })?;
+    drop(raw);
+    let floor_before = floor.checkpoint()?;
+    assert!(matches!(
+        reopen_keystore_adapter(&path, 0x95, floor.clone()),
+        Err(error) if matches!(error.downcast_ref::<HolderError>(), Some(HolderError::Vault(VaultError::CorruptRecord)))
+    ));
+    assert_eq!(floor.checkpoint()?, floor_before);
     Ok(())
 }
 
@@ -1210,23 +1536,32 @@ fn keystore_floor_fault_poisoning_and_reconciliation_are_fail_closed() -> Result
         Err(HolderError::Vault(VaultError::Unavailable))
     ));
     drop(engine);
+    assert!(matches!(
+        reopen_keystore_adapter(&path, 0xa1, floor),
+        Err(error) if matches!(error.downcast_ref::<HolderError>(), Some(HolderError::Vault(VaultError::Conflict)))
+    ));
 
-    let mut engine = HolderEngine::new(reopen_keystore_adapter(&path, 0xa1, floor.clone())?);
-    assert!(engine.credential_summary(&channel, 0)?.is_some());
-    let revision_before = engine.into_vault().revision()?;
-    let mut engine = HolderEngine::new(reopen_keystore_adapter(&path, 0xa1, floor.clone())?);
-    floor.fail_after_advance_once()?;
+    let after_path = directory.path().join("floor-fault-after.vault");
+    let after_floor = TestFloor::default();
+    let mut engine = HolderEngine::new(create_keystore_adapter(&after_path, 0xa3, after_floor.clone())?);
+    let _ = engine.initialize_with_fixture_seed([0xa4; 32])?;
+    let mut adapter = engine.into_vault();
     let second_channel = keystore_channel(62)?;
     let second_secret = scalar(41)?;
-    assert_eq!(
-        engine.install_genesis_credential(GenesisCredential::new(
-            second_channel.clone(),
-            CredentialSecret::from_bytes(second_secret.serialize())?,
-            second_channel.anchor_base() * second_secret,
-            genesis_ack(62),
-        )?)?,
-        ReceiveDisposition::OwnershipRecorded
-    );
-    assert!(engine.into_vault().revision()? > revision_before);
+    let mut transaction = adapter.begin()?;
+    after_floor.fail_after_advance_once()?;
+    transaction.insert_credential(CredentialRecord::new(
+        CredentialKey {
+            channel: second_channel.key(),
+            step: 0,
+        },
+        zeroize::Zeroizing::new(second_secret.serialize()),
+        second_channel.anchor_base() * second_secret,
+        genesis_ack(62),
+    ))?;
+    transaction.commit()?;
+    drop(adapter);
+    let mut engine = HolderEngine::new(reopen_keystore_adapter(&after_path, 0xa3, after_floor)?);
+    assert!(engine.credential_summary(&second_channel, 0)?.is_some());
     Ok(())
 }

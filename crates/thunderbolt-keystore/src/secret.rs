@@ -18,8 +18,6 @@ pub const MAX_RECORD_VALUE_BYTES: usize = 512 * 1024;
 /// Maximum combined byte length of all decrypted record values.
 pub const MAX_TOTAL_SECRET_BYTES: usize = 8 * 1024 * 1024;
 
-const LEGACY_KEY: &[u8] = b"default";
-
 macro_rules! opaque_secret {
     ($(#[$metadata:meta])* $name:ident, $minimum:expr, $maximum:expr) => {
         $(#[$metadata])*
@@ -41,8 +39,11 @@ macro_rules! opaque_secret {
                 self.0.as_slice()
             }
 
-            pub(crate) fn into_value(self) -> SecretValue {
-                SecretValue(self.0)
+        }
+
+        impl From<$name> for SecretValue {
+            fn from(value: $name) -> Self {
+                Self(value.0)
             }
         }
     };
@@ -208,13 +209,6 @@ impl RecordKey {
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         self.id.as_slice()
-    }
-
-    pub(crate) fn legacy(namespace: RecordNamespace) -> Self {
-        Self {
-            namespace,
-            id: LEGACY_KEY.to_vec(),
-        }
     }
 }
 
@@ -572,20 +566,49 @@ impl StagedMutation {
     }
 }
 
-/// Builder for one atomic, compare-and-swap update across multiple records.
-pub struct Transaction {
+/// Fenced operation over one exact authenticated vault snapshot.
+///
+/// Secret reads are available only inside the operation callback. Any owned
+/// output returned by that callback is withheld until the local replacement and
+/// external checkpoint CAS both succeed.
+pub struct Transaction<'a> {
+    base: &'a RecordStore,
     role: VaultRole,
     staged: BTreeMap<RecordKey, StagedMutation>,
     touched: BTreeSet<RecordKey>,
 }
 
-impl Transaction {
-    pub(crate) fn new(role: VaultRole) -> Self {
+impl<'a> Transaction<'a> {
+    pub(crate) fn new(base: &'a RecordStore, role: VaultRole) -> Self {
         Self {
+            base,
             role,
             staged: BTreeMap::new(),
             touched: BTreeSet::new(),
         }
+    }
+
+    /// Reads one secret from the exact snapshot fenced by this operation.
+    #[must_use]
+    pub fn get(&self, key: &RecordKey) -> Option<RecordView<'_>> {
+        self.base.get(key)
+    }
+
+    /// Returns whether a key is absent, live, or a consumed nonce tombstone.
+    #[must_use]
+    pub fn record_status(&self, key: &RecordKey) -> RecordStatus {
+        self.base.status(key)
+    }
+
+    /// Returns the number of live records and nonce tombstones in this snapshot.
+    #[must_use]
+    pub fn record_count(&self) -> usize {
+        self.base.record_count()
+    }
+
+    /// Iterates public keys in one namespace from this exact fenced snapshot.
+    pub fn record_keys(&self, namespace: RecordNamespace) -> impl Iterator<Item = &RecordKey> {
+        self.base.records.keys().filter(move |key| key.namespace() == namespace)
     }
 
     /// Stages an insert or replacement only if the current version matches.

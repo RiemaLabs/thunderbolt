@@ -1,6 +1,6 @@
 mod common;
 
-use thunderbolt_ledger::{ActorRoleV2, AppHashV2, PendingBlockV2};
+use thunderbolt_ledger::{ActorRoleV2, AppHashV2, MerkleSideV2, PendingBlockV2};
 
 use common::signed_open;
 
@@ -41,7 +41,7 @@ fn protocol_v2_hash_and_signature_golden_vectors() {
     .expect("pending block");
     block.push(first.clone()).expect("first entry");
     block.push(second).expect("second entry");
-    let finalized = block.finalize().expect("finalized block");
+    let executed = block.execute().expect("executed block");
 
     assert_eq!(
         participant_id.to_hex(),
@@ -65,11 +65,22 @@ fn protocol_v2_hash_and_signature_golden_vectors() {
          c322e86ab94834e763c0b4c35c48a11ea43507fe2c84d771584f9e098751af3b"
     );
     assert_eq!(
-        finalized.entry_merkle_root().to_hex(),
+        executed.entry_merkle_root().to_hex(),
         "28dd4cbbb0bf642481521aa1484dac363e396bfb594fe8639afec2310555b307"
     );
     assert_eq!(
-        finalized.app_hash().to_hex(),
+        executed.app_hash().to_hex(),
         "f54854c14b6dcc935a51d5d453066e31c21decea1c8350a295c0179a751aa5d1"
+    );
+
+    let proof = executed.entry_proof(0).expect("first entry proof");
+    proof
+        .verify(executed.entries()[0].metadata(), &executed)
+        .expect("golden inclusion proof");
+    assert_eq!(proof.siblings().len(), 1);
+    assert_eq!(proof.siblings()[0].side(), MerkleSideV2::Right);
+    assert_eq!(
+        proof.siblings()[0].hash().to_hex(),
+        "273032b092a55799d4647d79dd4e194a81e6c480ae46274a81657e620de0d485"
     );
 }

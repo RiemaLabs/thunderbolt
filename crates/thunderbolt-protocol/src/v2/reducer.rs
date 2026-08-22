@@ -1,6 +1,6 @@
 use core::fmt;
 use thunderbolt_ledger::{
-    ActorRoleV2, CommittedEntryV2, EntryHashV2, LedgerChainIdV2, PendingBlockV2, SignedProposalV2,
+    ActorRoleV2, EntryHashV2, ExecutedEntryV2, LedgerChainIdV2, PendingBlockV2, SignedProposalV2,
     VerifiedProposalViewV2,
 };
 
@@ -54,7 +54,8 @@ impl<'a> AuthenticatedEntryV2<'a> {
 ///
 /// This capability cannot be built from a raw clock value. Nodes obtain it
 /// from a [`PendingBlockV2`] supplied by consensus or a recomputed
-/// [`CommittedEntryV2`] loaded from finalized storage.
+/// [`ExecutedEntryV2`] loaded from executed block storage. Execution does not
+/// by itself assert Byzantine finality.
 #[derive(Debug, Clone)]
 pub struct ConsensusEntryV2<'a> {
     authenticated: AuthenticatedEntryV2<'a>,
@@ -83,8 +84,8 @@ impl<'a> ConsensusEntryV2<'a> {
         })
     }
 
-    /// Binds a recomputed finalized entry to a decoded application event.
-    pub fn from_committed_entry(entry: &'a CommittedEntryV2, event: &'a ChannelEventV2) -> Result<Self, V2Error> {
+    /// Binds a recomputed executed entry to a decoded application event.
+    pub fn from_executed_entry(entry: &'a ExecutedEntryV2, event: &'a ChannelEventV2) -> Result<Self, V2Error> {
         let metadata = entry.metadata();
         Ok(Self {
             authenticated: AuthenticatedEntryV2::from_signed(entry.proposal(), event)?,

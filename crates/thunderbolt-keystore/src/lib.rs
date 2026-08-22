@@ -35,7 +35,7 @@ pub use secret::{
 
 use crate::fs::{acquire_lock, atomic_create, atomic_replace, read_secure, FileIdentity, LockGuard};
 use crate::record_format::{checkpoint as checkpoint_for_blob, decode, derive_key, encode, new_salt};
-use crate::secret::{mutation_digest, RecordStore, StagedMutation, TransactionReceipt};
+use crate::secret::{mutation_digest, RecordStore, TransactionReceipt};
 
 /// Minimum accepted Argon2id memory cost, in KiB.
 pub const MIN_ARGON2_MEMORY_KIB: u32 = 19 * 1024;
@@ -466,6 +466,88 @@ where
     }
 }
 
+/// Failure of a mutation that must durably update both vault and checkpoint.
+#[derive(Debug)]
+pub enum AnchoredMutationError<E> {
+    /// Local vault validation, encryption, or filesystem operation failed.
+    Keystore(KeystoreError),
+    /// The independent checkpoint backend failed.
+    Store {
+        /// Candidate being reconciled, if the backend result was ambiguous.
+        candidate: Option<VaultCheckpoint>,
+        /// Backend-specific non-secret error.
+        source: E,
+    },
+    /// The local or external checkpoint did not match the required transition.
+    CheckpointConflict(Box<CheckpointConflict>),
+}
+
+/// Exact states involved in an anchored mutation checkpoint conflict.
+#[derive(Debug)]
+pub struct CheckpointConflict {
+    /// Checkpoint required by the caller before mutation.
+    pub expected: VaultCheckpoint,
+    /// Candidate persisted locally, if a local write completed.
+    pub candidate: Option<VaultCheckpoint>,
+    /// Current independent checkpoint, if it could be loaded.
+    pub current: Option<VaultCheckpoint>,
+}
+
+/// Result of a fenced transaction whose output is released only once.
+pub enum AnchoredTransactOutcome<T> {
+    /// A new local state and exact external checkpoint were durably committed.
+    Applied {
+        /// Authenticated revision of the new vault state.
+        revision: VaultRevision,
+        /// Owned callback output released after checkpoint anchoring.
+        output: T,
+    },
+    /// The transaction receipt already existed; no callback output is released.
+    Replayed {
+        /// Revision at which the original transaction was committed.
+        revision: VaultRevision,
+    },
+}
+
+impl<T> std::fmt::Debug for AnchoredTransactOutcome<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Applied { revision, .. } => formatter
+                .debug_struct("Applied")
+                .field("revision", revision)
+                .field("output", &"[REDACTED]")
+                .finish(),
+            Self::Replayed { revision } => formatter.debug_struct("Replayed").field("revision", revision).finish(),
+        }
+    }
+}
+
+impl<E> std::fmt::Display for AnchoredMutationError<E>
+where
+    E: std::fmt::Display,
+{
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Keystore(error) => error.fmt(formatter),
+            Self::Store { source, .. } => source.fmt(formatter),
+            Self::CheckpointConflict(_) => formatter.write_str("vault checkpoint compare-and-swap conflict"),
+        }
+    }
+}
+
+impl<E> std::error::Error for AnchoredMutationError<E>
+where
+    E: std::error::Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Keystore(error) => Some(error),
+            Self::Store { source, .. } => Some(source),
+            Self::CheckpointConflict(_) => None,
+        }
+    }
+}
+
 /// Independent checkpoint anchor used to detect authenticated vault rollback.
 ///
 /// A production implementation must live in a trust and failure domain that is
@@ -519,6 +601,15 @@ pub trait RollbackFloorStore: Send + Sync {
 ///
 /// The vault and every contained record intentionally implement neither
 /// `Debug` nor `Clone`.
+///
+/// Secret records are intentionally unavailable outside a fenced transaction:
+///
+/// ```compile_fail
+/// use thunderbolt_keystore::{RecordKey, Vault};
+/// fn stale_reads_are_unavailable(vault: &Vault, key: &RecordKey) {
+///     let _ = vault.get(key);
+/// }
+/// ```
 pub struct Vault {
     path: PathBuf,
     _lock: LockGuard,
@@ -745,42 +836,64 @@ impl Vault {
         Ok(VaultRevision::new(self.store.revision))
     }
 
-    /// Returns the number of live records and nonce tombstones.
-    pub fn record_count(&self) -> Result<usize> {
-        self.ensure_healthy()?;
-        Ok(self.store.record_count())
-    }
-
-    /// Returns one opaque record and its compare-and-swap version.
-    pub fn get(&self, key: &RecordKey) -> Result<Option<RecordView<'_>>> {
-        self.ensure_healthy()?;
-        Ok(self.store.get(key))
-    }
-
-    /// Returns whether a key is absent, live, or a consumed nonce tombstone.
-    pub fn record_status(&self, key: &RecordKey) -> Result<RecordStatus> {
-        self.ensure_healthy()?;
-        Ok(self.store.status(key))
-    }
-
-    /// Applies a bounded multi-record transaction exactly once.
+    /// Applies and externally anchors a bounded multi-record transaction.
     ///
     /// The callback only stages mutations. No record is changed unless every
     /// comparison succeeds and the complete encrypted vault replacement is
-    /// durably committed. Exact replays return [`CommitOutcome::Replayed`]; a
-    /// reused transaction identifier with different mutations fails closed.
-    pub fn transact<F>(
+    /// durably committed. This method returns only after the exact candidate
+    /// checkpoint is durably installed or confirmed by readback in
+    /// `checkpoint_store`. Any conflict after local persistence poisons the
+    /// handle. Exact replays return [`AnchoredTransactOutcome::Replayed`]
+    /// without a newly computed output.
+    ///
+    /// The callback must be locally pure: it may compute an owned return value,
+    /// but it must not publish messages, signatures, acknowledgements, or other
+    /// external effects itself. Its owned `'static` output is withheld and
+    /// dropped on failure, and is returned only after the external checkpoint is
+    /// durably advanced. Even an operation that stages no record mutations
+    /// writes an idempotency receipt and advances the checkpoint before returning.
+    pub fn transact<S, F, T>(
+        &mut self,
+        expected: VaultCheckpoint,
+        transaction_id: TransactionId,
+        checkpoint_store: &S,
+        update: F,
+    ) -> std::result::Result<AnchoredTransactOutcome<T>, AnchoredMutationError<S::Error>>
+    where
+        S: RollbackFloorStore,
+        F: FnOnce(&mut Transaction<'_>) -> Result<T>,
+        T: 'static,
+    {
+        self.verify_anchor(expected, checkpoint_store)?;
+        match self.transact_local(expected.revision(), transaction_id, update) {
+            Ok(AnchoredTransactOutcome::Replayed { revision }) => Ok(AnchoredTransactOutcome::Replayed { revision }),
+            Ok(AnchoredTransactOutcome::Applied { revision, output }) => {
+                let candidate = self.checkpoint;
+                self.anchor_candidate(expected, candidate, checkpoint_store)?;
+                Ok(AnchoredTransactOutcome::Applied { revision, output })
+            }
+            Err(error) => {
+                if let KeystoreError::AmbiguousWrite { candidate, .. } = &error {
+                    self.reconcile_ambiguous_write(expected, *candidate, checkpoint_store)?;
+                }
+                Err(AnchoredMutationError::Keystore(error))
+            }
+        }
+    }
+
+    fn transact_local<F, T>(
         &mut self,
         expected_revision: VaultRevision,
         transaction_id: TransactionId,
         update: F,
-    ) -> Result<CommitOutcome>
+    ) -> Result<AnchoredTransactOutcome<T>>
     where
-        F: FnOnce(&mut Transaction) -> Result<()>,
+        F: FnOnce(&mut Transaction<'_>) -> Result<T>,
+        T: 'static,
     {
         self.ensure_healthy()?;
-        let mut transaction = Transaction::new(self.identity.role());
-        update(&mut transaction)?;
+        let mut transaction = Transaction::new(&self.store, self.identity.role());
+        let output = update(&mut transaction)?;
         let mutations = transaction.into_mutations();
         let digest = mutation_digest(&mutations)?;
 
@@ -788,7 +901,10 @@ impl Vault {
             if !bool::from(receipt.mutation_digest.ct_eq(&digest)) {
                 return Err(KeystoreError::TransactionReplayConflict);
             }
-            return Ok(CommitOutcome::Replayed(VaultRevision::new(receipt.revision)));
+            drop(output);
+            return Ok(AnchoredTransactOutcome::Replayed {
+                revision: VaultRevision::new(receipt.revision),
+            });
         }
         if expected_revision.get() != self.store.revision {
             return Err(KeystoreError::RevisionConflict);
@@ -821,15 +937,44 @@ impl Vault {
             }
             return Err(error);
         }
-        Ok(CommitOutcome::Applied(VaultRevision::new(next_revision)))
+        Ok(AnchoredTransactOutcome::Applied {
+            revision: VaultRevision::new(next_revision),
+            output,
+        })
     }
 
-    /// Prunes idempotency receipts through an externally finalized revision.
+    /// Prunes finalized idempotency receipts and anchors the resulting state.
     ///
     /// Callers must retain their own durable request history before pruning;
     /// after a receipt is removed, this vault alone can no longer recognize its
     /// transaction identifier as a replay. Nonce tombstones are never pruned.
-    pub fn prune_transaction_receipts(
+    pub fn prune_transaction_receipts<S>(
+        &mut self,
+        expected: VaultCheckpoint,
+        through_revision: VaultRevision,
+        checkpoint_store: &S,
+    ) -> std::result::Result<VaultCheckpoint, AnchoredMutationError<S::Error>>
+    where
+        S: RollbackFloorStore,
+    {
+        self.verify_anchor(expected, checkpoint_store)?;
+        match self.prune_transaction_receipts_local(expected.revision(), through_revision) {
+            Ok(revision) if revision == expected.revision() => Ok(expected),
+            Ok(_) => {
+                let candidate = self.checkpoint;
+                self.anchor_candidate(expected, candidate, checkpoint_store)?;
+                Ok(candidate)
+            }
+            Err(error) => {
+                if let KeystoreError::AmbiguousWrite { candidate, .. } = &error {
+                    self.reconcile_ambiguous_write(expected, *candidate, checkpoint_store)?;
+                }
+                Err(AnchoredMutationError::Keystore(error))
+            }
+        }
+    }
+
+    fn prune_transaction_receipts_local(
         &mut self,
         expected_revision: VaultRevision,
         through_revision: VaultRevision,
@@ -873,81 +1018,6 @@ impl Vault {
         Ok(VaultRevision::new(next_revision))
     }
 
-    /// Returns the legacy default Holder wallet-seed record, if stored.
-    pub fn bitcoin_seed(&self) -> Result<Option<RecordView<'_>>> {
-        self.get(&RecordKey::legacy(RecordNamespace::WalletSeed))
-    }
-
-    /// Atomically stores the legacy default Holder wallet seed.
-    pub fn set_bitcoin_seed(&mut self, value: BitcoinSeed) -> Result<()> {
-        self.replace_legacy(RecordKey::legacy(RecordNamespace::WalletSeed), value.into_value())
-    }
-
-    /// Atomically removes the Holder wallet seed, returning whether one existed.
-    pub fn remove_bitcoin_seed(&mut self) -> Result<bool> {
-        self.remove_legacy(RecordKey::legacy(RecordNamespace::WalletSeed))
-    }
-
-    /// Returns the legacy default private Paillier record, if stored.
-    pub fn paillier_key(&self) -> Result<Option<RecordView<'_>>> {
-        self.get(&RecordKey::legacy(RecordNamespace::PaillierKey))
-    }
-
-    /// Atomically stores serialized private Paillier material.
-    pub fn set_paillier_key(&mut self, value: PaillierKeyBytes) -> Result<()> {
-        self.replace_legacy(RecordKey::legacy(RecordNamespace::PaillierKey), value.into_value())
-    }
-
-    /// Atomically removes private Paillier material, returning whether one existed.
-    pub fn remove_paillier_key(&mut self) -> Result<bool> {
-        self.remove_legacy(RecordKey::legacy(RecordNamespace::PaillierKey))
-    }
-
-    /// Returns the current Holder credential, if stored.
-    pub fn holder_credential(&self) -> Result<Option<RecordView<'_>>> {
-        self.get(&RecordKey::legacy(RecordNamespace::Credential))
-    }
-
-    /// Atomically stores the current Holder credential.
-    pub fn set_holder_credential(&mut self, value: HolderCredential) -> Result<()> {
-        self.replace_legacy(RecordKey::legacy(RecordNamespace::Credential), value.into_value())
-    }
-
-    /// Atomically removes the Holder credential, returning whether one existed.
-    pub fn remove_holder_credential(&mut self) -> Result<bool> {
-        self.remove_legacy(RecordKey::legacy(RecordNamespace::Credential))
-    }
-
-    /// Returns this committee member's threshold share, if stored.
-    pub fn committee_share(&self) -> Result<Option<RecordView<'_>>> {
-        self.get(&RecordKey::legacy(RecordNamespace::CommitteeShare))
-    }
-
-    /// Atomically stores this committee member's threshold share.
-    pub fn set_committee_share(&mut self, value: CommitteeMemberShare) -> Result<()> {
-        self.replace_legacy(RecordKey::legacy(RecordNamespace::CommitteeShare), value.into_value())
-    }
-
-    /// Atomically removes the committee share, returning whether one existed.
-    pub fn remove_committee_share(&mut self) -> Result<bool> {
-        self.remove_legacy(RecordKey::legacy(RecordNamespace::CommitteeShare))
-    }
-
-    /// Returns the persisted one-time committee session nonce, if stored.
-    pub fn committee_session_nonce(&self) -> Result<Option<RecordView<'_>>> {
-        self.get(&RecordKey::legacy(RecordNamespace::SessionNonce))
-    }
-
-    /// Atomically stores a one-time committee session nonce before use.
-    pub fn set_committee_session_nonce(&mut self, value: CommitteeSessionNonce) -> Result<()> {
-        self.replace_legacy(RecordKey::legacy(RecordNamespace::SessionNonce), value.into_value())
-    }
-
-    /// Atomically removes a committee session nonce, returning whether one existed.
-    pub fn remove_committee_session_nonce(&mut self) -> Result<bool> {
-        self.remove_legacy(RecordKey::legacy(RecordNamespace::SessionNonce))
-    }
-
     fn persist(&mut self) -> Result<()> {
         let encoded = encode(self.identity, self.params, self.salt, &self.key, &self.store)?;
         let candidate = checkpoint_for_blob(&encoded, self.store.revision);
@@ -961,59 +1031,115 @@ impl Vault {
         Ok(())
     }
 
-    fn replace_legacy(&mut self, key: RecordKey, value: SecretValue) -> Result<()> {
-        self.ensure_healthy()?;
-        if !key.namespace().valid_for_role(self.identity.role()) {
-            return Err(KeystoreError::InvalidRecordForRole);
+    fn verify_anchor<S>(
+        &mut self,
+        expected: VaultCheckpoint,
+        checkpoint_store: &S,
+    ) -> std::result::Result<(), AnchoredMutationError<S::Error>>
+    where
+        S: RollbackFloorStore,
+    {
+        self.ensure_healthy().map_err(AnchoredMutationError::Keystore)?;
+        if self.checkpoint != expected {
+            return Err(AnchoredMutationError::CheckpointConflict(Box::new(
+                CheckpointConflict {
+                    expected,
+                    candidate: None,
+                    current: Some(self.checkpoint),
+                },
+            )));
         }
-        let expected = match self.store.status(&key) {
-            RecordStatus::Absent => ExpectedRecord::Absent,
-            RecordStatus::Present(version) | RecordStatus::Tombstoned(version) => ExpectedRecord::Version(version),
-        };
-        let mut mutations = BTreeMap::new();
-        mutations.insert(key, StagedMutation::Put { expected, value });
-        self.commit_untracked(mutations).map(|_| ())
+        let current =
+            checkpoint_store
+                .load_checkpoint(self.identity)
+                .map_err(|source| AnchoredMutationError::Store {
+                    candidate: None,
+                    source,
+                })?;
+        if current != Some(expected) {
+            self.poison();
+            return Err(AnchoredMutationError::CheckpointConflict(Box::new(
+                CheckpointConflict {
+                    expected,
+                    candidate: None,
+                    current,
+                },
+            )));
+        }
+        Ok(())
     }
 
-    fn remove_legacy(&mut self, key: RecordKey) -> Result<bool> {
-        self.ensure_healthy()?;
-        if !key.namespace().valid_for_role(self.identity.role()) {
-            return Err(KeystoreError::InvalidRecordForRole);
-        }
-        let version = match self.store.status(&key) {
-            RecordStatus::Absent | RecordStatus::Tombstoned(_) => return Ok(false),
-            RecordStatus::Present(version) => version,
-        };
-        let mut mutations = BTreeMap::new();
-        mutations.insert(
-            key,
-            StagedMutation::Remove {
-                expected: ExpectedRecord::Version(version),
-            },
-        );
-        self.commit_untracked(mutations)?;
-        Ok(true)
-    }
-
-    fn commit_untracked(&mut self, mutations: BTreeMap<RecordKey, StagedMutation>) -> Result<VaultRevision> {
-        self.store.validate_conflicts(&mutations)?;
-        self.store.preflight(&mutations)?;
-        let next_revision = self
-            .store
-            .revision
-            .checked_add(1)
-            .ok_or(KeystoreError::RevisionExhausted)?;
-        let journal = self.store.apply(next_revision, mutations);
-        let old_revision = mem::replace(&mut self.store.revision, next_revision);
-        if let Err(error) = self.persist() {
-            self.store.revision = old_revision;
-            self.store.rollback(journal);
-            if matches!(&error, KeystoreError::AmbiguousWrite { .. }) {
+    fn anchor_candidate<S>(
+        &mut self,
+        expected: VaultCheckpoint,
+        candidate: VaultCheckpoint,
+        checkpoint_store: &S,
+    ) -> std::result::Result<(), AnchoredMutationError<S::Error>>
+    where
+        S: RollbackFloorStore,
+    {
+        match checkpoint_store.compare_and_swap_checkpoint(self.identity, Some(expected), candidate) {
+            Ok(CheckpointCasOutcome::Advanced | CheckpointCasOutcome::AlreadyCurrent) => Ok(()),
+            Ok(CheckpointCasOutcome::Conflict(current)) if current == Some(candidate) => Ok(()),
+            Ok(CheckpointCasOutcome::Conflict(current)) => {
                 self.poison();
+                Err(AnchoredMutationError::CheckpointConflict(Box::new(
+                    CheckpointConflict {
+                        expected,
+                        candidate: Some(candidate),
+                        current,
+                    },
+                )))
             }
-            return Err(error);
+            Err(source) => match checkpoint_store.load_checkpoint(self.identity) {
+                Ok(Some(current)) if current == candidate => Ok(()),
+                Ok(current) => {
+                    self.poison();
+                    Err(AnchoredMutationError::CheckpointConflict(Box::new(
+                        CheckpointConflict {
+                            expected,
+                            candidate: Some(candidate),
+                            current,
+                        },
+                    )))
+                }
+                Err(_) => {
+                    self.poison();
+                    Err(AnchoredMutationError::Store {
+                        candidate: Some(candidate),
+                        source,
+                    })
+                }
+            },
         }
-        Ok(VaultRevision::new(next_revision))
+    }
+
+    fn reconcile_ambiguous_write<S>(
+        &mut self,
+        expected: VaultCheckpoint,
+        candidate: VaultCheckpoint,
+        checkpoint_store: &S,
+    ) -> std::result::Result<(), AnchoredMutationError<S::Error>>
+    where
+        S: RollbackFloorStore,
+    {
+        let (encoded, _) = read_secure(&self.path).map_err(AnchoredMutationError::Keystore)?;
+        let candidate_on_disk = checkpoint_for_blob(&encoded, candidate.revision().get());
+        if candidate_on_disk == candidate {
+            return self.anchor_candidate(expected, candidate, checkpoint_store);
+        }
+        let prior_on_disk = checkpoint_for_blob(&encoded, expected.revision().get());
+        if prior_on_disk == expected {
+            return Ok(());
+        }
+        self.poison();
+        Err(AnchoredMutationError::CheckpointConflict(Box::new(
+            CheckpointConflict {
+                expected,
+                candidate: Some(candidate),
+                current: None,
+            },
+        )))
     }
 
     fn ensure_healthy(&self) -> Result<()> {
@@ -1038,10 +1164,10 @@ mod poison_tests {
     use tempfile::TempDir;
 
     use super::{
-        BitcoinSeed, CheckpointCasOutcome, CommitteeDescriptorDigest, DeploymentBinding, DeploymentId, ExpectedRecord,
-        KdfParams, KeystoreError, Network, NodeId, Password, RecordKey, RecoveryVault, RollbackFloorStore, SecretValue,
-        TransactionId, Vault, VaultCheckpoint, VaultIdentity, VaultRevision, VaultRole, MIN_ARGON2_ITERATIONS,
-        MIN_ARGON2_MEMORY_KIB,
+        CheckpointCasOutcome, CommitteeDescriptorDigest, DeploymentBinding, DeploymentId, ExpectedRecord, KdfParams,
+        KeystoreError, Network, NodeId, Password, RecordKey, RecordNamespace, RecoveryVault, RollbackFloorStore,
+        SecretValue, TransactionId, Vault, VaultCheckpoint, VaultIdentity, VaultRevision, VaultRole,
+        MIN_ARGON2_ITERATIONS, MIN_ARGON2_MEMORY_KIB,
     };
 
     struct ExactCheckpointStore {
@@ -1113,12 +1239,15 @@ mod poison_tests {
         let mut vault = create_vault(&path, identity()?, password()?, params)?;
 
         crate::fs::inject_failure_after_rename_once();
+        let key = RecordKey::new(RecordNamespace::WalletSeed, b"default".to_vec())?;
         let error = vault
-            .set_bitcoin_seed(BitcoinSeed::from_bytes(vec![0xa7; 32])?)
+            .transact_local(VaultRevision::new(0), TransactionId::new([0xa6; 32]), |transaction| {
+                transaction.compare_and_swap(key, ExpectedRecord::Absent, SecretValue::from_bytes(vec![0xa7; 32])?)
+            })
             .expect_err("injected post-rename failure must be returned");
         let candidate = ambiguous_candidate(error)?;
         assert!(matches!(vault.revision(), Err(KeystoreError::Poisoned)));
-        assert!(matches!(vault.bitcoin_seed(), Err(KeystoreError::Poisoned)));
+        assert!(matches!(vault.ensure_healthy(), Err(KeystoreError::Poisoned)));
         assert!(matches!(
             vault.backup_to(directory.path().join("poisoned.backup")),
             Err(KeystoreError::Poisoned)
@@ -1132,7 +1261,8 @@ mod poison_tests {
             checkpoint: candidate,
         };
         let reopened = recovery.anchor(&checkpoint_store)?;
-        let stored = reopened.bitcoin_seed()?.ok_or("missing durably renamed record")?;
+        let key = RecordKey::new(RecordNamespace::WalletSeed, b"default".to_vec())?;
+        let stored = reopened.store.get(&key).ok_or("missing durably renamed record")?;
         assert_eq!(stored.expose_secret(), [0xa7; 32]);
         Ok(())
     }
@@ -1149,7 +1279,7 @@ mod poison_tests {
 
         crate::fs::inject_failure_before_rename_once();
         let error = vault
-            .transact(VaultRevision::new(0), TransactionId::new([0xb1; 32]), |transaction| {
+            .transact_local(VaultRevision::new(0), TransactionId::new([0xb1; 32]), |transaction| {
                 transaction.compare_and_swap(
                     first.clone(),
                     ExpectedRecord::Absent,
@@ -1164,7 +1294,7 @@ mod poison_tests {
             .expect_err("injected pre-rename failure must be returned");
         let candidate = ambiguous_candidate(error)?;
         assert_ne!(candidate, prior);
-        assert!(matches!(vault.get(&first), Err(KeystoreError::Poisoned)));
+        assert!(matches!(vault.ensure_healthy(), Err(KeystoreError::Poisoned)));
         drop(vault);
 
         let recovery = RecoveryVault::open(&path, identity()?, password()?)?;
@@ -1176,8 +1306,8 @@ mod poison_tests {
         };
         let reopened = recovery.anchor(&checkpoint_store)?;
         assert_eq!(reopened.revision()?, VaultRevision::new(0));
-        assert!(reopened.get(&first)?.is_none());
-        assert!(reopened.get(&second)?.is_none());
+        assert!(reopened.store.get(&first).is_none());
+        assert!(reopened.store.get(&second).is_none());
         Ok(())
     }
 }

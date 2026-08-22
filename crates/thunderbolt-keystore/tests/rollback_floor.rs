@@ -1,13 +1,14 @@
 use std::error::Error;
 use std::fmt;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use tempfile::TempDir;
 use thunderbolt_keystore::{
-    CheckpointCasOutcome, CommitteeDescriptorDigest, DeploymentBinding, DeploymentId, KdfParams, Network, NodeId,
-    PaillierKeyBytes, Password, RecoveryVault, RollbackFloorStore, VaultCheckpoint, VaultIdentity, VaultRevision,
-    VaultRole, VaultStateDigest, MIN_ARGON2_ITERATIONS, MIN_ARGON2_MEMORY_KIB,
+    AnchoredMutationError, CheckpointCasOutcome, CommitteeDescriptorDigest, DeploymentBinding, DeploymentId,
+    ExpectedRecord, KdfParams, Network, NodeId, Password, RecordKey, RecoveryVault, RollbackFloorStore, SecretValue,
+    TransactionId, VaultCheckpoint, VaultIdentity, VaultRevision, VaultRole, VaultStateDigest, MIN_ARGON2_ITERATIONS,
+    MIN_ARGON2_MEMORY_KIB,
 };
 
 const NO_FAILURE: u8 = 0;
@@ -16,6 +17,14 @@ const FAIL_AFTER: u8 = 2;
 
 #[derive(Debug)]
 struct TestFloorError(&'static str);
+
+struct DropProbe(Arc<AtomicUsize>);
+
+impl Drop for DropProbe {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
 
 impl fmt::Display for TestFloorError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -217,21 +226,116 @@ fn copied_vaults_at_same_revision_cannot_both_advance() -> Result<(), Box<dyn Er
     assert_eq!(copied_recovery.checkpoint(), initial);
     let mut copied = copied_recovery.anchor(&checkpoint_store)?;
 
-    first.set_paillier_key(PaillierKeyBytes::from_bytes(vec![0xe1; 64])?)?;
+    let key = RecordKey::channel(b"copied-fork-channel".to_vec())?;
+    first.transact(
+        initial,
+        TransactionId::new([0xe1; 32]),
+        &checkpoint_store,
+        |transaction| {
+            transaction.compare_and_swap(
+                key.clone(),
+                ExpectedRecord::Absent,
+                SecretValue::from_bytes(vec![0xe1; 64])?,
+            )
+        },
+    )?;
     let first_next = first.checkpoint()?;
     assert_eq!(first_next.revision(), VaultRevision::new(1));
-    assert_eq!(
-        checkpoint_store.compare_and_swap_checkpoint(identity, Some(initial), first_next)?,
-        CheckpointCasOutcome::Advanced
-    );
+    let stale_callback_ran = Arc::new(AtomicBool::new(false));
+    let stale_callback_flag = Arc::clone(&stale_callback_ran);
+    assert!(matches!(
+        copied.transact(
+            initial,
+            TransactionId::new([0xe2; 32]),
+            &checkpoint_store,
+            move |transaction| {
+                stale_callback_flag.store(true, Ordering::SeqCst);
+                transaction.compare_and_swap(
+                    key,
+                    ExpectedRecord::Absent,
+                    SecretValue::from_bytes(vec![0xe2; 64])?,
+                )
+            },
+        ),
+        Err(AnchoredMutationError::CheckpointConflict(conflict))
+            if conflict.current == Some(first_next)
+    ));
+    assert!(!stale_callback_ran.load(Ordering::SeqCst));
+    Ok(())
+}
 
-    copied.set_paillier_key(PaillierKeyBytes::from_bytes(vec![0xe2; 64])?)?;
-    let copied_next = copied.checkpoint()?;
-    assert_eq!(copied_next.revision(), VaultRevision::new(1));
-    assert_ne!(copied_next.state_digest(), first_next.state_digest());
-    assert_eq!(
-        checkpoint_store.compare_and_swap_checkpoint(identity, Some(initial), copied_next)?,
-        CheckpointCasOutcome::Conflict(Some(first_next))
+#[test]
+fn read_only_output_is_fenced_and_dropped_on_floor_failure() -> Result<(), Box<dyn Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("fenced-read.vault");
+    let identity = identity(0xf1, 10, 0xf2)?;
+    let checkpoint_store = MemoryFloorStore::default();
+    let recovery = RecoveryVault::create(&path, identity, password()?, params()?)?;
+    let initial = recovery.checkpoint();
+    checkpoint_store.compare_and_swap_checkpoint(identity, None, initial)?;
+    let mut vault = recovery.anchor(&checkpoint_store)?;
+
+    let outcome = vault.transact(
+        initial,
+        TransactionId::new([0xf3; 32]),
+        &checkpoint_store,
+        |transaction| Ok(transaction.record_count()),
+    )?;
+    let count = match outcome {
+        thunderbolt_keystore::AnchoredTransactOutcome::Applied { output, .. } => output,
+        thunderbolt_keystore::AnchoredTransactOutcome::Replayed { .. } => {
+            return Err("fresh read transaction was unexpectedly replayed".into());
+        }
+    };
+    assert_eq!(count, 0);
+    let anchored_read = vault.checkpoint()?;
+    assert_eq!(anchored_read.revision(), VaultRevision::new(1));
+    assert_eq!(checkpoint_store.load_checkpoint(identity)?, Some(anchored_read));
+
+    let second_read = vault.transact(
+        anchored_read,
+        TransactionId::new([0xf5; 32]),
+        &checkpoint_store,
+        |transaction| Ok(transaction.record_count()),
+    )?;
+    assert!(matches!(
+        second_read,
+        thunderbolt_keystore::AnchoredTransactOutcome::Applied { output: 0, .. }
+    ));
+    let newer_checkpoint = vault.checkpoint()?;
+    let replay_drops = Arc::new(AtomicUsize::new(0));
+    let replay_probe = Arc::clone(&replay_drops);
+    let replay = vault.transact(
+        newer_checkpoint,
+        TransactionId::new([0xf3; 32]),
+        &checkpoint_store,
+        move |_| Ok(DropProbe(replay_probe)),
+    )?;
+    assert!(matches!(
+        replay,
+        thunderbolt_keystore::AnchoredTransactOutcome::Replayed { revision }
+            if revision == VaultRevision::new(1)
+    ));
+    assert_eq!(replay_drops.load(Ordering::SeqCst), 1);
+    assert_eq!(vault.checkpoint()?, newer_checkpoint);
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let callback_ran = Arc::new(AtomicBool::new(false));
+    let drops_in_callback = Arc::clone(&drops);
+    let callback_flag = Arc::clone(&callback_ran);
+    checkpoint_store.fail_before_next_cas();
+    let result = vault.transact(
+        newer_checkpoint,
+        TransactionId::new([0xf4; 32]),
+        &checkpoint_store,
+        move |_| {
+            callback_flag.store(true, Ordering::SeqCst);
+            Ok(DropProbe(drops_in_callback))
+        },
     );
+    assert!(callback_ran.load(Ordering::SeqCst));
+    assert!(matches!(result, Err(AnchoredMutationError::CheckpointConflict(_))));
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    assert_eq!(checkpoint_store.load_checkpoint(identity)?, Some(newer_checkpoint));
     Ok(())
 }

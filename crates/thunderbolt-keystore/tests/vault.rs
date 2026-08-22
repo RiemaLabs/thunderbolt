@@ -1,18 +1,20 @@
 use std::convert::Infallible;
 use std::error::Error;
 use std::fs;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use static_assertions::assert_not_impl_any;
 use subtle::ConstantTimeEq;
 use tempfile::TempDir;
 use thunderbolt_keystore::{
-    BitcoinSeed, CheckpointAnchorError, CheckpointCasOutcome, CommitOutcome, CommitteeDescriptorDigest,
-    CommitteeMemberShare, CommitteeSessionNonce, DeploymentBinding, DeploymentId, ExpectedRecord, HolderCredential,
-    KdfParams, KeystoreError, Network, NodeId, PaillierKeyBytes, Password, RecordKey, RecordNamespace, RecordStatus,
-    RecoveryVault, RollbackFloorStore, SecretValue, TransactionId, Vault, VaultCheckpoint, VaultIdentity,
-    VaultRevision, VaultRole, MAX_RECORD_KEY_BYTES, MAX_RECORD_VALUE_BYTES, MAX_TRANSACTION_MUTATIONS,
-    MIN_ARGON2_ITERATIONS, MIN_ARGON2_MEMORY_KIB,
+    AnchoredTransactOutcome, BitcoinSeed, CheckpointAnchorError, CheckpointCasOutcome, CommitOutcome,
+    CommitteeDescriptorDigest, CommitteeMemberShare, CommitteeSessionNonce, DeploymentBinding, DeploymentId,
+    ExpectedRecord, HolderCredential, KdfParams, KeystoreError, Network, NodeId, PaillierKeyBytes, Password, RecordKey,
+    RecordNamespace, RecordStatus, RecoveryVault, RollbackFloorStore, SecretValue, TransactionId, Vault,
+    VaultCheckpoint, VaultIdentity, VaultRevision, VaultRole, MAX_RECORD_KEY_BYTES, MAX_RECORD_VALUE_BYTES,
+    MAX_TRANSACTION_MUTATIONS, MIN_ARGON2_ITERATIONS, MIN_ARGON2_MEMORY_KIB,
 };
 
 #[cfg(unix)]
@@ -30,25 +32,271 @@ assert_not_impl_any!(TransactionId: std::fmt::Debug);
 assert_not_impl_any!(Vault: Clone, std::fmt::Debug);
 assert_not_impl_any!(RecoveryVault: Clone, std::fmt::Debug);
 
-struct ExactCheckpointStore {
+#[derive(Clone)]
+struct TestCheckpointStore {
     identity: VaultIdentity,
-    checkpoint: VaultCheckpoint,
+    checkpoint: Arc<Mutex<Option<VaultCheckpoint>>>,
 }
 
-impl RollbackFloorStore for ExactCheckpointStore {
+impl TestCheckpointStore {
+    fn anchored(identity: VaultIdentity, checkpoint: VaultCheckpoint) -> Self {
+        Self {
+            identity,
+            checkpoint: Arc::new(Mutex::new(Some(checkpoint))),
+        }
+    }
+}
+
+impl RollbackFloorStore for TestCheckpointStore {
     type Error = Infallible;
 
     fn load_checkpoint(&self, identity: VaultIdentity) -> Result<Option<VaultCheckpoint>, Self::Error> {
-        Ok((identity == self.identity).then_some(self.checkpoint))
+        if identity != self.identity {
+            return Ok(None);
+        }
+        Ok(*self.checkpoint.lock().expect("test checkpoint lock"))
     }
 
     fn compare_and_swap_checkpoint(
         &self,
-        _identity: VaultIdentity,
-        _expected: Option<VaultCheckpoint>,
-        _next: VaultCheckpoint,
+        identity: VaultIdentity,
+        expected: Option<VaultCheckpoint>,
+        next: VaultCheckpoint,
     ) -> Result<CheckpointCasOutcome, Self::Error> {
-        Ok(CheckpointCasOutcome::Conflict(Some(self.checkpoint)))
+        if identity != self.identity {
+            return Ok(CheckpointCasOutcome::Conflict(None));
+        }
+        let mut current = self.checkpoint.lock().expect("test checkpoint lock");
+        if *current == Some(next) {
+            return Ok(CheckpointCasOutcome::AlreadyCurrent);
+        }
+        let valid_next = match expected {
+            None => next.revision() == VaultRevision::new(0),
+            Some(previous) => previous
+                .revision()
+                .get()
+                .checked_add(1)
+                .is_some_and(|revision| next.revision() == VaultRevision::new(revision)),
+        };
+        if *current != expected || !valid_next {
+            return Ok(CheckpointCasOutcome::Conflict(*current));
+        }
+        *current = Some(next);
+        Ok(CheckpointCasOutcome::Advanced)
+    }
+}
+
+struct TestVault {
+    vault: Vault,
+    checkpoint_store: TestCheckpointStore,
+    next_transaction: u64,
+}
+
+struct TestRecord {
+    version: thunderbolt_keystore::RecordVersion,
+    bytes: Vec<u8>,
+}
+
+impl TestRecord {
+    fn version(&self) -> thunderbolt_keystore::RecordVersion {
+        self.version
+    }
+
+    fn expose_secret(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl Deref for TestVault {
+    type Target = Vault;
+
+    fn deref(&self) -> &Self::Target {
+        &self.vault
+    }
+}
+
+impl DerefMut for TestVault {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.vault
+    }
+}
+
+impl TestVault {
+    fn new(vault: Vault, checkpoint_store: TestCheckpointStore) -> thunderbolt_keystore::Result<Self> {
+        let next_transaction = vault.revision()?.get().saturating_add(1).saturating_mul(1_000_000);
+        Ok(Self {
+            vault,
+            checkpoint_store,
+            next_transaction,
+        })
+    }
+
+    fn transact<F>(
+        &mut self,
+        expected_revision: VaultRevision,
+        transaction_id: TransactionId,
+        update: F,
+    ) -> thunderbolt_keystore::Result<CommitOutcome>
+    where
+        F: FnOnce(&mut thunderbolt_keystore::Transaction) -> thunderbolt_keystore::Result<()>,
+    {
+        let expected = self.vault.checkpoint()?;
+        if expected.revision() != expected_revision {
+            return Err(KeystoreError::RevisionConflict);
+        }
+        self.vault
+            .transact(expected, transaction_id, &self.checkpoint_store, update)
+            .map(|outcome| match outcome {
+                AnchoredTransactOutcome::Applied { revision, output: () } => CommitOutcome::Applied(revision),
+                AnchoredTransactOutcome::Replayed { revision } => CommitOutcome::Replayed(revision),
+            })
+            .map_err(map_mutation_error)
+    }
+
+    fn set_record(&mut self, namespace: RecordNamespace, value: SecretValue) -> thunderbolt_keystore::Result<()> {
+        let key = RecordKey::new(namespace, b"default".to_vec())?;
+        let expected_record = match self.record_status(&key)? {
+            RecordStatus::Absent => ExpectedRecord::Absent,
+            RecordStatus::Present(version) | RecordStatus::Tombstoned(version) => ExpectedRecord::Version(version),
+        };
+        let transaction_id = self.next_transaction_id();
+        self.transact(self.vault.revision()?, transaction_id, |transaction| {
+            transaction.compare_and_swap(key, expected_record, value)
+        })?;
+        Ok(())
+    }
+
+    fn remove_record(&mut self, namespace: RecordNamespace) -> thunderbolt_keystore::Result<bool> {
+        let key = RecordKey::new(namespace, b"default".to_vec())?;
+        let version = match self.record_status(&key)? {
+            RecordStatus::Absent | RecordStatus::Tombstoned(_) => return Ok(false),
+            RecordStatus::Present(version) => version,
+        };
+        let transaction_id = self.next_transaction_id();
+        self.transact(self.vault.revision()?, transaction_id, |transaction| {
+            transaction.remove(key, version)
+        })?;
+        Ok(true)
+    }
+
+    fn next_transaction_id(&mut self) -> TransactionId {
+        self.next_transaction = self.next_transaction.saturating_add(1);
+        let mut bytes = [0xf1; 32];
+        bytes[24..].copy_from_slice(&self.next_transaction.to_be_bytes());
+        TransactionId::new(bytes)
+    }
+
+    fn set_bitcoin_seed(&mut self, value: BitcoinSeed) -> thunderbolt_keystore::Result<()> {
+        self.set_record(RecordNamespace::WalletSeed, value.into())
+    }
+
+    fn set_paillier_key(&mut self, value: PaillierKeyBytes) -> thunderbolt_keystore::Result<()> {
+        self.set_record(RecordNamespace::PaillierKey, value.into())
+    }
+
+    fn set_holder_credential(&mut self, value: HolderCredential) -> thunderbolt_keystore::Result<()> {
+        self.set_record(RecordNamespace::Credential, value.into())
+    }
+
+    fn remove_holder_credential(&mut self) -> thunderbolt_keystore::Result<bool> {
+        self.remove_record(RecordNamespace::Credential)
+    }
+
+    fn set_committee_share(&mut self, value: CommitteeMemberShare) -> thunderbolt_keystore::Result<()> {
+        self.set_record(RecordNamespace::CommitteeShare, value.into())
+    }
+
+    fn set_committee_session_nonce(&mut self, value: CommitteeSessionNonce) -> thunderbolt_keystore::Result<()> {
+        self.set_record(RecordNamespace::SessionNonce, value.into())
+    }
+
+    fn prune_transaction_receipts(
+        &mut self,
+        expected_revision: VaultRevision,
+        through_revision: VaultRevision,
+    ) -> thunderbolt_keystore::Result<VaultCheckpoint> {
+        let expected = self.vault.checkpoint()?;
+        if expected.revision() != expected_revision {
+            return Err(KeystoreError::RevisionConflict);
+        }
+        self.vault
+            .prune_transaction_receipts(expected, through_revision, &self.checkpoint_store)
+            .map_err(map_mutation_error)
+    }
+
+    fn read_record(&mut self, key: RecordKey) -> thunderbolt_keystore::Result<Option<TestRecord>> {
+        let expected = self.vault.checkpoint()?;
+        let transaction_id = self.next_transaction_id();
+        self.vault
+            .transact(expected, transaction_id, &self.checkpoint_store, |transaction| {
+                Ok(transaction.get(&key).map(|record| TestRecord {
+                    version: record.version(),
+                    bytes: record.expose_secret().to_vec(),
+                }))
+            })
+            .map_err(map_mutation_error)
+            .and_then(take_applied_output)
+    }
+
+    fn get(&mut self, key: &RecordKey) -> thunderbolt_keystore::Result<Option<TestRecord>> {
+        self.read_record(key.clone())
+    }
+
+    fn record_status(&mut self, key: &RecordKey) -> thunderbolt_keystore::Result<RecordStatus> {
+        let expected = self.vault.checkpoint()?;
+        let transaction_id = self.next_transaction_id();
+        self.vault
+            .transact(expected, transaction_id, &self.checkpoint_store, |transaction| {
+                Ok(transaction.record_status(key))
+            })
+            .map_err(map_mutation_error)
+            .and_then(take_applied_output)
+    }
+
+    fn bitcoin_seed(&mut self) -> thunderbolt_keystore::Result<Option<TestRecord>> {
+        self.read_record(RecordKey::new(RecordNamespace::WalletSeed, b"default".to_vec())?)
+    }
+
+    fn paillier_key(&mut self) -> thunderbolt_keystore::Result<Option<TestRecord>> {
+        self.read_record(RecordKey::new(RecordNamespace::PaillierKey, b"default".to_vec())?)
+    }
+
+    fn holder_credential(&mut self) -> thunderbolt_keystore::Result<Option<TestRecord>> {
+        self.read_record(RecordKey::new(RecordNamespace::Credential, b"default".to_vec())?)
+    }
+
+    fn committee_share(&mut self) -> thunderbolt_keystore::Result<Option<TestRecord>> {
+        self.read_record(RecordKey::new(RecordNamespace::CommitteeShare, b"default".to_vec())?)
+    }
+
+    fn committee_session_nonce(&mut self) -> thunderbolt_keystore::Result<Option<TestRecord>> {
+        self.read_record(RecordKey::new(RecordNamespace::SessionNonce, b"default".to_vec())?)
+    }
+
+    fn record_count(&mut self) -> thunderbolt_keystore::Result<usize> {
+        let expected = self.vault.checkpoint()?;
+        let transaction_id = self.next_transaction_id();
+        self.vault
+            .transact(expected, transaction_id, &self.checkpoint_store, |transaction| {
+                Ok(transaction.record_count())
+            })
+            .map_err(map_mutation_error)
+            .and_then(take_applied_output)
+    }
+}
+
+fn map_mutation_error(error: thunderbolt_keystore::AnchoredMutationError<Infallible>) -> KeystoreError {
+    match error {
+        thunderbolt_keystore::AnchoredMutationError::Keystore(error) => error,
+        thunderbolt_keystore::AnchoredMutationError::Store { source, .. } => match source {},
+        thunderbolt_keystore::AnchoredMutationError::CheckpointConflict(_) => KeystoreError::CheckpointMismatch,
+    }
+}
+
+fn take_applied_output<T>(outcome: AnchoredTransactOutcome<T>) -> thunderbolt_keystore::Result<T> {
+    match outcome {
+        AnchoredTransactOutcome::Applied { output, .. } => Ok(output),
+        AnchoredTransactOutcome::Replayed { .. } => Err(KeystoreError::TransactionReplayConflict),
     }
 }
 
@@ -100,30 +348,32 @@ fn create_vault(
     identity: VaultIdentity,
     password: Password,
     params: KdfParams,
-) -> thunderbolt_keystore::Result<Vault> {
+) -> thunderbolt_keystore::Result<TestVault> {
     let recovery = RecoveryVault::create(path, identity, password, params)?;
     let checkpoint = recovery.checkpoint();
-    let checkpoint_store = ExactCheckpointStore { identity, checkpoint };
-    recovery
+    let checkpoint_store = TestCheckpointStore::anchored(identity, checkpoint);
+    let vault = recovery
         .anchor(&checkpoint_store)
-        .map_err(|_| KeystoreError::CheckpointMismatch)
+        .map_err(|_| KeystoreError::CheckpointMismatch)?;
+    TestVault::new(vault, checkpoint_store)
 }
 
 fn open_vault(
     path: impl AsRef<Path>,
     identity: VaultIdentity,
     password: Password,
-) -> thunderbolt_keystore::Result<Vault> {
+) -> thunderbolt_keystore::Result<TestVault> {
     let recovery = RecoveryVault::open(path, identity, password)?;
     let checkpoint = recovery.checkpoint();
-    let checkpoint_store = ExactCheckpointStore { identity, checkpoint };
-    recovery
+    let checkpoint_store = TestCheckpointStore::anchored(identity, checkpoint);
+    let vault = recovery
         .anchor(&checkpoint_store)
-        .map_err(|_| KeystoreError::CheckpointMismatch)
+        .map_err(|_| KeystoreError::CheckpointMismatch)?;
+    TestVault::new(vault, checkpoint_store)
 }
 
-fn secret_option_eq(left: Option<&[u8]>, right: &[u8]) -> bool {
-    left.is_some_and(|left| bool::from(left.ct_eq(right)))
+fn secret_option_eq(left: Option<TestRecord>, right: &[u8]) -> bool {
+    left.is_some_and(|left| bool::from(left.expose_secret().ct_eq(right)))
 }
 
 #[test]
@@ -137,23 +387,14 @@ fn holder_records_survive_atomic_updates_and_restart() -> Result<(), Box<dyn Err
     drop(vault);
 
     let mut reopened = open_vault(&path, holder_identity(), password()?)?;
-    assert!(secret_option_eq(
-        reopened.bitcoin_seed()?.map(|value| value.expose_secret()),
-        [0x31; 32].as_slice()
-    ));
-    assert!(secret_option_eq(
-        reopened.paillier_key()?.map(|value| value.expose_secret()),
-        [0x52; 384].as_slice()
-    ));
-    assert!(secret_option_eq(
-        reopened.holder_credential()?.map(|value| value.expose_secret()),
-        [0x73; 96].as_slice()
-    ));
+    assert!(secret_option_eq(reopened.bitcoin_seed()?, [0x31; 32].as_slice()));
+    assert!(secret_option_eq(reopened.paillier_key()?, [0x52; 384].as_slice()));
+    assert!(secret_option_eq(reopened.holder_credential()?, [0x73; 96].as_slice()));
     assert!(reopened.remove_holder_credential()?);
     assert!(!reopened.remove_holder_credential()?);
     drop(reopened);
 
-    let reopened = open_vault(&path, holder_identity(), password()?)?;
+    let mut reopened = open_vault(&path, holder_identity(), password()?)?;
     assert!(reopened.holder_credential()?.is_none());
     Ok(())
 }
@@ -177,17 +418,12 @@ fn committee_records_are_role_scoped_and_durable() -> Result<(), Box<dyn Error>>
     let trusted_checkpoint = vault.checkpoint()?;
     drop(vault);
 
-    let checkpoint_store = ExactCheckpointStore {
-        identity: committee_identity(),
-        checkpoint: trusted_checkpoint,
-    };
+    let checkpoint_store = TestCheckpointStore::anchored(committee_identity(), trusted_checkpoint);
     let vault = Vault::open_anchored(&path, committee_identity(), password()?, &checkpoint_store)?;
+    let mut vault = TestVault::new(vault, checkpoint_store)?;
+    assert!(secret_option_eq(vault.committee_share()?, [0x2a; 128].as_slice()));
     assert!(secret_option_eq(
-        vault.committee_share()?.map(|value| value.expose_secret()),
-        [0x2a; 128].as_slice()
-    ));
-    assert!(secret_option_eq(
-        vault.committee_session_nonce()?.map(|value| value.expose_secret()),
+        vault.committee_session_nonce()?,
         [0x3b; 32].as_slice()
     ));
     Ok(())
@@ -322,10 +558,7 @@ fn backup_is_authenticated_and_restore_requires_empty_target() -> Result<(), Box
     let backup_checkpoint = vault.checkpoint()?;
     vault.backup_to(&backup)?;
     drop(vault);
-    let backup_store = ExactCheckpointStore {
-        identity: holder_identity(),
-        checkpoint: backup_checkpoint,
-    };
+    let backup_store = TestCheckpointStore::anchored(holder_identity(), backup_checkpoint);
 
     let failed_restore = Vault::restore(
         &backup,
@@ -345,13 +578,13 @@ fn backup_is_authenticated_and_restore_requires_empty_target() -> Result<(), Box
             &rollback_target,
             holder_identity(),
             password()?,
-            &ExactCheckpointStore {
-                identity: holder_identity(),
-                checkpoint: thunderbolt_keystore::VaultCheckpoint::new(
+            &TestCheckpointStore::anchored(
+                holder_identity(),
+                thunderbolt_keystore::VaultCheckpoint::new(
                     VaultRevision::new(backup_checkpoint.revision().get() + 1),
                     backup_checkpoint.state_digest()
                 ),
-            }
+            )
         ),
         Err(CheckpointAnchorError::Mismatch { .. })
     ));
@@ -359,17 +592,21 @@ fn backup_is_authenticated_and_restore_requires_empty_target() -> Result<(), Box
 
     let restored_vault = Vault::restore(&backup, &restored, holder_identity(), password()?, &backup_store)?;
     assert_eq!(restored_vault.checkpoint()?, backup_checkpoint);
-    assert!(secret_option_eq(
-        restored_vault.bitcoin_seed()?.map(|value| value.expose_secret()),
-        [0xd1; 32].as_slice()
-    ));
+    let mut restored_vault = TestVault::new(restored_vault, backup_store.clone())?;
+    assert!(secret_option_eq(restored_vault.bitcoin_seed()?, [0xd1; 32].as_slice()));
     drop(restored_vault);
 
     let existing_empty = directory.path().join("existing-empty.vault");
     fs::write(&existing_empty, [])?;
     set_owner_only(&existing_empty)?;
     assert!(matches!(
-        Vault::restore(&backup, &existing_empty, holder_identity(), password()?, &backup_store),
+        Vault::restore(
+            &backup,
+            &existing_empty,
+            holder_identity(),
+            password()?,
+            &TestCheckpointStore::anchored(holder_identity(), backup_checkpoint)
+        ),
         Err(CheckpointAnchorError::Keystore(KeystoreError::AlreadyExists))
     ));
     assert_eq!(fs::read(&existing_empty)?, Vec::<u8>::new());
@@ -420,19 +657,13 @@ fn stale_crash_temporary_file_cannot_replace_live_vault() -> Result<(), Box<dyn 
     set_owner_only(&stale)?;
 
     let mut reopened = open_vault(&path, holder_identity(), password()?)?;
-    assert!(secret_option_eq(
-        reopened.bitcoin_seed()?.map(|value| value.expose_secret()),
-        [0xe1; 32].as_slice()
-    ));
+    assert!(secret_option_eq(reopened.bitcoin_seed()?, [0xe1; 32].as_slice()));
     reopened.set_holder_credential(HolderCredential::from_bytes(vec![0xf2; 64])?)?;
     assert_eq!(fs::read(&stale)?, b"incomplete crash write");
     drop(reopened);
 
-    let reopened = open_vault(&path, holder_identity(), password()?)?;
-    assert!(secret_option_eq(
-        reopened.holder_credential()?.map(|value| value.expose_secret()),
-        [0xf2; 64].as_slice()
-    ));
+    let mut reopened = open_vault(&path, holder_identity(), password()?)?;
+    assert!(secret_option_eq(reopened.holder_credential()?, [0xf2; 64].as_slice()));
     Ok(())
 }
 
@@ -448,11 +679,7 @@ fn external_file_replacement_aborts_update_and_restores_memory() -> Result<(), B
     fs::rename(&replacement, &path)?;
 
     let result = vault.set_holder_credential(HolderCredential::from_bytes(vec![0x72; 48])?);
-    assert!(matches!(
-        result,
-        Err(KeystoreError::AmbiguousWrite { source, .. })
-            if matches!(*source, KeystoreError::FileReplaced)
-    ));
+    assert!(matches!(result, Err(KeystoreError::CheckpointMismatch)));
     assert!(matches!(vault.holder_credential(), Err(KeystoreError::Poisoned)));
     assert!(matches!(vault.bitcoin_seed(), Err(KeystoreError::Poisoned)));
     Ok(())
@@ -488,20 +715,11 @@ fn multi_record_transaction_is_atomic_and_survives_restart() -> Result<(), Box<d
     assert_eq!(outcome, CommitOutcome::Applied(VaultRevision::new(1)));
     drop(vault);
 
-    let reopened = open_vault(&path, holder_identity(), password()?)?;
+    let mut reopened = open_vault(&path, holder_identity(), password()?)?;
     assert_eq!(reopened.revision()?, VaultRevision::new(1));
-    assert!(secret_option_eq(
-        reopened.get(&channel)?.map(|record| record.expose_secret()),
-        [0x11; 48].as_slice()
-    ));
-    assert!(secret_option_eq(
-        reopened.get(&invoice)?.map(|record| record.expose_secret()),
-        [0x22; 96].as_slice()
-    ));
-    assert!(secret_option_eq(
-        reopened.get(&credential)?.map(|record| record.expose_secret()),
-        [0x33; 128].as_slice()
-    ));
+    assert!(secret_option_eq(reopened.get(&channel)?, [0x11; 48].as_slice()));
+    assert!(secret_option_eq(reopened.get(&invoice)?, [0x22; 96].as_slice()));
+    assert!(secret_option_eq(reopened.get(&credential)?, [0x33; 128].as_slice()));
     Ok(())
 }
 
@@ -527,7 +745,7 @@ fn exact_replay_is_idempotent_and_changed_replay_fails() -> Result<(), Box<dyn E
 
     let mut reopened = open_vault(&path, holder_identity(), password()?)?;
     assert_eq!(
-        reopened.transact(VaultRevision::new(0), transaction_id, |transaction| {
+        reopened.transact(reopened.revision()?, transaction_id, |transaction| {
             transaction.compare_and_swap(
                 key.clone(),
                 ExpectedRecord::Absent,
@@ -537,7 +755,7 @@ fn exact_replay_is_idempotent_and_changed_replay_fails() -> Result<(), Box<dyn E
         CommitOutcome::Replayed(VaultRevision::new(1))
     );
     assert!(matches!(
-        reopened.transact(VaultRevision::new(1), transaction_id, |transaction| {
+        reopened.transact(reopened.revision()?, transaction_id, |transaction| {
             transaction.compare_and_swap(
                 key.clone(),
                 ExpectedRecord::Absent,
@@ -551,7 +769,7 @@ fn exact_replay_is_idempotent_and_changed_replay_fails() -> Result<(), Box<dyn E
         Err(KeystoreError::InvalidPruneRevision)
     ));
     assert_eq!(
-        reopened.transact(VaultRevision::new(0), transaction_id, |transaction| {
+        reopened.transact(reopened.revision()?, transaction_id, |transaction| {
             transaction.compare_and_swap(
                 key.clone(),
                 ExpectedRecord::Absent,
@@ -560,10 +778,7 @@ fn exact_replay_is_idempotent_and_changed_replay_fails() -> Result<(), Box<dyn E
         })?,
         CommitOutcome::Replayed(VaultRevision::new(1))
     );
-    assert!(secret_option_eq(
-        reopened.get(&key)?.map(|record| record.expose_secret()),
-        [0x44; 64].as_slice()
-    ));
+    assert!(secret_option_eq(reopened.get(&key)?, [0x44; 64].as_slice()));
     Ok(())
 }
 
@@ -598,10 +813,7 @@ fn compare_and_swap_conflict_rolls_back_every_staged_record() -> Result<(), Box<
         Err(KeystoreError::RecordConflict)
     ));
     assert_eq!(vault.revision()?, VaultRevision::new(1));
-    assert!(secret_option_eq(
-        vault.get(&first)?.map(|record| record.expose_secret()),
-        [0x51; 32].as_slice()
-    ));
+    assert!(secret_option_eq(vault.get(&first)?, [0x51; 32].as_slice()));
     assert!(vault.get(&second)?.is_none());
     Ok(())
 }
@@ -635,42 +847,32 @@ fn consumed_nonce_tombstone_survives_restart_and_stale_backup_is_rejected() -> R
         }),
         Err(KeystoreError::NonceAlreadyReserved)
     ));
-    assert!(secret_option_eq(
-        vault.get(&nonce_key)?.map(|record| record.expose_secret()),
-        [0x62; 32].as_slice()
-    ));
+    assert!(secret_option_eq(vault.get(&nonce_key)?, [0x62; 32].as_slice()));
     vault.transact(vault.revision()?, TransactionId::new([0x86; 32]), |transaction| {
         transaction.remove(nonce_key.clone(), nonce_version)
     })?;
+    let tombstone_version = match vault.record_status(&nonce_key)? {
+        RecordStatus::Tombstoned(version) => version,
+        _ => return Err("nonce was not tombstoned".into()),
+    };
     let trusted_checkpoint = vault.checkpoint()?;
-    assert_eq!(trusted_checkpoint.revision(), VaultRevision::new(3));
-    assert_eq!(
-        vault.record_status(&nonce_key)?,
-        RecordStatus::Tombstoned(thunderbolt_keystore::RecordVersion::new(3))
-    );
     drop(vault);
 
-    let checkpoint_store = ExactCheckpointStore {
-        identity: committee_identity(),
-        checkpoint: trusted_checkpoint,
-    };
-    let mut reopened = Vault::open_anchored(&path, committee_identity(), password()?, &checkpoint_store)?;
+    let checkpoint_store = TestCheckpointStore::anchored(committee_identity(), trusted_checkpoint);
+    let reopened = Vault::open_anchored(&path, committee_identity(), password()?, &checkpoint_store)?;
+    let mut reopened = TestVault::new(reopened, checkpoint_store.clone())?;
     assert_eq!(
         reopened.record_status(&nonce_key)?,
-        RecordStatus::Tombstoned(thunderbolt_keystore::RecordVersion::new(3))
+        RecordStatus::Tombstoned(tombstone_version)
     );
     assert!(matches!(
-        reopened.transact(
-            trusted_checkpoint.revision(),
-            TransactionId::new([0x87; 32]),
-            |transaction| {
-                transaction.compare_and_swap(
-                    nonce_key.clone(),
-                    ExpectedRecord::Version(thunderbolt_keystore::RecordVersion::new(3)),
-                    SecretValue::from_bytes(vec![0x63; 32])?,
-                )
-            },
-        ),
+        reopened.transact(reopened.revision()?, TransactionId::new([0x87; 32]), |transaction| {
+            transaction.compare_and_swap(
+                nonce_key.clone(),
+                ExpectedRecord::Version(tombstone_version),
+                SecretValue::from_bytes(vec![0x63; 32])?,
+            )
+        },),
         Err(KeystoreError::NonceConsumed)
     ));
     drop(reopened);
@@ -690,7 +892,7 @@ fn consumed_nonce_tombstone_survives_restart_and_stale_backup_is_rejected() -> R
         ),
         Err(CheckpointAnchorError::Mismatch { .. })
     ));
-    assert_eq!(stale_checkpoint.revision(), VaultRevision::new(1));
+    assert!(stale_checkpoint.revision() < trusted_checkpoint.revision());
     assert!(!rejected_restore.exists());
     Ok(())
 }

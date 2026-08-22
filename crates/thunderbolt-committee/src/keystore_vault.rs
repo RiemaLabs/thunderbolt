@@ -4,10 +4,11 @@ use std::path::Path;
 use bitcoin::Network as BitcoinNetwork;
 use sha2::{Digest, Sha256};
 use thunderbolt_keystore::{
-    CommitOutcome, CommitteeDescriptorDigest, CommitteeSessionNonce, DeploymentBinding, DeploymentId, ExpectedRecord,
-    KdfParams, KeystoreError, Network, NodeId, Password, RecordKey, RecordNamespace, RecordStatus, RecordVersion,
-    RecoveryVault, RollbackFloorStore, SecretValue, TransactionId, Vault, VaultCheckpoint, VaultIdentity,
-    VaultRevision, VaultRole, MAX_RECORD_VALUE_BYTES,
+    AnchoredMutationError, AnchoredTransactOutcome, CommitteeDescriptorDigest, CommitteeSessionNonce,
+    DeploymentBinding, DeploymentId, ExpectedRecord, KdfParams, KeystoreError, Network, NodeId, Password, RecordKey,
+    RecordNamespace, RecordStatus, RecordVersion, RecordView, RecoveryVault, RollbackFloorStore, SecretValue,
+    Transaction, TransactionId, Vault, VaultCheckpoint, VaultIdentity, VaultRevision, VaultRole,
+    MAX_RECORD_VALUE_BYTES, MAX_TRANSACTION_MUTATIONS,
 };
 use zeroize::Zeroizing;
 
@@ -76,7 +77,6 @@ where
     identity: VaultIdentity,
     state_key: RecordKey,
     checkpoint: VaultCheckpoint,
-    recovery_candidate: Option<VaultCheckpoint>,
     poisoned: bool,
 }
 
@@ -115,9 +115,8 @@ where
 
     /// Opens a committee keystore at its independently authenticated floor.
     ///
-    /// The encrypted file must match the exact external checkpoint. Ambiguous
-    /// post-write recovery requires [`Self::reconcile_candidate`] with the
-    /// candidate retained by the independent operation journal.
+    /// The encrypted file must match the exact external checkpoint. Generic
+    /// ahead-of-checkpoint recovery is deliberately forbidden.
     pub fn open(
         path: impl AsRef<Path>,
         descriptor: &CommitteeDescriptor,
@@ -138,50 +137,7 @@ where
         let vault = recovery
             .anchor(&floor_store)
             .map_err(|_| KeystoreCommitteeVaultError::FloorMismatch)?;
-        let mut adapter = Self::from_parts(vault, descriptor, member_id, floor_store, candidate)?;
-        if candidate.revision().get() > 0 {
-            adapter.verify_recovery_record(candidate)?;
-        }
-        Ok(adapter)
-    }
-
-    /// Reconciles one exact post-write candidate retained in the independent
-    /// operation journal after an ambiguous adapter error.
-    #[allow(clippy::too_many_arguments)]
-    pub fn reconcile_candidate(
-        path: impl AsRef<Path>,
-        descriptor: &CommitteeDescriptor,
-        member_id: CommitteeMemberId,
-        password: Password,
-        floor_store: F,
-        expected: VaultCheckpoint,
-        candidate: VaultCheckpoint,
-    ) -> std::result::Result<Self, KeystoreCommitteeVaultError> {
-        let identity = committee_keystore_identity(descriptor, member_id)?;
-        let next_revision = expected
-            .revision()
-            .get()
-            .checked_add(1)
-            .ok_or(KeystoreCommitteeVaultError::FloorMismatch)?;
-        if candidate.revision().get() != next_revision
-            || floor_store
-                .load_checkpoint(identity)
-                .map_err(|_| KeystoreCommitteeVaultError::FloorMismatch)?
-                != Some(expected)
-        {
-            return Err(KeystoreCommitteeVaultError::FloorMismatch);
-        }
-        let recovery = RecoveryVault::open(path, identity, password).map_err(KeystoreCommitteeVaultError::Keystore)?;
-        if recovery.checkpoint() != candidate {
-            return Err(KeystoreCommitteeVaultError::FloorMismatch);
-        }
-        install_checkpoint(&floor_store, identity, Some(expected), candidate)?;
-        let vault = recovery
-            .anchor(&floor_store)
-            .map_err(|_| KeystoreCommitteeVaultError::FloorMismatch)?;
-        let mut adapter = Self::from_parts(vault, descriptor, member_id, floor_store, candidate)?;
-        adapter.verify_recovery_record(candidate)?;
-        Ok(adapter)
+        Self::from_parts(vault, descriptor, member_id, floor_store, candidate)
     }
 
     /// Returns the exact authenticated keystore identity.
@@ -200,11 +156,11 @@ where
         self.ensure_consistent()
     }
 
-    /// Returns the non-secret candidate required for explicit post-error
-    /// reconciliation, if a local write reached the candidate checkpoint.
-    #[must_use]
-    pub const fn recovery_candidate(&self) -> Option<VaultCheckpoint> {
-        self.recovery_candidate
+    /// Returns the current non-secret adapter request digest through a fenced,
+    /// checkpoint-anchored read.
+    pub fn current_request_digest(&mut self) -> std::result::Result<Option<[u8; 32]>, KeystoreCommitteeVaultError> {
+        self.fenced_state_read()
+            .map(|record| record.map(|record| record.request_digest))
     }
 
     /// Creates an authenticated no-clobber backup of the encrypted vault.
@@ -215,6 +171,138 @@ where
             .map_err(KeystoreCommitteeVaultError::Keystore)
     }
 
+    /// Removes explicitly finalized adapter idempotency records and prunes
+    /// keystore receipts through the same externally finalized revision.
+    ///
+    /// The caller must retain durable request history and must never include the
+    /// current state record's request digest. This does not compact the engine's
+    /// encrypted replay journal; its record-size ceiling remains an operational
+    /// rotation requirement.
+    pub fn prune_finalized_history(
+        &mut self,
+        through_revision: VaultRevision,
+        finalized_request_digests: &[[u8; 32]],
+    ) -> std::result::Result<VaultCheckpoint, KeystoreCommitteeVaultError> {
+        let mut finalized = finalized_request_digests.to_vec();
+        finalized.sort_unstable();
+        finalized.dedup();
+        let initial = self.ensure_consistent()?;
+        if through_revision > initial.revision() || finalized.len() > MAX_TRANSACTION_MUTATIONS.saturating_sub(2) {
+            return Err(KeystoreCommitteeVaultError::RevisionMismatch);
+        }
+        let pruned = {
+            let floor_store = &self.floor_store;
+            self.vault
+                .as_mut()
+                .ok_or(KeystoreCommitteeVaultError::Poisoned)?
+                .prune_transaction_receipts(initial, through_revision, floor_store)
+        };
+        self.checkpoint = match pruned {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => return Err(self.anchored_error(error)),
+        };
+        if finalized.is_empty() {
+            return Ok(self.checkpoint);
+        }
+        let expected = self.checkpoint;
+        let mut operation_hasher = Sha256::new();
+        operation_hasher.update(through_revision.get().to_be_bytes());
+        for digest in &finalized {
+            operation_hasher.update(digest);
+        }
+        let operation_digest: [u8; 32] = operation_hasher.finalize().into();
+        let transaction_id = fenced_transaction_id(&self.identity, 6, expected, &operation_digest);
+        let state_key = self.state_key.clone();
+        let descriptor_id = self.descriptor_id;
+        let member_id = self.member_id;
+        let identity = self.identity;
+        let committed_revision = VaultRevision::new(
+            expected
+                .revision()
+                .get()
+                .checked_add(1)
+                .ok_or(KeystoreCommitteeVaultError::RevisionMismatch)?,
+        );
+        let result = {
+            let floor_store = &self.floor_store;
+            self.vault
+                .as_mut()
+                .ok_or(KeystoreCommitteeVaultError::Poisoned)?
+                .transact(expected, transaction_id, floor_store, move |transaction| {
+                    let current = validated_state_from_transaction(transaction, &state_key, &descriptor_id, member_id)?
+                        .ok_or(KeystoreError::InvalidFormat)?;
+                    let request_digest = request_digest(
+                        &identity,
+                        6,
+                        Some(current.engine_revision),
+                        current.engine_revision,
+                        &operation_digest,
+                    );
+                    if finalized.contains(&current.request_digest) || finalized.contains(&request_digest) {
+                        return Err(KeystoreError::InvalidPruneRevision);
+                    }
+                    for digest in finalized {
+                        let key = idempotency_record_key(&digest).map_err(|_| KeystoreError::InvalidRecordKey)?;
+                        if let Some(view) = transaction.get(&key) {
+                            let version = view.version();
+                            let bytes = Zeroizing::new(view.expose_secret().to_vec());
+                            let record = decode_idempotency_record(&bytes, &descriptor_id, member_id)
+                                .map_err(|_| KeystoreError::InvalidFormat)?;
+                            if record.request_digest != digest
+                                || record.committed_vault_revision > through_revision.get()
+                            {
+                                return Err(KeystoreError::InvalidPruneRevision);
+                            }
+                            transaction.remove(key, version)?;
+                        }
+                    }
+                    let mut state_record = encode_state_record(
+                        &descriptor_id,
+                        member_id,
+                        current.engine_revision,
+                        committed_revision,
+                        request_digest,
+                        &current.engine_payload,
+                    )
+                    .map_err(|_| KeystoreError::InvalidFormat)?;
+                    let state_digest = Sha256::digest(&state_record).into();
+                    let mut idempotency = encode_idempotency_record(
+                        &descriptor_id,
+                        member_id,
+                        request_digest,
+                        6,
+                        Some(current.engine_revision),
+                        Some(current.record_version),
+                        current.engine_revision,
+                        committed_revision,
+                        state_digest,
+                    );
+                    let idempotency_key =
+                        idempotency_record_key(&request_digest).map_err(|_| KeystoreError::InvalidRecordKey)?;
+                    transaction.compare_and_swap(
+                        state_key,
+                        ExpectedRecord::Version(current.record_version),
+                        SecretValue::from_bytes(mem::take(&mut *state_record))?,
+                    )?;
+                    transaction.compare_and_swap(
+                        idempotency_key,
+                        ExpectedRecord::Absent,
+                        SecretValue::from_bytes(mem::take(&mut *idempotency))?,
+                    )?;
+                    Ok(())
+                })
+        };
+        match result {
+            Ok(AnchoredTransactOutcome::Applied { revision, .. }) => self.accept_applied_checkpoint(revision)?,
+            Ok(AnchoredTransactOutcome::Replayed { .. }) => {
+                self.poison();
+                return Err(KeystoreCommitteeVaultError::InvalidRecord);
+            }
+            Err(error) => return Err(self.anchored_error(error)),
+        }
+        Ok(self.checkpoint)
+    }
+
     /// Atomically reserves one immutable signing nonce and advances the
     /// independent floor before returning. The nonce bytes are never returned
     /// by this adapter.
@@ -223,20 +311,10 @@ where
         session_id: SignerSessionId,
         nonce: CommitteeSessionNonce,
     ) -> std::result::Result<VaultRevision, KeystoreCommitteeVaultError> {
-        let nonce_key =
-            RecordKey::session_nonce(session_id.as_bytes().to_vec()).map_err(KeystoreCommitteeVaultError::Keystore)?;
-        if self
-            .vault_ref()?
-            .record_status(&nonce_key)
-            .map_err(KeystoreCommitteeVaultError::Keystore)?
-            != RecordStatus::Absent
-        {
-            return Err(KeystoreCommitteeVaultError::RevisionMismatch);
-        }
         let nonce_digest: [u8; 32] = Sha256::digest(nonce.expose_secret()).into();
         let nonce_value =
             SecretValue::from_bytes(nonce.expose_secret().to_vec()).map_err(KeystoreCommitteeVaultError::Keystore)?;
-        self.commit_nonce_operation(session_id, 2, nonce_digest, Some(nonce_value), None)
+        self.commit_nonce_operation(session_id, 2, nonce_digest, Some(nonce_value))
     }
 
     /// Atomically tombstones a reserved signing nonce and advances the
@@ -246,19 +324,10 @@ where
         &mut self,
         session_id: SignerSessionId,
     ) -> std::result::Result<VaultRevision, KeystoreCommitteeVaultError> {
-        let nonce_key =
-            RecordKey::session_nonce(session_id.as_bytes().to_vec()).map_err(KeystoreCommitteeVaultError::Keystore)?;
-        let view = self
-            .vault_ref()?
-            .get(&nonce_key)
-            .map_err(KeystoreCommitteeVaultError::Keystore)?
-            .ok_or(KeystoreCommitteeVaultError::RevisionMismatch)?;
-        let nonce_version = view.version();
         let mut operation_hasher = Sha256::new();
         operation_hasher.update(session_id.as_bytes());
-        operation_hasher.update(nonce_version.get().to_be_bytes());
         let operation_digest = operation_hasher.finalize().into();
-        self.commit_nonce_operation(session_id, 3, operation_digest, None, Some(nonce_version))
+        self.commit_nonce_operation(session_id, 3, operation_digest, None)
     }
 
     /// Returns the authenticated live/absent/tombstoned nonce status.
@@ -266,12 +335,7 @@ where
         &mut self,
         session_id: SignerSessionId,
     ) -> std::result::Result<RecordStatus, KeystoreCommitteeVaultError> {
-        self.ensure_consistent()?;
-        let key =
-            RecordKey::session_nonce(session_id.as_bytes().to_vec()).map_err(KeystoreCommitteeVaultError::Keystore)?;
-        self.vault_ref()?
-            .record_status(&key)
-            .map_err(KeystoreCommitteeVaultError::Keystore)
+        self.fenced_nonce_status(session_id)
     }
 
     fn from_parts(
@@ -294,7 +358,6 @@ where
             identity,
             state_key,
             checkpoint,
-            recovery_candidate: None,
             poisoned: false,
         };
         let actual = adapter
@@ -339,82 +402,8 @@ where
         Ok(vault_checkpoint)
     }
 
-    fn advance_checkpoint_checked(
-        &mut self,
-        expected: Option<VaultCheckpoint>,
-        checkpoint: VaultCheckpoint,
-    ) -> std::result::Result<(), KeystoreCommitteeVaultError> {
-        // The backend may report an error after making the CAS durable. Always
-        // read it back and accept only the exact encrypted-state checkpoint.
-        self.recovery_candidate = Some(checkpoint);
-        let _advance_result = self
-            .floor_store
-            .compare_and_swap_checkpoint(self.identity, expected, checkpoint);
-        let observed = match self.floor_store.load_checkpoint(self.identity) {
-            Ok(observed) => observed,
-            Err(_) => {
-                self.poison();
-                return Err(KeystoreCommitteeVaultError::FloorMismatch);
-            }
-        };
-        if observed != Some(checkpoint) {
-            self.poison();
-            return Err(KeystoreCommitteeVaultError::FloorMismatch);
-        }
-        self.checkpoint = checkpoint;
-        self.recovery_candidate = None;
-        Ok(())
-    }
-
-    fn verify_recovery_record(
-        &mut self,
-        vault_checkpoint: VaultCheckpoint,
-    ) -> std::result::Result<(), KeystoreCommitteeVaultError> {
-        let record = self
-            .load_state_record()?
-            .ok_or(KeystoreCommitteeVaultError::InvalidRecord)?;
-        if record.committed_vault_revision != vault_checkpoint.revision().get() {
-            self.poison();
-            return Err(KeystoreCommitteeVaultError::InvalidRecord);
-        }
-        let idempotency_key = idempotency_record_key(&record.request_digest)?;
-        let view = self
-            .vault_ref()?
-            .get(&idempotency_key)
-            .map_err(KeystoreCommitteeVaultError::Keystore)?
-            .ok_or(KeystoreCommitteeVaultError::InvalidRecord)?;
-        let bytes = Zeroizing::new(view.expose_secret().to_vec());
-        let idempotency = decode_idempotency_record(&bytes, &self.descriptor_id, self.member_id)?;
-        if idempotency.request_digest != record.request_digest
-            || idempotency.result_engine_revision != record.engine_revision
-            || idempotency.committed_vault_revision != record.committed_vault_revision
-            || idempotency.state_digest != record.encoded_digest
-        {
-            self.poison();
-            return Err(KeystoreCommitteeVaultError::InvalidRecord);
-        }
-        Ok(())
-    }
-
-    fn load_state_record(&self) -> std::result::Result<Option<DecodedStateRecord>, KeystoreCommitteeVaultError> {
-        let Some(view) = self
-            .vault_ref()?
-            .get(&self.state_key)
-            .map_err(KeystoreCommitteeVaultError::Keystore)?
-        else {
-            return Ok(None);
-        };
-        let version = view.version();
-        let bytes = Zeroizing::new(view.expose_secret().to_vec());
-        decode_state_record(&bytes, version, &self.descriptor_id, self.member_id).map(Some)
-    }
-
     fn vault_ref(&self) -> std::result::Result<&Vault, KeystoreCommitteeVaultError> {
         self.vault.as_ref().ok_or(KeystoreCommitteeVaultError::Poisoned)
-    }
-
-    fn vault_mut(&mut self) -> std::result::Result<&mut Vault, KeystoreCommitteeVaultError> {
-        self.vault.as_mut().ok_or(KeystoreCommitteeVaultError::Poisoned)
     }
 
     fn poison(&mut self) {
@@ -422,11 +411,103 @@ where
         self.vault.take();
     }
 
-    fn poison_after_keystore_error(&mut self, error: &KeystoreError) {
-        if let KeystoreError::AmbiguousWrite { candidate, .. } = error {
-            self.recovery_candidate = Some(*candidate);
+    fn anchored_error(&mut self, error: AnchoredMutationError<F::Error>) -> KeystoreCommitteeVaultError {
+        match error {
+            AnchoredMutationError::Keystore(
+                error @ (KeystoreError::RevisionConflict
+                | KeystoreError::RecordConflict
+                | KeystoreError::NonceConsumed
+                | KeystoreError::NonceAlreadyReserved
+                | KeystoreError::InvalidPruneRevision),
+            ) => KeystoreCommitteeVaultError::Keystore(error),
+            AnchoredMutationError::Keystore(error) => {
+                self.poison();
+                KeystoreCommitteeVaultError::Keystore(error)
+            }
+            AnchoredMutationError::Store { .. } | AnchoredMutationError::CheckpointConflict(_) => {
+                self.poison();
+                KeystoreCommitteeVaultError::FloorMismatch
+            }
         }
-        self.poison();
+    }
+
+    fn accept_applied_checkpoint(
+        &mut self,
+        revision: VaultRevision,
+    ) -> std::result::Result<(), KeystoreCommitteeVaultError> {
+        let checkpoint = self
+            .vault_ref()?
+            .checkpoint()
+            .map_err(KeystoreCommitteeVaultError::Keystore)?;
+        if checkpoint.revision() != revision {
+            self.poison();
+            return Err(KeystoreCommitteeVaultError::InvalidRecord);
+        }
+        self.checkpoint = checkpoint;
+        Ok(())
+    }
+
+    fn fenced_state_read(&mut self) -> std::result::Result<Option<DecodedStateRecord>, KeystoreCommitteeVaultError> {
+        let expected = self.ensure_consistent()?;
+        let transaction_id = fenced_transaction_id(&self.identity, 4, expected, self.state_key.as_bytes());
+        let state_key = self.state_key.clone();
+        let descriptor_id = self.descriptor_id;
+        let member_id = self.member_id;
+        let result = {
+            let floor_store = &self.floor_store;
+            self.vault
+                .as_mut()
+                .ok_or(KeystoreCommitteeVaultError::Poisoned)?
+                .transact(expected, transaction_id, floor_store, move |transaction| {
+                    validated_state_from_transaction(transaction, &state_key, &descriptor_id, member_id)
+                })
+        };
+        match result {
+            Ok(AnchoredTransactOutcome::Applied { revision, output }) => {
+                self.accept_applied_checkpoint(revision)?;
+                Ok(output)
+            }
+            Ok(AnchoredTransactOutcome::Replayed { .. }) => {
+                self.poison();
+                Err(KeystoreCommitteeVaultError::InvalidRecord)
+            }
+            Err(error) => Err(self.anchored_error(error)),
+        }
+    }
+
+    fn fenced_nonce_status(
+        &mut self,
+        session_id: SignerSessionId,
+    ) -> std::result::Result<RecordStatus, KeystoreCommitteeVaultError> {
+        let expected = self.ensure_consistent()?;
+        let nonce_key =
+            RecordKey::session_nonce(session_id.as_bytes().to_vec()).map_err(KeystoreCommitteeVaultError::Keystore)?;
+        let transaction_id = fenced_transaction_id(&self.identity, 5, expected, session_id.as_bytes());
+        let state_key = self.state_key.clone();
+        let descriptor_id = self.descriptor_id;
+        let member_id = self.member_id;
+        let result = {
+            let floor_store = &self.floor_store;
+            self.vault
+                .as_mut()
+                .ok_or(KeystoreCommitteeVaultError::Poisoned)?
+                .transact(expected, transaction_id, floor_store, move |transaction| {
+                    validated_state_from_transaction(transaction, &state_key, &descriptor_id, member_id)?
+                        .ok_or(KeystoreError::InvalidFormat)?;
+                    Ok(transaction.record_status(&nonce_key))
+                })
+        };
+        match result {
+            Ok(AnchoredTransactOutcome::Applied { revision, output }) => {
+                self.accept_applied_checkpoint(revision)?;
+                Ok(output)
+            }
+            Ok(AnchoredTransactOutcome::Replayed { .. }) => {
+                self.poison();
+                Err(KeystoreCommitteeVaultError::InvalidRecord)
+            }
+            Err(error) => Err(self.anchored_error(error)),
+        }
     }
 
     fn commit_nonce_operation(
@@ -435,106 +516,97 @@ where
         operation: u8,
         operation_digest: [u8; 32],
         nonce_value: Option<SecretValue>,
-        nonce_version: Option<RecordVersion>,
     ) -> std::result::Result<VaultRevision, KeystoreCommitteeVaultError> {
         let base_checkpoint = self.ensure_consistent()?;
         let base_revision = base_checkpoint.revision();
-        let current = match self.load_state_record() {
-            Ok(Some(current)) => current,
-            _ => {
-                self.poison();
-                return Err(KeystoreCommitteeVaultError::InvalidRecord);
-            }
-        };
         let committed_revision = base_revision
             .get()
             .checked_add(1)
             .map(VaultRevision::new)
             .ok_or(KeystoreCommitteeVaultError::RevisionMismatch)?;
-        let request_digest = request_digest(
-            &self.identity,
-            operation,
-            Some(current.engine_revision),
-            current.engine_revision,
-            &operation_digest,
-        );
-        let mut state_record = encode_state_record(
-            &self.descriptor_id,
-            self.member_id,
-            current.engine_revision,
-            committed_revision,
-            request_digest,
-            &current.engine_payload,
-        )?;
-        let state_digest = Sha256::digest(&state_record).into();
-        let mut idempotency = encode_idempotency_record(
-            &self.descriptor_id,
-            self.member_id,
-            request_digest,
-            operation,
-            Some(current.engine_revision),
-            Some(current.record_version),
-            current.engine_revision,
-            committed_revision,
-            state_digest,
-        );
         let state_key = self.state_key.clone();
-        let idempotency_key = idempotency_record_key(&request_digest)?;
         let nonce_key =
             RecordKey::session_nonce(session_id.as_bytes().to_vec()).map_err(KeystoreCommitteeVaultError::Keystore)?;
-        let transaction_id = transaction_id(&self.identity, &request_digest);
-        let result = self
-            .vault_mut()?
-            .transact(base_revision, transaction_id, |transaction| {
-                transaction.compare_and_swap(
-                    state_key,
-                    ExpectedRecord::Version(current.record_version),
-                    SecretValue::from_bytes(mem::take(&mut *state_record))?,
-                )?;
-                transaction.compare_and_swap(
-                    idempotency_key,
-                    ExpectedRecord::Absent,
-                    SecretValue::from_bytes(mem::take(&mut *idempotency))?,
-                )?;
-                match (nonce_value, nonce_version) {
-                    (Some(value), None) => transaction.compare_and_swap(nonce_key, ExpectedRecord::Absent, value)?,
-                    (None, Some(version)) => transaction.remove(nonce_key, version)?,
-                    _ => return Err(KeystoreError::InvalidFormat),
-                }
-                Ok(())
-            });
-        let actual_revision = match result {
-            Ok(CommitOutcome::Applied(revision) | CommitOutcome::Replayed(revision)) => revision,
-            Err(error) => {
-                self.poison_after_keystore_error(&error);
-                return Err(KeystoreCommitteeVaultError::Keystore(error));
-            }
+        let transaction_id = fenced_transaction_id(&self.identity, operation, base_checkpoint, &operation_digest);
+        let descriptor_id = self.descriptor_id;
+        let member_id = self.member_id;
+        let identity = self.identity;
+        let result = {
+            let floor_store = &self.floor_store;
+            self.vault
+                .as_mut()
+                .ok_or(KeystoreCommitteeVaultError::Poisoned)?
+                .transact(base_checkpoint, transaction_id, floor_store, move |transaction| {
+                    let current = validated_state_from_transaction(transaction, &state_key, &descriptor_id, member_id)?
+                        .ok_or(KeystoreError::InvalidFormat)?;
+                    let request_digest = request_digest(
+                        &identity,
+                        operation,
+                        Some(current.engine_revision),
+                        current.engine_revision,
+                        &operation_digest,
+                    );
+                    let mut state_record = encode_state_record(
+                        &descriptor_id,
+                        member_id,
+                        current.engine_revision,
+                        committed_revision,
+                        request_digest,
+                        &current.engine_payload,
+                    )
+                    .map_err(|_| KeystoreError::InvalidFormat)?;
+                    let state_digest = Sha256::digest(&state_record).into();
+                    let mut idempotency = encode_idempotency_record(
+                        &descriptor_id,
+                        member_id,
+                        request_digest,
+                        operation,
+                        Some(current.engine_revision),
+                        Some(current.record_version),
+                        current.engine_revision,
+                        committed_revision,
+                        state_digest,
+                    );
+                    let idempotency_key =
+                        idempotency_record_key(&request_digest).map_err(|_| KeystoreError::InvalidRecordKey)?;
+                    transaction.compare_and_swap(
+                        state_key,
+                        ExpectedRecord::Version(current.record_version),
+                        SecretValue::from_bytes(mem::take(&mut *state_record))?,
+                    )?;
+                    transaction.compare_and_swap(
+                        idempotency_key,
+                        ExpectedRecord::Absent,
+                        SecretValue::from_bytes(mem::take(&mut *idempotency))?,
+                    )?;
+                    match nonce_value {
+                        Some(value) => {
+                            match transaction.record_status(&nonce_key) {
+                                RecordStatus::Absent => {}
+                                RecordStatus::Present(_) => return Err(KeystoreError::NonceAlreadyReserved),
+                                RecordStatus::Tombstoned(_) => return Err(KeystoreError::NonceConsumed),
+                            }
+                            transaction.compare_and_swap(nonce_key, ExpectedRecord::Absent, value)?;
+                        }
+                        None => {
+                            let nonce = transaction.get(&nonce_key).ok_or(KeystoreError::NonceConsumed)?;
+                            transaction.remove(nonce_key, nonce.version())?;
+                        }
+                    }
+                    Ok(current.engine_revision)
+                })
         };
-        let candidate = self
-            .vault_ref()?
-            .checkpoint()
-            .map_err(KeystoreCommitteeVaultError::Keystore)?;
-        if actual_revision != committed_revision
-            || candidate.revision() != committed_revision
-            || self
-                .advance_checkpoint_checked(Some(base_checkpoint), candidate)
-                .is_err()
-        {
-            self.poison();
-            return Err(KeystoreCommitteeVaultError::Poisoned);
-        }
-        let stored = match self.load_state_record() {
-            Ok(Some(stored)) => stored,
-            _ => {
+        match result {
+            Ok(AnchoredTransactOutcome::Applied { revision, .. }) => {
+                self.accept_applied_checkpoint(revision)?;
+                Ok(revision)
+            }
+            Ok(AnchoredTransactOutcome::Replayed { .. }) => {
                 self.poison();
-                return Err(KeystoreCommitteeVaultError::InvalidRecord);
+                Err(KeystoreCommitteeVaultError::InvalidRecord)
             }
-        };
-        if stored.encoded_digest != state_digest {
-            self.poison();
-            return Err(KeystoreCommitteeVaultError::InvalidRecord);
+            Err(error) => Err(self.anchored_error(error)),
         }
-        Ok(actual_revision)
     }
 }
 
@@ -545,27 +617,15 @@ where
     type Error = KeystoreCommitteeVaultError;
 
     fn load(&mut self) -> std::result::Result<Option<VaultEntry>, Self::Error> {
-        self.ensure_consistent()?;
-        match self.load_state_record() {
-            Ok(record) => Ok(record.map(|record| VaultEntry::new(record.engine_revision, record.engine_payload))),
-            Err(error) => {
-                self.poison();
-                Err(error)
-            }
-        }
+        self.fenced_state_read()
+            .map(|record| record.map(|record| VaultEntry::new(record.engine_revision, record.engine_payload)))
     }
 
     fn create(&mut self, entry: VaultEntry) -> std::result::Result<(), VaultStoreError<Self::Error>> {
-        self.ensure_consistent().map_err(VaultStoreError::Backend)?;
         if entry.revision() != 0 {
             return Err(VaultStoreError::Backend(Self::Error::RevisionMismatch));
         }
-        if let Some(current) = self.load_state_record().map_err(VaultStoreError::Backend)? {
-            return Err(VaultStoreError::Conflict {
-                current_revision: Some(current.engine_revision),
-            });
-        }
-        self.commit_engine_record(None, None, entry)
+        self.commit_engine_record(None, entry)
     }
 
     fn compare_and_swap(
@@ -573,23 +633,13 @@ where
         expected_revision: u64,
         entry: VaultEntry,
     ) -> std::result::Result<(), VaultStoreError<Self::Error>> {
-        self.ensure_consistent().map_err(VaultStoreError::Backend)?;
         let next_revision = expected_revision
             .checked_add(1)
             .ok_or(VaultStoreError::Backend(Self::Error::RevisionMismatch))?;
         if entry.revision() != next_revision {
             return Err(VaultStoreError::Backend(Self::Error::RevisionMismatch));
         }
-        let current = self
-            .load_state_record()
-            .map_err(VaultStoreError::Backend)?
-            .ok_or(VaultStoreError::Conflict { current_revision: None })?;
-        if current.engine_revision != expected_revision {
-            return Err(VaultStoreError::Conflict {
-                current_revision: Some(current.engine_revision),
-            });
-        }
-        self.commit_engine_record(Some(expected_revision), Some(current.record_version), entry)
+        self.commit_engine_record(Some(expected_revision), entry)
     }
 }
 
@@ -600,7 +650,6 @@ where
     fn commit_engine_record(
         &mut self,
         prior_engine_revision: Option<u64>,
-        prior_record_version: Option<RecordVersion>,
         entry: VaultEntry,
     ) -> std::result::Result<(), VaultStoreError<KeystoreCommitteeVaultError>> {
         let base_checkpoint = self.ensure_consistent().map_err(VaultStoreError::Backend)?;
@@ -619,93 +668,87 @@ where
             engine_revision,
             &payload_digest,
         );
-        let state_record = encode_state_record(
-            &self.descriptor_id,
-            self.member_id,
-            engine_revision,
-            committed_revision,
-            request_digest,
-            entry.plaintext(),
-        )
-        .map_err(VaultStoreError::Backend)?;
-        let state_digest = Sha256::digest(&state_record).into();
-        let idempotency = encode_idempotency_record(
-            &self.descriptor_id,
-            self.member_id,
-            request_digest,
-            1,
-            prior_engine_revision,
-            prior_record_version,
-            engine_revision,
-            committed_revision,
-            state_digest,
-        );
-        let idempotency_key = idempotency_record_key(&request_digest).map_err(VaultStoreError::Backend)?;
         let transaction_id = transaction_id(&self.identity, &request_digest);
         let state_key = self.state_key.clone();
-        let state_expected = prior_record_version.map_or(ExpectedRecord::Absent, ExpectedRecord::Version);
-        let mut state_record = state_record;
-        let mut idempotency = idempotency;
-        let result = self.vault_mut().map_err(VaultStoreError::Backend)?.transact(
-            base_revision,
-            transaction_id,
-            |transaction| {
-                transaction.compare_and_swap(
-                    state_key,
-                    state_expected,
-                    SecretValue::from_bytes(mem::take(&mut *state_record))?,
-                )?;
-                transaction.compare_and_swap(
-                    idempotency_key,
-                    ExpectedRecord::Absent,
-                    SecretValue::from_bytes(mem::take(&mut *idempotency))?,
-                )?;
-                Ok(())
-            },
-        );
-        let actual_revision = match result {
-            Ok(CommitOutcome::Applied(revision) | CommitOutcome::Replayed(revision)) => revision,
-            Err(KeystoreError::RevisionConflict | KeystoreError::RecordConflict) => {
-                return Err(VaultStoreError::Conflict {
-                    current_revision: self
-                        .load_state_record()
-                        .ok()
-                        .flatten()
-                        .map(|record| record.engine_revision),
-                });
-            }
-            Err(error) => {
-                self.poison_after_keystore_error(&error);
-                return Err(VaultStoreError::Backend(KeystoreCommitteeVaultError::Keystore(error)));
-            }
+        let descriptor_id = self.descriptor_id;
+        let member_id = self.member_id;
+        let payload = entry.into_plaintext();
+        let result = {
+            let floor_store = &self.floor_store;
+            self.vault
+                .as_mut()
+                .ok_or(VaultStoreError::Backend(KeystoreCommitteeVaultError::Poisoned))?
+                .transact(base_checkpoint, transaction_id, floor_store, move |transaction| {
+                    let (state_expected, prior_record_version) = match prior_engine_revision {
+                        None if transaction.get(&state_key).is_none() && transaction.record_count() == 0 => {
+                            (ExpectedRecord::Absent, None)
+                        }
+                        Some(expected) => {
+                            let current =
+                                validated_state_from_transaction(transaction, &state_key, &descriptor_id, member_id)?
+                                    .ok_or(KeystoreError::RecordConflict)?;
+                            if current.engine_revision != expected {
+                                return Err(KeystoreError::RecordConflict);
+                            }
+                            (
+                                ExpectedRecord::Version(current.record_version),
+                                Some(current.record_version),
+                            )
+                        }
+                        _ => return Err(KeystoreError::RecordConflict),
+                    };
+                    let mut state_record = encode_state_record(
+                        &descriptor_id,
+                        member_id,
+                        engine_revision,
+                        committed_revision,
+                        request_digest,
+                        &payload,
+                    )
+                    .map_err(|_| KeystoreError::InvalidFormat)?;
+                    let state_digest = Sha256::digest(&state_record).into();
+                    let mut idempotency = encode_idempotency_record(
+                        &descriptor_id,
+                        member_id,
+                        request_digest,
+                        1,
+                        prior_engine_revision,
+                        prior_record_version,
+                        engine_revision,
+                        committed_revision,
+                        state_digest,
+                    );
+                    let idempotency_key =
+                        idempotency_record_key(&request_digest).map_err(|_| KeystoreError::InvalidRecordKey)?;
+                    transaction.compare_and_swap(
+                        state_key,
+                        state_expected,
+                        SecretValue::from_bytes(mem::take(&mut *state_record))?,
+                    )?;
+                    transaction.compare_and_swap(
+                        idempotency_key,
+                        ExpectedRecord::Absent,
+                        SecretValue::from_bytes(mem::take(&mut *idempotency))?,
+                    )?;
+                    Ok(())
+                })
         };
-        if actual_revision != committed_revision {
-            self.poison();
-            return Err(VaultStoreError::Backend(KeystoreCommitteeVaultError::InvalidRecord));
-        }
-        let candidate = self
-            .vault_ref()
-            .and_then(|vault| vault.checkpoint().map_err(KeystoreCommitteeVaultError::Keystore))
-            .map_err(VaultStoreError::Backend)?;
-        if candidate.revision() != actual_revision
-            || self
-                .advance_checkpoint_checked(Some(base_checkpoint), candidate)
-                .is_err()
-        {
-            return Err(VaultStoreError::Backend(KeystoreCommitteeVaultError::Poisoned));
-        }
-        let stored = match self.load_state_record() {
-            Ok(stored) => stored,
-            Err(error) => {
+        match result {
+            Ok(AnchoredTransactOutcome::Applied { revision, .. }) => self
+                .accept_applied_checkpoint(revision)
+                .map_err(VaultStoreError::Backend),
+            Ok(AnchoredTransactOutcome::Replayed { .. }) => {
                 self.poison();
-                return Err(VaultStoreError::Backend(error));
+                Err(VaultStoreError::Backend(KeystoreCommitteeVaultError::InvalidRecord))
             }
-        };
-        if stored.as_ref().map(|record| record.encoded_digest) != Some(state_digest) {
-            self.poison();
-            return Err(VaultStoreError::Backend(KeystoreCommitteeVaultError::InvalidRecord));
+            Err(AnchoredMutationError::Keystore(KeystoreError::RevisionConflict | KeystoreError::RecordConflict)) => {
+                Err(VaultStoreError::Conflict { current_revision: None })
+            }
+            Err(error) => {
+                let mapped = self.anchored_error(error);
+                Err(VaultStoreError::Backend(mapped))
+            }
         }
-        Ok(())
     }
 }
 
@@ -723,6 +766,79 @@ struct DecodedIdempotencyRecord {
     result_engine_revision: u64,
     committed_vault_revision: u64,
     state_digest: [u8; 32],
+}
+
+fn decode_state_view(
+    view: RecordView<'_>,
+    descriptor_id: &[u8; 32],
+    member_id: CommitteeMemberId,
+) -> std::result::Result<DecodedStateRecord, KeystoreCommitteeVaultError> {
+    let version = view.version();
+    let bytes = Zeroizing::new(view.expose_secret().to_vec());
+    decode_state_record(&bytes, version, descriptor_id, member_id)
+}
+
+fn validated_state_from_transaction(
+    transaction: &Transaction<'_>,
+    state_key: &RecordKey,
+    descriptor_id: &[u8; 32],
+    member_id: CommitteeMemberId,
+) -> thunderbolt_keystore::Result<Option<DecodedStateRecord>> {
+    let Some(view) = transaction.get(state_key) else {
+        return if transaction.record_count() == 0 {
+            Ok(None)
+        } else {
+            Err(KeystoreError::InvalidFormat)
+        };
+    };
+    let state = decode_state_view(view, descriptor_id, member_id).map_err(|_| KeystoreError::InvalidFormat)?;
+    let current_key = idempotency_record_key(&state.request_digest).map_err(|_| KeystoreError::InvalidFormat)?;
+    let mut found_current = false;
+    for key in transaction.record_keys(RecordNamespace::AdapterState) {
+        if key == state_key {
+            continue;
+        }
+        let view = transaction.get(key).ok_or(KeystoreError::InvalidFormat)?;
+        let bytes = Zeroizing::new(view.expose_secret().to_vec());
+        let idempotency =
+            decode_idempotency_record(&bytes, descriptor_id, member_id).map_err(|_| KeystoreError::InvalidFormat)?;
+        if idempotency_record_key(&idempotency.request_digest).map_err(|_| KeystoreError::InvalidFormat)? != *key
+            || idempotency.result_engine_revision > state.engine_revision
+            || idempotency.committed_vault_revision > state.committed_vault_revision
+        {
+            return Err(KeystoreError::InvalidFormat);
+        }
+        if *key == current_key {
+            found_current = true;
+            if idempotency.request_digest != state.request_digest
+                || idempotency.result_engine_revision != state.engine_revision
+                || idempotency.committed_vault_revision != state.committed_vault_revision
+                || idempotency.state_digest != state.encoded_digest
+            {
+                return Err(KeystoreError::InvalidFormat);
+            }
+        }
+    }
+    if !found_current {
+        return Err(KeystoreError::InvalidFormat);
+    }
+    Ok(Some(state))
+}
+
+fn fenced_transaction_id(
+    identity: &VaultIdentity,
+    operation: u8,
+    checkpoint: VaultCheckpoint,
+    request: &[u8],
+) -> TransactionId {
+    let mut hasher = Sha256::new();
+    append_bytes(&mut hasher, TRANSACTION_DOMAIN);
+    append_identity(&mut hasher, identity);
+    hasher.update([operation]);
+    hasher.update(checkpoint.revision().get().to_be_bytes());
+    hasher.update(checkpoint.state_digest().as_bytes());
+    append_bytes(&mut hasher, request);
+    TransactionId::new(hasher.finalize().into())
 }
 
 fn install_checkpoint<F: RollbackFloorStore>(
@@ -924,7 +1040,7 @@ fn decode_state_record(
     }
     let engine_payload = VaultPlaintext::from_secret_bytes(cursor.take(payload_length)?.to_vec())
         .map_err(|_| KeystoreCommitteeVaultError::InvalidRecord)?;
-    if !cursor.is_empty() || record_version.get() > committed_vault_revision {
+    if !cursor.is_empty() || record_version.get() != committed_vault_revision {
         return Err(KeystoreCommitteeVaultError::InvalidRecord);
     }
     Ok(DecodedStateRecord {
@@ -956,7 +1072,7 @@ fn decode_idempotency_record(
     let result_engine_revision = cursor.u64()?;
     let committed_vault_revision = cursor.u64()?;
     let state_digest = cursor.array_32()?;
-    if !cursor.is_empty() || !(1..=3).contains(&operation) {
+    if !cursor.is_empty() || !(1..=6).contains(&operation) {
         return Err(KeystoreCommitteeVaultError::InvalidRecord);
     }
     Ok(DecodedIdempotencyRecord {
@@ -1047,5 +1163,30 @@ impl<'a> Cursor<'a> {
 
     const fn is_empty(&self) -> bool {
         self.position == self.bytes.len()
+    }
+}
+
+#[cfg(test)]
+mod codec_tests {
+    use std::error::Error;
+
+    use super::*;
+
+    #[test]
+    fn state_record_rejects_future_claimed_committed_revision() -> Result<(), Box<dyn Error>> {
+        let descriptor_id = [0x41; 32];
+        let member_id = CommitteeMemberId::new(1)?;
+        let payload = VaultPlaintext::from_secret_bytes(vec![0x42; 32])?;
+        let encoded = encode_state_record(
+            &descriptor_id,
+            member_id,
+            0,
+            VaultRevision::new(7),
+            [0x43; 32],
+            &payload,
+        )?;
+        assert!(decode_state_record(&encoded, RecordVersion::new(6), &descriptor_id, member_id,).is_err());
+        assert!(decode_state_record(&encoded, RecordVersion::new(7), &descriptor_id, member_id,).is_ok());
+        Ok(())
     }
 }

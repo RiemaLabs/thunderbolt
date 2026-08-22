@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use bitcoin::Network as BitcoinNetwork;
@@ -6,10 +6,11 @@ use libpaillier::{DecryptionKey, EncryptionKey};
 use secp::{Point, Scalar};
 use sha2::{Digest as _, Sha256};
 use thunderbolt_keystore::{
-    CheckpointCasOutcome, CommitOutcome, CommitteeDescriptorDigest, DeploymentBinding,
-    DeploymentId as KeystoreDeploymentId, ExpectedRecord, KdfParams, KeystoreError, NodeId, Password, RecordKey,
-    RecordNamespace, RecordVersion, RecoveryVault, RollbackFloorStore, SecretValue, TransactionId, Vault,
-    VaultCheckpoint, VaultIdentity, VaultRevision, VaultRole, MAX_RECORDS, MAX_RECORD_VALUE_BYTES,
+    AnchoredMutationError, AnchoredTransactOutcome, CheckpointAnchorError, CheckpointCasOutcome,
+    CommitteeDescriptorDigest, DeploymentBinding, DeploymentId as KeystoreDeploymentId, ExpectedRecord, KdfParams,
+    KeystoreError, NodeId, Password, RecordKey, RecordNamespace, RecordVersion, RecoveryVault, RollbackFloorStore,
+    SecretValue, Transaction as KeystoreTransaction, TransactionId, Vault, VaultCheckpoint, VaultIdentity,
+    VaultRevision, VaultRole, MAX_RECORDS, MAX_RECORD_VALUE_BYTES,
 };
 use thunderbolt_protocol::{Digest, EntryHash};
 use thunderbolt_wire::{
@@ -33,14 +34,15 @@ use crate::vault::{
     OutboundTransferRecord, SecretVault, VaultTransaction,
 };
 
-const CODEC_VERSION: u16 = 1;
-const IDENTITY_MAGIC: &[u8; 8] = b"TBHID001";
-const INVOICE_MAGIC: &[u8; 8] = b"TBHIV001";
-const CREDENTIAL_MAGIC: &[u8; 8] = b"TBHCR001";
-const OUTBOUND_MAGIC: &[u8; 8] = b"TBHOT001";
+const CODEC_VERSION: u16 = 2;
+const IDENTITY_MAGIC: &[u8; 8] = b"TBHID002";
+const INVOICE_MAGIC: &[u8; 8] = b"TBHIV002";
+const CREDENTIAL_MAGIC: &[u8; 8] = b"TBHCR002";
+const OUTBOUND_MAGIC: &[u8; 8] = b"TBHOT002";
 const IDENTITY_RECORD_ID: &[u8] = b"bitcoin-thunderbolt/holder/identity/v1";
 const OUTBOUND_RECORD_PREFIX: &[u8] = b"outbound/v1/";
 const TRANSACTION_DOMAIN: &[u8] = b"bitcoin-thunderbolt/holder/keystore-transaction/v1";
+const SNAPSHOT_TRANSACTION_DOMAIN: &[u8] = b"bitcoin-thunderbolt/holder/keystore-snapshot/v1";
 
 type CodecResult<T> = std::result::Result<T, VaultError>;
 
@@ -81,6 +83,15 @@ pub fn holder_keystore_identity(
 /// any Holder record is decoded. The adapter cannot establish that store's
 /// independence or authenticity; selecting it is an explicit runtime trust
 /// decision.
+///
+/// The current adapter retains and loads the full indexed Holder history.
+/// Record compaction and lazy loading remain production gates for high-volume,
+/// long-lived deployments.
+///
+/// Adapter codec version 2 is an explicit pre-1.0 compatibility break. It does
+/// not reinterpret or migrate experimental version-1 Holder records; those
+/// records fail closed and require an audited offline migration or fresh
+/// provisioning.
 pub struct KeystoreSecretVault<F> {
     vault: Vault,
     floor_store: F,
@@ -107,12 +118,17 @@ impl<F: RollbackFloorStore> KeystoreSecretVault<F> {
         let vault = recovery
             .anchor(&floor_store)
             .map_err(|_| HolderError::Vault(VaultError::CorruptRecord))?;
-        Ok(Self {
+        let mut adapter = Self {
             vault,
             floor_store,
             checkpoint,
             poisoned: false,
-        })
+        };
+        {
+            let transaction = adapter.begin()?;
+            transaction.commit()?;
+        }
+        Ok(adapter)
     }
 
     /// Reopens a Holder vault using a supplied independent rollback-floor
@@ -125,21 +141,59 @@ impl<F: RollbackFloorStore> KeystoreSecretVault<F> {
         floor_store: F,
     ) -> Result<Self, HolderError> {
         require_holder_role(identity)?;
-        let recovery = RecoveryVault::open(path, identity, password).map_err(map_open_error)?;
-        let checkpoint = recovery.checkpoint();
-        let expected = floor_store
-            .load_checkpoint(identity)
-            .map_err(|_| HolderError::Vault(VaultError::Unavailable))?;
-        reconcile_checkpoint(&floor_store, identity, expected, checkpoint).map_err(HolderError::Vault)?;
-        let vault = recovery
-            .anchor(&floor_store)
-            .map_err(|_| HolderError::Vault(VaultError::CorruptRecord))?;
-        Ok(Self {
+        let vault = Vault::open_anchored(path, identity, password, &floor_store)
+            .map_err(|error| HolderError::Vault(map_anchor_error(error)))?;
+        Self::from_anchored_vault(vault, floor_store)
+    }
+
+    /// Exact-opens a receipt-saturated vault, prunes externally finalized
+    /// receipts, and only then performs the mandatory fenced Holder snapshot.
+    ///
+    /// The caller must retain durable request history through
+    /// `through_revision` in an independent authenticated system. Pruning
+    /// without that history makes old request identifiers replayable from this
+    /// vault's perspective. This recovery path never accepts or promotes an
+    /// unanchored file checkpoint.
+    pub fn open_with_finalized_prune(
+        path: impl AsRef<Path>,
+        identity: VaultIdentity,
+        password: Password,
+        floor_store: F,
+        through_revision: VaultRevision,
+    ) -> Result<Self, HolderError> {
+        require_holder_role(identity)?;
+        let mut vault = Vault::open_anchored(path, identity, password, &floor_store)
+            .map_err(|error| HolderError::Vault(map_anchor_error(error)))?;
+        let checkpoint = vault.checkpoint().map_err(map_open_error)?;
+        let checkpoint = vault
+            .prune_transaction_receipts(checkpoint, through_revision, &floor_store)
+            .map_err(|error| HolderError::Vault(map_anchored_error(error, true)))?;
+        let adapter = Self {
             vault,
             floor_store,
             checkpoint,
             poisoned: false,
-        })
+        };
+        adapter.validate_before_return()
+    }
+
+    fn from_anchored_vault(vault: Vault, floor_store: F) -> Result<Self, HolderError> {
+        let checkpoint = vault.checkpoint().map_err(map_open_error)?;
+        let adapter = Self {
+            vault,
+            floor_store,
+            checkpoint,
+            poisoned: false,
+        };
+        adapter.validate_before_return()
+    }
+
+    fn validate_before_return(mut self) -> Result<Self, HolderError> {
+        {
+            let transaction = self.begin()?;
+            transaction.commit()?;
+        }
+        Ok(self)
     }
 
     /// Returns the authenticated vault revision. The adapter has already
@@ -164,6 +218,34 @@ impl<F: RollbackFloorStore> KeystoreSecretVault<F> {
             return Err(HolderError::Vault(VaultError::Unavailable));
         }
         self.vault.backup_to(target).map_err(map_open_error)
+    }
+
+    /// Prunes fenced-transaction receipts through an externally finalized
+    /// revision and anchors the resulting exact checkpoint before returning.
+    ///
+    /// Callers must retain their own durable request history before pruning;
+    /// otherwise an old request identifier can no longer be recognized as a
+    /// replay using this vault alone.
+    pub fn prune_finalized_receipts(&mut self, through_revision: VaultRevision) -> Result<VaultRevision, HolderError> {
+        if self.poisoned {
+            return Err(HolderError::Vault(VaultError::Unavailable));
+        }
+        match self
+            .vault
+            .prune_transaction_receipts(self.checkpoint, through_revision, &self.floor_store)
+        {
+            Ok(checkpoint) => {
+                self.checkpoint = checkpoint;
+                Ok(checkpoint.revision())
+            }
+            Err(error) => {
+                let mapped = map_anchored_error(error, true);
+                if !matches!(mapped, VaultError::Conflict) {
+                    self.poisoned = true;
+                }
+                Err(HolderError::Vault(mapped))
+            }
+        }
     }
 }
 
@@ -206,7 +288,7 @@ struct OriginalDigests {
 }
 
 struct Manifest {
-    identity: IdentityRecord,
+    identity: Option<IdentityRecord>,
     invoices: Vec<InvoiceRecordKey>,
     credentials: Vec<CredentialKey>,
     outbound: Vec<CredentialKey>,
@@ -266,10 +348,13 @@ impl<F: RollbackFloorStore> VaultTransaction for KeystoreVaultTransaction<'_, F>
 
     fn insert_invoice(&mut self, record: InvoiceRecord) -> Result<(), VaultError> {
         let key = record.reference().0;
-        if self.state.invoices.insert(key, record).is_some() {
-            return Err(VaultError::Conflict);
+        match self.state.invoices.entry(key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(record);
+                Ok(())
+            }
+            std::collections::btree_map::Entry::Occupied(_) => Err(VaultError::Conflict),
         }
-        Ok(())
     }
 
     fn credential(&self, key: &CredentialKey) -> Option<&CredentialRecord> {
@@ -291,10 +376,13 @@ impl<F: RollbackFloorStore> VaultTransaction for KeystoreVaultTransaction<'_, F>
 
     fn insert_credential(&mut self, record: CredentialRecord) -> Result<(), VaultError> {
         let key = record.key();
-        if self.state.credentials.insert(key, record).is_some() {
-            return Err(VaultError::Conflict);
+        match self.state.credentials.entry(key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(record);
+                Ok(())
+            }
+            std::collections::btree_map::Entry::Occupied(_) => Err(VaultError::Conflict),
         }
-        Ok(())
     }
 
     fn outbound_transfer(&self, source: &CredentialKey) -> Option<&OutboundTransferRecord> {
@@ -307,10 +395,13 @@ impl<F: RollbackFloorStore> VaultTransaction for KeystoreVaultTransaction<'_, F>
 
     fn insert_outbound_transfer(&mut self, record: OutboundTransferRecord) -> Result<(), VaultError> {
         let key = record.source_credential();
-        if self.state.outbound.insert(key, record).is_some() {
-            return Err(VaultError::Conflict);
+        match self.state.outbound.entry(key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(record);
+                Ok(())
+            }
+            std::collections::btree_map::Entry::Occupied(_) => Err(VaultError::Conflict),
         }
-        Ok(())
     }
 
     fn commit(self) -> Result<(), VaultError> {
@@ -348,6 +439,34 @@ fn map_keystore_error(error: KeystoreError, committing: bool) -> VaultError {
     }
 }
 
+fn map_anchored_error<E>(error: AnchoredMutationError<E>, committing: bool) -> VaultError {
+    match error {
+        AnchoredMutationError::Keystore(error) => map_keystore_error(error, committing),
+        AnchoredMutationError::Store { .. } => {
+            if committing {
+                VaultError::CommitFailed
+            } else {
+                VaultError::Unavailable
+            }
+        }
+        AnchoredMutationError::CheckpointConflict(conflict) => {
+            if conflict.candidate.is_some() || committing {
+                VaultError::CommitFailed
+            } else {
+                VaultError::Conflict
+            }
+        }
+    }
+}
+
+fn map_anchor_error<E>(error: CheckpointAnchorError<E>) -> VaultError {
+    match error {
+        CheckpointAnchorError::Keystore(error) => map_keystore_error(error, false),
+        CheckpointAnchorError::Store(_) => VaultError::Unavailable,
+        CheckpointAnchorError::Missing | CheckpointAnchorError::Mismatch { .. } => VaultError::Conflict,
+    }
+}
+
 fn load_transaction<'a, F: RollbackFloorStore>(
     vault: &'a mut Vault,
     floor_store: &'a F,
@@ -363,30 +482,86 @@ fn load_transaction<'a, F: RollbackFloorStore>(
         *poisoned = true;
         return Err(VaultError::CorruptRecord);
     }
-    let base_revision = live_checkpoint.revision();
-    let identity_key = identity_record_key()?;
-    let Some(view) = vault
-        .get(&identity_key)
-        .map_err(|error| map_keystore_error(error, false))?
-    else {
-        return Ok(KeystoreVaultTransaction {
-            vault,
-            floor_store,
-            checkpoint,
-            poisoned,
-            base_revision,
+    let snapshot_transaction_id = snapshot_transaction_id(live_checkpoint);
+    let vault_identity = vault.identity();
+    let allow_empty_bootstrap = live_checkpoint.revision().get() == 0;
+    let result = vault.transact(live_checkpoint, snapshot_transaction_id, floor_store, move |snapshot| {
+        load_snapshot(snapshot, vault_identity, allow_empty_bootstrap)
+    });
+    let (fenced_revision, mut loaded) = match result {
+        Ok(AnchoredTransactOutcome::Applied { revision, output }) => (revision, output),
+        Ok(AnchoredTransactOutcome::Replayed { .. }) => {
+            *poisoned = true;
+            return Err(VaultError::CorruptRecord);
+        }
+        Err(error) => {
+            let mapped = map_anchored_error(error, true);
+            *poisoned = true;
+            return Err(mapped);
+        }
+    };
+    let fenced_checkpoint = vault.checkpoint().map_err(|_| {
+        *poisoned = true;
+        VaultError::CommitFailed
+    })?;
+    if fenced_checkpoint.revision() != fenced_revision
+        || !checkpoint_matches_vault(floor_store, vault.identity(), fenced_checkpoint)
+    {
+        *poisoned = true;
+        return Err(VaultError::CommitFailed);
+    }
+    if loaded.bootstrapped {
+        loaded.versions.identity = Some(RecordVersion::new(fenced_revision.get()));
+        loaded.originals.identity = Some(digest_bytes(&encode_uninitialized_manifest()));
+    }
+    *checkpoint = fenced_checkpoint;
+    Ok(KeystoreVaultTransaction {
+        vault,
+        floor_store,
+        checkpoint,
+        poisoned,
+        base_revision: fenced_revision,
+        state: loaded.state,
+        versions: loaded.versions,
+        originals: loaded.originals,
+    })
+}
+
+struct LoadedSnapshot {
+    state: HolderState,
+    versions: RecordVersions,
+    originals: OriginalDigests,
+    bootstrapped: bool,
+}
+
+fn load_snapshot(
+    snapshot: &mut KeystoreTransaction<'_>,
+    vault_identity: VaultIdentity,
+    allow_empty_bootstrap: bool,
+) -> thunderbolt_keystore::Result<LoadedSnapshot> {
+    let identity_key = identity_record_key().map_err(|_| KeystoreError::InvalidFormat)?;
+    let Some(view) = snapshot.get(&identity_key) else {
+        if !allow_empty_bootstrap || snapshot.record_count() != 0 {
+            return Err(KeystoreError::InvalidFormat);
+        }
+        let mut encoded = encode_uninitialized_manifest();
+        let bytes = std::mem::take(&mut *encoded);
+        snapshot.compare_and_swap(identity_key, ExpectedRecord::Absent, SecretValue::from_bytes(bytes)?)?;
+        return Ok(LoadedSnapshot {
             state: HolderState::default(),
             versions: RecordVersions::default(),
             originals: OriginalDigests::default(),
+            bootstrapped: true,
         });
     };
 
     let identity_bytes = Zeroizing::new(view.expose_secret().to_vec());
     let identity_version = view.version();
     let identity_digest = digest_bytes(&identity_bytes);
-    let manifest = decode_identity_manifest(&identity_bytes)?;
+    let manifest = decode_identity_manifest(&identity_bytes).map_err(|_| KeystoreError::InvalidFormat)?;
+    validate_manifest_key_sets(snapshot, &manifest)?;
     let mut state = HolderState {
-        identity: Some(manifest.identity),
+        identity: manifest.identity,
         ..HolderState::default()
     };
     let mut versions = RecordVersions {
@@ -399,61 +574,105 @@ fn load_transaction<'a, F: RollbackFloorStore>(
     };
 
     for key in manifest.invoices {
-        let store_key = invoice_store_key(key)?;
-        let (version, digest, record) = load_record(vault, &store_key, |bytes| decode_invoice_record(key, bytes))?;
+        let store_key = invoice_store_key(key).map_err(|_| KeystoreError::InvalidFormat)?;
+        let (version, digest, record) = load_record(snapshot, &store_key, |bytes| decode_invoice_record(key, bytes))?;
         if state.invoices.insert(key, record).is_some()
             || versions.invoices.insert(key, version).is_some()
             || originals.invoices.insert(key, digest).is_some()
         {
-            return Err(VaultError::CorruptRecord);
+            return Err(KeystoreError::InvalidFormat);
         }
     }
     for key in manifest.credentials {
-        let store_key = credential_store_key(key)?;
-        let (version, digest, record) = load_record(vault, &store_key, |bytes| decode_credential_record(key, bytes))?;
+        let store_key = credential_store_key(key).map_err(|_| KeystoreError::InvalidFormat)?;
+        let (version, digest, record) =
+            load_record(snapshot, &store_key, |bytes| decode_credential_record(key, bytes))?;
         if state.credentials.insert(key, record).is_some()
             || versions.credentials.insert(key, version).is_some()
             || originals.credentials.insert(key, digest).is_some()
         {
-            return Err(VaultError::CorruptRecord);
+            return Err(KeystoreError::InvalidFormat);
         }
     }
     for key in manifest.outbound {
-        let store_key = outbound_store_key(key)?;
-        let (version, digest, record) = load_record(vault, &store_key, |bytes| decode_outbound_record(key, bytes))?;
+        let store_key = outbound_store_key(key).map_err(|_| KeystoreError::InvalidFormat)?;
+        let (version, digest, record) = load_record(snapshot, &store_key, |bytes| decode_outbound_record(key, bytes))?;
         if state.outbound.insert(key, record).is_some()
             || versions.outbound.insert(key, version).is_some()
             || originals.outbound.insert(key, digest).is_some()
         {
-            return Err(VaultError::CorruptRecord);
+            return Err(KeystoreError::InvalidFormat);
         }
     }
-    validate_state_identity(&state, vault.identity())?;
-
-    Ok(KeystoreVaultTransaction {
-        vault,
-        floor_store,
-        checkpoint,
-        poisoned,
-        base_revision,
+    validate_state_identity(&state, vault_identity).map_err(|_| KeystoreError::InvalidFormat)?;
+    Ok(LoadedSnapshot {
         state,
         versions,
         originals,
+        bootstrapped: false,
     })
 }
 
+fn validate_manifest_key_sets(
+    snapshot: &KeystoreTransaction<'_>,
+    manifest: &Manifest,
+) -> thunderbolt_keystore::Result<()> {
+    let expected_invoices = manifest
+        .invoices
+        .iter()
+        .copied()
+        .map(invoice_store_key)
+        .collect::<CodecResult<BTreeSet<_>>>()
+        .map_err(|_| KeystoreError::InvalidFormat)?;
+    let actual_invoices = snapshot
+        .record_keys(RecordNamespace::Invoice)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if actual_invoices != expected_invoices {
+        return Err(KeystoreError::InvalidFormat);
+    }
+
+    let expected_credentials = manifest
+        .credentials
+        .iter()
+        .copied()
+        .map(credential_store_key)
+        .collect::<CodecResult<BTreeSet<_>>>()
+        .map_err(|_| KeystoreError::InvalidFormat)?;
+    let actual_credentials = snapshot
+        .record_keys(RecordNamespace::Credential)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if actual_credentials != expected_credentials {
+        return Err(KeystoreError::InvalidFormat);
+    }
+
+    let mut expected_adapter_state = BTreeSet::new();
+    expected_adapter_state.insert(identity_record_key().map_err(|_| KeystoreError::InvalidFormat)?);
+    for key in &manifest.outbound {
+        if !expected_adapter_state.insert(outbound_store_key(*key).map_err(|_| KeystoreError::InvalidFormat)?) {
+            return Err(KeystoreError::InvalidFormat);
+        }
+    }
+    let actual_adapter_state = snapshot
+        .record_keys(RecordNamespace::AdapterState)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if actual_adapter_state != expected_adapter_state {
+        return Err(KeystoreError::InvalidFormat);
+    }
+    Ok(())
+}
+
 fn load_record<T>(
-    vault: &Vault,
+    snapshot: &KeystoreTransaction<'_>,
     key: &RecordKey,
     decode: impl FnOnce(&[u8]) -> CodecResult<T>,
-) -> Result<(RecordVersion, [u8; 32], T), VaultError> {
-    let view = vault
-        .get(key)
-        .map_err(|error| map_keystore_error(error, false))?
-        .ok_or(VaultError::CorruptRecord)?;
+) -> thunderbolt_keystore::Result<(RecordVersion, [u8; 32], T)> {
+    let view = snapshot.get(key).ok_or(KeystoreError::InvalidFormat)?;
     let buffer = Zeroizing::new(view.expose_secret().to_vec());
     let digest = digest_bytes(&buffer);
-    let decoded = decode(&buffer)?;
+    let decoded = decode(&buffer).map_err(|_| KeystoreError::InvalidFormat)?;
     Ok((view.version(), digest, decoded))
 }
 
@@ -476,18 +695,20 @@ fn commit_transaction<F: RollbackFloorStore>(transaction: KeystoreVaultTransacti
     validate_state_identity(&state, vault.identity())?;
 
     let mut mutations = BTreeMap::<RecordKey, PendingMutation>::new();
-    if let Some(identity) = &state.identity {
-        let encoded = encode_identity_manifest(identity, &state.invoices, &state.credentials, &state.outbound)?;
-        add_changed(
-            &mut mutations,
-            identity_record_key()?,
-            versions.identity,
-            originals.identity,
-            encoded,
-        )?;
-    } else if versions.identity.is_some() || originals.identity.is_some() {
-        return Err(VaultError::CorruptRecord);
-    }
+    let encoded_manifest = match &state.identity {
+        Some(identity) => encode_identity_manifest(identity, &state.invoices, &state.credentials, &state.outbound)?,
+        None if state.invoices.is_empty() && state.credentials.is_empty() && state.outbound.is_empty() => {
+            encode_uninitialized_manifest()
+        }
+        None => return Err(VaultError::CorruptRecord),
+    };
+    add_changed(
+        &mut mutations,
+        identity_record_key()?,
+        versions.identity,
+        originals.identity,
+        encoded_manifest,
+    )?;
 
     for (key, record) in &state.invoices {
         let encoded = encode_invoice_record(record)?;
@@ -532,7 +753,7 @@ fn commit_transaction<F: RollbackFloorStore>(transaction: KeystoreVaultTransacti
     }
 
     let transaction_id = transaction_id(base_revision, &mutations)?;
-    let result = vault.transact(base_revision, transaction_id, |update| {
+    let result = vault.transact(*checkpoint, transaction_id, floor_store, |update| {
         for (key, mut mutation) in mutations {
             let bytes = std::mem::take(&mut *mutation.encoded);
             update.compare_and_swap(key, mutation.expected, SecretValue::from_bytes(bytes)?)?;
@@ -540,9 +761,11 @@ fn commit_transaction<F: RollbackFloorStore>(transaction: KeystoreVaultTransacti
         Ok(())
     });
     let committed_revision = match result {
-        Ok(CommitOutcome::Applied(revision) | CommitOutcome::Replayed(revision)) => revision,
+        Ok(AnchoredTransactOutcome::Applied { revision, .. } | AnchoredTransactOutcome::Replayed { revision }) => {
+            revision
+        }
         Err(error) => {
-            let mapped = map_keystore_error(error, true);
+            let mapped = map_anchored_error(error, true);
             if !matches!(mapped, VaultError::Conflict) {
                 *poisoned = true;
             }
@@ -555,7 +778,7 @@ fn commit_transaction<F: RollbackFloorStore>(transaction: KeystoreVaultTransacti
         VaultError::CommitFailed
     })?;
     if committed_checkpoint.revision() != committed_revision
-        || reconcile_checkpoint(floor_store, identity, Some(*checkpoint), committed_checkpoint).is_err()
+        || !checkpoint_matches_vault(floor_store, identity, committed_checkpoint)
     {
         *poisoned = true;
         return Err(VaultError::CommitFailed);
@@ -647,6 +870,14 @@ fn transaction_id(
         hasher.update(digest_bytes(&mutation.encoded));
     }
     Ok(TransactionId::new(hasher.finalize().into()))
+}
+
+fn snapshot_transaction_id(checkpoint: VaultCheckpoint) -> TransactionId {
+    let mut hasher = Sha256::new();
+    hasher.update(SNAPSHOT_TRANSACTION_DOMAIN);
+    hasher.update(checkpoint.revision().get().to_be_bytes());
+    hasher.update(checkpoint.state_digest().as_bytes());
+    TransactionId::new(hasher.finalize().into())
 }
 
 fn namespace_tag(namespace: RecordNamespace) -> u8 {
@@ -871,6 +1102,7 @@ fn encode_identity_manifest(
         return Err(VaultError::CorruptRecord);
     }
     let mut encoder = Encoder::new(IDENTITY_MAGIC);
+    encoder.u8(1);
     encoder.fixed(identity.seed());
     encoder.u32(u32::try_from(invoices.len()).map_err(|_| VaultError::CorruptRecord)?);
     for key in invoices.keys() {
@@ -887,8 +1119,27 @@ fn encode_identity_manifest(
     Ok(encoder.finish())
 }
 
+fn encode_uninitialized_manifest() -> Zeroizing<Vec<u8>> {
+    let mut encoder = Encoder::new(IDENTITY_MAGIC);
+    encoder.u8(0);
+    encoder.finish()
+}
+
 fn decode_identity_manifest(bytes: &[u8]) -> CodecResult<Manifest> {
     let mut decoder = Decoder::new(bytes, IDENTITY_MAGIC)?;
+    match decoder.u8()? {
+        0 => {
+            decoder.finish()?;
+            return Ok(Manifest {
+                identity: None,
+                invoices: Vec::new(),
+                credentials: Vec::new(),
+                outbound: Vec::new(),
+            });
+        }
+        1 => {}
+        _ => return Err(VaultError::CorruptRecord),
+    }
     let seed = Zeroizing::new(decoder.array::<32>()?);
     let identity = derive_identity(&seed).map_err(|_| VaultError::CorruptRecord)?;
     let identity = IdentityRecord::new(identity, seed);
@@ -938,7 +1189,7 @@ fn decode_identity_manifest(bytes: &[u8]) -> CodecResult<Manifest> {
     }
     decoder.finish()?;
     Ok(Manifest {
-        identity,
+        identity: Some(identity),
         invoices,
         credentials,
         outbound,
