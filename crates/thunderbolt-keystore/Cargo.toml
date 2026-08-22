@@ -1,0 +1,30 @@
+[package]
+name = "thunderbolt-keystore"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Encrypted local secret vault for Bitcoin Thunderbolt participants"
+license.workspace = true
+repository.workspace = true
+keywords = ["bitcoin", "keystore", "security", "thunderbolt"]
+categories = ["cryptography", "cryptography::cryptocurrencies"]
+
+[lints]
+workspace = true
+
+[dependencies]
+argon2 = { version = "0.5.3", features = ["zeroize"] }
+chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc"] }
+getrandom = "0.3.4"
+subtle = "2.6.1"
+thiserror = "2.0.16"
+zeroize = "1.8.2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.175"
+rustix = { version = "1.1.4", features = ["process"] }
+
+[dev-dependencies]
+proptest = "1.9.0"
+static_assertions = "1.1.0"
+tempfile = "3.27.0"

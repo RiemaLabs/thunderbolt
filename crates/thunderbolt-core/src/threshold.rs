@@ -109,6 +109,16 @@ fn evaluate_commitments(commitments: &[Point], member_id: u32) -> Result<Point> 
 }
 
 fn sample_polynomial(secret: Scalar, degree: usize, member_ids: &[u32]) -> Result<Vec<Scalar>> {
+    let member_scalars = member_ids
+        .iter()
+        .copied()
+        .map(scalar_from_u32)
+        .collect::<Result<Vec<_>>>()?;
+    if member_ids.iter().copied().collect::<BTreeSet<_>>().len() != member_ids.len() {
+        return Err(ThunderboltError::InvalidParameter(
+            "threshold committee member identifiers must be distinct".to_string(),
+        ));
+    }
     let mut rng = thread_rng();
 
     loop {
@@ -118,9 +128,9 @@ fn sample_polynomial(secret: Scalar, degree: usize, member_ids: &[u32]) -> Resul
             coefficients.push(Scalar::random(&mut rng));
         }
 
-        let all_non_zero = member_ids
+        let all_non_zero = member_scalars
             .iter()
-            .all(|member_id| evaluate_polynomial(&coefficients, scalar_from_u32(*member_id).unwrap()).is_ok());
+            .all(|member_scalar| evaluate_polynomial(&coefficients, *member_scalar).is_ok());
         if all_non_zero {
             return Ok(coefficients);
         }
@@ -188,6 +198,10 @@ pub fn create_threshold_refresh_distribution(
             required: threshold as u32,
             actual: recipients.len() as u32,
         });
+    }
+
+    for recipient in recipients {
+        crate::paillier::validate_protocol_encryption_key(&recipient.encryption_key)?;
     }
 
     let member_ids = recipients.iter().map(|member| member.member_id).collect::<Vec<_>>();
@@ -290,6 +304,12 @@ impl ThresholdCommittee {
             return Err(ThunderboltError::InvalidParameter(format!(
                 "invalid threshold committee shape: threshold={threshold}, committee_size={committee_size}"
             )));
+        }
+
+        if committee_size > u32::MAX as usize {
+            return Err(ThunderboltError::InvalidParameter(
+                "committee size exceeds the member identifier space".to_string(),
+            ));
         }
 
         let member_ids = (1..=committee_size as u32).collect::<Vec<_>>();
@@ -510,5 +530,32 @@ mod tests {
         assert!(committee.reconstruct_secret(&[1, 2]).is_err());
         assert!(committee.reconstruct_secret(&[1, 1, 2]).is_err());
         assert!(committee.reconstruct_secret(&[1, 2, 3]).is_ok());
+    }
+
+    #[test]
+    fn refresh_distribution_rejects_zero_and_duplicate_member_ids() {
+        let anchor_base = scalar_from_u8(31).base_point_mul();
+        let committee = ThresholdCommittee::new(2, 2, anchor_base, scalar_from_u8(37)).unwrap();
+        let mut recipients = committee.member_public_keys();
+        recipients[0].member_id = 0;
+        assert!(create_threshold_refresh_distribution(
+            ProofContext::invoice(b"ctx", b"zero-member"),
+            anchor_base,
+            2,
+            scalar_from_u8(3),
+            &recipients,
+        )
+        .is_err());
+
+        let mut recipients = committee.member_public_keys();
+        recipients[1].member_id = recipients[0].member_id;
+        assert!(create_threshold_refresh_distribution(
+            ProofContext::invoice(b"ctx", b"duplicate-member"),
+            anchor_base,
+            2,
+            scalar_from_u8(5),
+            &recipients,
+        )
+        .is_err());
     }
 }

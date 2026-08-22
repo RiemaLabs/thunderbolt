@@ -1,0 +1,27 @@
+[package]
+name = "thunderbolt-holder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Local Holder and Recipient protocol engine for Bitcoin Thunderbolt"
+
+[lints]
+workspace = true
+
+[dependencies]
+bitcoin = "0.32.5"
+getrandom = "0.3.3"
+libpaillier = "0.6.0"
+secp = { version = "0.5.0", features = ["secp256k1"] }
+sha2 = "0.10.8"
+thiserror = "2.0.12"
+thunderbolt-core = { path = "../thunderbolt-core" }
+thunderbolt-protocol = { path = "../thunderbolt-protocol" }
+thunderbolt-wire = { path = "../thunderbolt-wire" }
+zeroize = "1.8.2"
+
+[dev-dependencies]
+hex = "0.4"
+proptest = "1.7.0"
