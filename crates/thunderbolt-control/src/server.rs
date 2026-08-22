@@ -12,7 +12,7 @@ use tokio::task::JoinSet;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-use crate::client::{read_frame, validate_client_limits, write_frame};
+use crate::client::{read_frame, validate_server_io_limits, write_frame};
 use crate::codec::{decode_request, encode_response};
 use crate::filesystem::{
     canonical_socket_path, current_uid, harden_socket, inspect_newly_bound_socket, inspect_socket, path_identity,
@@ -20,7 +20,7 @@ use crate::filesystem::{
 };
 use crate::{
     ControlError, ControlRequest, ControlResponse, ControlStatus, Result, ABSOLUTE_MAX_FRAME_BYTES,
-    DEFAULT_MAX_FRAME_BYTES,
+    DEFAULT_MAX_FRAME_BYTES, MAX_CONTROL_HANDLER_TIMEOUT,
 };
 
 /// Boxed, cancellation-safe role handler future.
@@ -71,8 +71,8 @@ impl ControlServerConfig {
         }
     }
 
-    fn validate(&self) -> Result<()> {
-        validate_client_limits(self.max_frame_bytes, self.io_timeout)?;
+    pub(crate) fn validate(&self) -> Result<()> {
+        validate_server_io_limits(self.max_frame_bytes, self.io_timeout)?;
         if self.max_frame_bytes > ABSOLUTE_MAX_FRAME_BYTES {
             return Err(ControlError::InvalidConfiguration(
                 "frame bound exceeds the absolute limit",
@@ -99,7 +99,7 @@ impl ControlServerConfig {
                 "shutdown grace is outside the supported bound",
             ));
         }
-        if self.handler_timeout.is_zero() || self.handler_timeout > Duration::from_secs(300) {
+        if self.handler_timeout.is_zero() || self.handler_timeout > MAX_CONTROL_HANDLER_TIMEOUT {
             return Err(ControlError::InvalidConfiguration(
                 "handler timeout is outside the supported bound",
             ));

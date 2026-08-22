@@ -16,7 +16,8 @@ use tokio_util::sync::CancellationToken;
 use crate::codec::{decode_request, decode_response, encode_request, encode_response};
 use crate::{
     ControlClient, ControlError, ControlHandler, ControlHandlerFuture, ControlRequest, ControlResponse, ControlServer,
-    ControlServerConfig, ControlStatus, RequestId,
+    ControlServerConfig, ControlStatus, RequestId, MAX_CONTROL_HANDLER_TIMEOUT, MAX_CONTROL_IO_TIMEOUT,
+    MAX_CONTROL_RESPONSE_TIMEOUT,
 };
 
 #[derive(Clone, Debug)]
@@ -101,6 +102,76 @@ fn request(byte: u8, payload: &[u8]) -> ControlRequest {
         payload.to_vec(),
     )
     .unwrap()
+}
+
+#[test]
+fn client_deadline_matches_checked_server_handler_plus_io_maximum() {
+    let (_directory, socket) = private_socket();
+    let mut config = ControlServerConfig::new(&socket);
+    config.handler_timeout = MAX_CONTROL_HANDLER_TIMEOUT;
+    config.io_timeout = MAX_CONTROL_IO_TIMEOUT;
+    let client = ControlClient::from_server_config(&config).unwrap();
+    assert_eq!(client.socket_path(), socket);
+    assert_eq!(client.max_frame_bytes(), config.max_frame_bytes);
+    assert_eq!(client.io_timeout(), MAX_CONTROL_IO_TIMEOUT);
+    assert_eq!(client.response_timeout(), MAX_CONTROL_RESPONSE_TIMEOUT);
+    assert_eq!(
+        config.handler_timeout.checked_add(config.io_timeout),
+        Some(MAX_CONTROL_RESPONSE_TIMEOUT)
+    );
+}
+
+#[test]
+fn client_deadline_rejects_zero_overflow_and_one_nanosecond_over() {
+    let (_directory, socket) = private_socket();
+    assert!(ControlClient::new(&socket).with_limits(64, Duration::ZERO).is_err());
+    assert!(ControlClient::new(&socket)
+        .with_limits(64, MAX_CONTROL_IO_TIMEOUT)
+        .is_ok());
+    assert!(ControlClient::new(&socket)
+        .with_limits(64, MAX_CONTROL_IO_TIMEOUT.checked_add(Duration::from_nanos(1)).unwrap(),)
+        .is_err());
+    assert!(ControlClient::new(&socket).with_limits(64, Duration::MAX).is_err());
+    assert!(ControlClient::new(&socket)
+        .with_deadlines(64, MAX_CONTROL_IO_TIMEOUT, MAX_CONTROL_RESPONSE_TIMEOUT)
+        .is_ok());
+    assert!(ControlClient::new(&socket)
+        .with_deadlines(
+            64,
+            MAX_CONTROL_IO_TIMEOUT,
+            MAX_CONTROL_RESPONSE_TIMEOUT
+                .checked_add(Duration::from_nanos(1))
+                .unwrap(),
+        )
+        .is_err());
+    assert!(ControlClient::new(&socket)
+        .with_deadlines(64, MAX_CONTROL_IO_TIMEOUT, Duration::ZERO)
+        .is_err());
+
+    let mut overflow = ControlServerConfig::new(&socket);
+    overflow.handler_timeout = Duration::MAX;
+    overflow.io_timeout = Duration::from_nanos(1);
+    assert!(matches!(
+        ControlClient::from_server_config(&overflow),
+        Err(ControlError::InvalidConfiguration("client deadline overflows"))
+    ));
+}
+
+#[test]
+fn widening_response_wait_does_not_widen_server_io_or_handler_caps() {
+    let (_directory, socket) = private_socket();
+    let mut config = ControlServerConfig::new(&socket);
+    config.io_timeout = MAX_CONTROL_IO_TIMEOUT;
+    config.handler_timeout = MAX_CONTROL_HANDLER_TIMEOUT;
+    assert!(config.validate().is_ok());
+
+    config.io_timeout = MAX_CONTROL_IO_TIMEOUT.checked_add(Duration::from_nanos(1)).unwrap();
+    assert!(config.validate().is_err());
+    config.io_timeout = MAX_CONTROL_IO_TIMEOUT;
+    config.handler_timeout = MAX_CONTROL_HANDLER_TIMEOUT
+        .checked_add(Duration::from_nanos(1))
+        .unwrap();
+    assert!(config.validate().is_err());
 }
 
 proptest! {
@@ -401,6 +472,33 @@ async fn client_reports_ambiguous_after_connection_write_or_read_failure() {
     });
     let request = request(12, b"maybe-committed");
     let error = ControlClient::new(&socket).call(&request).await.unwrap_err();
+    assert!(matches!(error, ControlError::Ambiguous(id) if id == request.request_id()));
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn response_prefix_and_body_share_one_absolute_deadline() {
+    let (_directory, socket) = private_socket();
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+    let request = request(13, b"absolute-response-budget");
+    let response = ControlResponse::success(request.request_id(), b"too-late".to_vec());
+    let frame = encode_response(&response, 1024).unwrap();
+    let frame_length = u32::try_from(frame.len()).unwrap().to_be_bytes();
+    let task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        stream.write_all(&frame_length).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(70)).await;
+        let _ = stream.write_all(&frame).await;
+    });
+
+    let error = ControlClient::new(&socket)
+        .with_deadlines(1024, Duration::from_secs(1), Duration::from_millis(80))
+        .unwrap()
+        .call(&request)
+        .await
+        .unwrap_err();
     assert!(matches!(error, ControlError::Ambiguous(id) if id == request.request_id()));
     task.await.unwrap();
 }

@@ -31,10 +31,11 @@ mod transport;
 #[cfg(any(test, feature = "regtest"))]
 pub use config::LoopbackHttpPeer;
 pub use config::{
-    HttpsPeer, LedgerRpcLimits, RetryPolicy, RpcLimits, RpcPeer, RpcTransportConfig, MAX_LEDGER_RPC_AGGREGATE_BYTES,
-    MAX_LEDGER_RPC_RESPONSE_BYTES, MAX_LEDGER_STATUS_RESPONSE_BYTES, MAX_RPC_ADJACENT_HEADERS,
+    HttpsPeer, LedgerRpcLimits, RetryPolicy, RpcLimits, RpcPeer, RpcTransportConfig, RpcTransportProfileId,
+    MAX_LEDGER_RPC_AGGREGATE_BYTES, MAX_LEDGER_RPC_RESPONSE_BYTES, MAX_LEDGER_STATUS_RESPONSE_BYTES,
+    MAX_RPC_ADJACENT_HEADERS,
 };
-pub use credentials::{ClientIdentityProvider, OwnerOnlyPemClientIdentity};
+pub use credentials::{ClientIdentityBinding, ClientIdentityProvider, OwnerOnlyPemClientIdentity};
 pub use error::{Result, RpcTransportError};
 pub use ledger::{
     AuthenticatedAbciQueryV2, AuthenticatedBroadcastTxSyncV2, BroadcastAdmissionV2, LedgerAbciQueryV2,

@@ -17,6 +17,15 @@ response. Partial reads, oversized frames, handler deadlines, concurrency,
 aggregate in-flight bytes, and shutdown drain time are bounded. Cancellation is
 biased before accept and before handler admission.
 
+`ControlClient::from_server_config` reuses the exact socket and frame bound and
+derives a separate response deadline with checked
+`handler_timeout + io_timeout` arithmetic. Connect and write operations remain
+under the server's maximum 60-second I/O deadline. Only the post-write response
+wait may reach 360 seconds, covering the maximum 300-second handler plus one
+60-second response write. The response length prefix and body share that one
+absolute budget rather than restarting it. Zero, overflow, and values even one
+nanosecond above either bound fail before any socket I/O.
+
 Payloads and error strings use zeroizing storage. Their `Debug` implementations
 show lengths but not contents, and the envelopes are not `Clone`. Role handlers
 must still keep private keys inside signer or keystore capabilities rather than

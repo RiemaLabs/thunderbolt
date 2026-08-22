@@ -55,8 +55,9 @@ use tokio_rustls::TlsAcceptor;
 use crate::rpc::{fetch_trace, RpcFetchSpec, RuntimePeer};
 use crate::transport::TestEvidenceFault;
 use crate::{
-    BroadcastAdmissionV2, ClientIdentityProvider, CometBftRpcTransport, HttpsPeer, LedgerAbciQueryV2, LedgerRpcLimits,
-    LoopbackHttpPeer, RetryPolicy, RpcLimits, RpcPeer, RpcPeerAuthenticator, RpcTransportConfig, RpcTransportError,
+    BroadcastAdmissionV2, ClientIdentityBinding, ClientIdentityProvider, CometBftRpcTransport, HttpsPeer,
+    LedgerAbciQueryV2, LedgerRpcLimits, LoopbackHttpPeer, RetryPolicy, RpcLimits, RpcPeer, RpcPeerAuthenticator,
+    RpcTransportConfig, RpcTransportError,
 };
 
 const CHAIN_ID: &str = "thunderbolt-rpc-regtest-2";
@@ -190,14 +191,32 @@ impl MockTlsServer {
 #[derive(Clone)]
 struct TestIdentityProvider {
     resolver: Arc<dyn ResolvesClientCert>,
+    certificates: Vec<CertificateDer<'static>>,
+    certified_public_key_spki: Vec<u8>,
 }
 
 impl ClientIdentityProvider for TestIdentityProvider {
-    fn resolver(
-        &self,
-        _peer: &thunderbolt_cometbft_client::PeerIdentity,
-    ) -> crate::Result<Arc<dyn ResolvesClientCert>> {
-        Ok(Arc::clone(&self.resolver))
+    fn binding(&self, peer: &PeerIdentity) -> crate::Result<ClientIdentityBinding> {
+        ClientIdentityBinding::new(
+            peer,
+            &self.certificates,
+            &self.certified_public_key_spki,
+            Arc::clone(&self.resolver),
+        )
+    }
+}
+
+#[derive(Clone)]
+struct ZeroProfileProvider {
+    resolver: Arc<dyn ResolvesClientCert>,
+}
+
+impl ClientIdentityProvider for ZeroProfileProvider {
+    fn binding(&self, _peer: &PeerIdentity) -> crate::Result<ClientIdentityBinding> {
+        Ok(ClientIdentityBinding {
+            expected_profile: [0_u8; 32],
+            resolver: Arc::clone(&self.resolver),
+        })
     }
 }
 
@@ -230,6 +249,31 @@ struct TlsMaterial {
     server_certificate: CertificateDer<'static>,
     server_key: Vec<u8>,
     client_provider: TestIdentityProvider,
+    client_certified: Arc<CertifiedKey>,
+}
+
+struct RotatingResolver {
+    key: Arc<Mutex<Arc<CertifiedKey>>>,
+}
+
+impl std::fmt::Debug for RotatingResolver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("RotatingResolver([redacted])")
+    }
+}
+
+impl ResolvesClientCert for RotatingResolver {
+    fn resolve(
+        &self,
+        _root_hint_subjects: &[&[u8]],
+        _sigschemes: &[rustls::SignatureScheme],
+    ) -> Option<Arc<CertifiedKey>> {
+        self.key.lock().ok().map(|key| Arc::clone(&key))
+    }
+
+    fn has_certs(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Clone)]
@@ -1271,6 +1315,406 @@ fn ledger_body_limits_are_explicit_and_independent_from_trace_limits() {
     assert!(LedgerRpcLimits::new(1024 * 1024, 1024 * 1024 - 1).is_err());
 }
 
+fn loopback_profile_config(
+    url: &str,
+    node: &str,
+    binding: [u8; 32],
+    rpc_limits: RpcLimits,
+    retry_policy: RetryPolicy,
+    ledger_limits: LedgerRpcLimits,
+) -> RpcTransportConfig {
+    let peer = LoopbackHttpPeer::new_regtest(url, NodeId::from_str(node).unwrap(), binding).unwrap();
+    RpcTransportConfig::new(vec![RpcPeer::RegtestLoopback(peer)], rpc_limits, retry_policy)
+        .unwrap()
+        .with_ledger_limits(ledger_limits)
+}
+
+#[test]
+fn transport_profile_has_golden_vector_and_binds_every_limit() {
+    let ledger = LedgerRpcLimits::new(1024 * 1024, 2 * 1024 * 1024).unwrap();
+    let base = loopback_profile_config(
+        "http://127.0.0.1:26657",
+        NODE_ID,
+        [0x44; 32],
+        limits(),
+        retry(3),
+        ledger,
+    );
+    assert_eq!(
+        hex::encode(base.profile_id().as_bytes()),
+        "7a7fca9a5169520d7940ae214e383696e7011427d0f35fe43a02d30b8703d81b"
+    );
+    let mutations = [
+        loopback_profile_config(
+            "http://127.0.0.1:26658",
+            NODE_ID,
+            [0x44; 32],
+            limits(),
+            retry(3),
+            ledger,
+        ),
+        loopback_profile_config(
+            "http://127.0.0.1:26657",
+            "3333333333333333333333333333333333333333",
+            [0x44; 32],
+            limits(),
+            retry(3),
+            ledger,
+        ),
+        loopback_profile_config(
+            "http://127.0.0.1:26657",
+            NODE_ID,
+            [0x45; 32],
+            limits(),
+            retry(3),
+            ledger,
+        ),
+        loopback_profile_config(
+            "http://127.0.0.1:26657",
+            NODE_ID,
+            [0x44; 32],
+            RpcLimits::new(
+                512 * 1024,
+                8 * 1024 * 1024,
+                8,
+                4,
+                NonZeroU8::new(2).unwrap(),
+                16,
+                16 * 1024,
+            )
+            .unwrap(),
+            retry(3),
+            ledger,
+        ),
+        loopback_profile_config(
+            "http://127.0.0.1:26657",
+            NODE_ID,
+            [0x44; 32],
+            RpcLimits::new(
+                1024 * 1024,
+                7 * 1024 * 1024,
+                8,
+                4,
+                NonZeroU8::new(2).unwrap(),
+                16,
+                16 * 1024,
+            )
+            .unwrap(),
+            retry(3),
+            ledger,
+        ),
+        loopback_profile_config(
+            "http://127.0.0.1:26657",
+            NODE_ID,
+            [0x44; 32],
+            RpcLimits::new(
+                1024 * 1024,
+                8 * 1024 * 1024,
+                7,
+                4,
+                NonZeroU8::new(2).unwrap(),
+                16,
+                16 * 1024,
+            )
+            .unwrap(),
+            retry(3),
+            ledger,
+        ),
+        loopback_profile_config(
+            "http://127.0.0.1:26657",
+            NODE_ID,
+            [0x44; 32],
+            RpcLimits::new(
+                1024 * 1024,
+                8 * 1024 * 1024,
+                8,
+                3,
+                NonZeroU8::new(2).unwrap(),
+                16,
+                16 * 1024,
+            )
+            .unwrap(),
+            retry(3),
+            ledger,
+        ),
+        loopback_profile_config(
+            "http://127.0.0.1:26657",
+            NODE_ID,
+            [0x44; 32],
+            RpcLimits::new(
+                1024 * 1024,
+                8 * 1024 * 1024,
+                8,
+                4,
+                NonZeroU8::new(3).unwrap(),
+                16,
+                16 * 1024,
+            )
+            .unwrap(),
+            retry(3),
+            ledger,
+        ),
+        loopback_profile_config(
+            "http://127.0.0.1:26657",
+            NODE_ID,
+            [0x44; 32],
+            RpcLimits::new(
+                1024 * 1024,
+                8 * 1024 * 1024,
+                8,
+                4,
+                NonZeroU8::new(2).unwrap(),
+                15,
+                16 * 1024,
+            )
+            .unwrap(),
+            retry(3),
+            ledger,
+        ),
+        loopback_profile_config(
+            "http://127.0.0.1:26657",
+            NODE_ID,
+            [0x44; 32],
+            RpcLimits::new(
+                1024 * 1024,
+                8 * 1024 * 1024,
+                8,
+                4,
+                NonZeroU8::new(2).unwrap(),
+                16,
+                24 * 1024,
+            )
+            .unwrap(),
+            retry(3),
+            ledger,
+        ),
+        loopback_profile_config(
+            "http://127.0.0.1:26657",
+            NODE_ID,
+            [0x44; 32],
+            limits(),
+            retry(2),
+            ledger,
+        ),
+        loopback_profile_config(
+            "http://127.0.0.1:26657",
+            NODE_ID,
+            [0x44; 32],
+            limits(),
+            RetryPolicy::new(NonZeroU8::new(3).unwrap(), Duration::from_millis(2)).unwrap(),
+            ledger,
+        ),
+        loopback_profile_config(
+            "http://127.0.0.1:26657",
+            NODE_ID,
+            [0x44; 32],
+            limits(),
+            retry(3),
+            LedgerRpcLimits::new(512 * 1024, 1024 * 1024).unwrap(),
+        ),
+    ];
+    for mutation in mutations {
+        assert_ne!(mutation.profile_id(), base.profile_id());
+    }
+}
+
+#[test]
+fn transport_profile_canonicalizes_peer_and_ca_set_order_and_binds_client_profile() {
+    let first_material = tls_material();
+    let second_material = tls_material();
+    let third_material = tls_material();
+    let first_peer = HttpsPeer::new(
+        "https://localhost:26657",
+        NodeId::from_str(NODE_ID).unwrap(),
+        crate::tls::spki_sha256(&first_material.server_certificate).unwrap(),
+        vec![first_material.ca.clone(), second_material.ca.clone()],
+        &first_material.client_provider,
+    )
+    .unwrap();
+    let reordered_roots = HttpsPeer::new(
+        "https://localhost:26657",
+        NodeId::from_str(NODE_ID).unwrap(),
+        crate::tls::spki_sha256(&first_material.server_certificate).unwrap(),
+        vec![second_material.ca.clone(), first_material.ca.clone()],
+        &first_material.client_provider,
+    )
+    .unwrap();
+    let base = RpcTransportConfig::new(vec![RpcPeer::Https(first_peer)], limits(), retry(1)).unwrap();
+    let reordered = RpcTransportConfig::new(vec![RpcPeer::Https(reordered_roots)], limits(), retry(1)).unwrap();
+    assert_eq!(base.profile_id(), reordered.profile_id());
+
+    let changed_client = HttpsPeer::new(
+        "https://localhost:26657",
+        NodeId::from_str(NODE_ID).unwrap(),
+        crate::tls::spki_sha256(&first_material.server_certificate).unwrap(),
+        vec![first_material.ca.clone(), second_material.ca.clone()],
+        &second_material.client_provider,
+    )
+    .unwrap();
+    let changed = RpcTransportConfig::new(vec![RpcPeer::Https(changed_client)], limits(), retry(1)).unwrap();
+    assert_ne!(base.profile_id(), changed.profile_id());
+
+    let changed_ca = HttpsPeer::new(
+        "https://localhost:26657",
+        NodeId::from_str(NODE_ID).unwrap(),
+        crate::tls::spki_sha256(&first_material.server_certificate).unwrap(),
+        vec![first_material.ca.clone(), third_material.ca.clone()],
+        &first_material.client_provider,
+    )
+    .unwrap();
+    let changed_ca = RpcTransportConfig::new(vec![RpcPeer::Https(changed_ca)], limits(), retry(1)).unwrap();
+    assert_ne!(base.profile_id(), changed_ca.profile_id());
+
+    let mut changed_spki = crate::tls::spki_sha256(&first_material.server_certificate).unwrap();
+    changed_spki[0] ^= 1;
+    let changed_spki = HttpsPeer::new(
+        "https://localhost:26657",
+        NodeId::from_str(NODE_ID).unwrap(),
+        changed_spki,
+        vec![first_material.ca.clone(), second_material.ca.clone()],
+        &first_material.client_provider,
+    )
+    .unwrap();
+    let changed_spki = RpcTransportConfig::new(vec![RpcPeer::Https(changed_spki)], limits(), retry(1)).unwrap();
+    assert_ne!(base.profile_id(), changed_spki.profile_id());
+
+    assert!(HttpsPeer::new(
+        "https://localhost:26657",
+        NodeId::from_str(NODE_ID).unwrap(),
+        crate::tls::spki_sha256(&first_material.server_certificate).unwrap(),
+        vec![first_material.ca.clone(), first_material.ca.clone()],
+        &first_material.client_provider,
+    )
+    .is_err());
+
+    let zero_profile = ZeroProfileProvider {
+        resolver: Arc::clone(&first_material.client_provider.resolver),
+    };
+    assert!(HttpsPeer::new(
+        "https://localhost:26657",
+        NodeId::from_str(NODE_ID).unwrap(),
+        crate::tls::spki_sha256(&first_material.server_certificate).unwrap(),
+        vec![first_material.ca.clone()],
+        &zero_profile,
+    )
+    .is_err());
+
+    let first_identity = PeerIdentity::new([0x71; 32], NodeId::from_str(NODE_ID).unwrap()).unwrap();
+    let second_identity = PeerIdentity::new(
+        [0x72; 32],
+        NodeId::from_str("3333333333333333333333333333333333333333").unwrap(),
+    )
+    .unwrap();
+    assert_ne!(
+        first_material
+            .client_provider
+            .binding(&first_identity)
+            .unwrap()
+            .expected_profile(),
+        first_material
+            .client_provider
+            .binding(&second_identity)
+            .unwrap()
+            .expected_profile()
+    );
+
+    let other_peer = LoopbackHttpPeer::new_regtest(
+        "http://127.0.0.1:26658",
+        NodeId::from_str("3333333333333333333333333333333333333333").unwrap(),
+        [0x55; 32],
+    )
+    .unwrap();
+    let first_loopback =
+        LoopbackHttpPeer::new_regtest("http://127.0.0.1:26657", NodeId::from_str(NODE_ID).unwrap(), [0x44; 32])
+            .unwrap();
+    let ordered = RpcTransportConfig::new(
+        vec![
+            RpcPeer::RegtestLoopback(first_loopback.clone()),
+            RpcPeer::RegtestLoopback(other_peer.clone()),
+        ],
+        limits(),
+        retry(1),
+    )
+    .unwrap();
+    let reversed = RpcTransportConfig::new(
+        vec![
+            RpcPeer::RegtestLoopback(other_peer),
+            RpcPeer::RegtestLoopback(first_loopback),
+        ],
+        limits(),
+        retry(1),
+    )
+    .unwrap();
+    assert_eq!(ordered.profile_id(), reversed.profile_id());
+
+    let duplicate_origin_first =
+        LoopbackHttpPeer::new_regtest("http://127.0.0.1:26659", NodeId::from_str(NODE_ID).unwrap(), [0x81; 32])
+            .unwrap();
+    let duplicate_origin_second = LoopbackHttpPeer::new_regtest(
+        "http://127.0.0.1:26659",
+        NodeId::from_str("4444444444444444444444444444444444444444").unwrap(),
+        [0x82; 32],
+    )
+    .unwrap();
+    assert!(RpcTransportConfig::new(
+        vec![
+            RpcPeer::RegtestLoopback(duplicate_origin_first),
+            RpcPeer::RegtestLoopback(duplicate_origin_second),
+        ],
+        limits(),
+        retry(1),
+    )
+    .is_err());
+}
+
+#[test]
+fn https_profile_rejects_unconnectable_names_and_canonicalizes_host_case() {
+    let material = tls_material();
+    let spki = crate::tls::spki_sha256(&material.server_certificate).unwrap();
+    for url in [
+        "https://-bad.example:26657",
+        "https://bad..example:26657",
+        "https://example.com.:26657",
+    ] {
+        assert!(HttpsPeer::new(
+            url,
+            NodeId::from_str(NODE_ID).unwrap(),
+            spki,
+            vec![material.ca.clone()],
+            &material.client_provider,
+        )
+        .is_err());
+    }
+    let upper = HttpsPeer::new(
+        "https://LOCALHOST:26657",
+        NodeId::from_str(NODE_ID).unwrap(),
+        spki,
+        vec![material.ca.clone()],
+        &material.client_provider,
+    )
+    .unwrap();
+    let lower = HttpsPeer::new(
+        "https://localhost:26657",
+        NodeId::from_str(NODE_ID).unwrap(),
+        spki,
+        vec![material.ca.clone()],
+        &material.client_provider,
+    )
+    .unwrap();
+    let upper = RpcTransportConfig::new(vec![RpcPeer::Https(upper)], limits(), retry(1)).unwrap();
+    let lower = RpcTransportConfig::new(vec![RpcPeer::Https(lower)], limits(), retry(1)).unwrap();
+    assert_eq!(upper.profile_id(), lower.profile_id());
+
+    assert!(HttpsPeer::new(
+        "https://127.0.0.1:26657",
+        NodeId::from_str(NODE_ID).unwrap(),
+        spki,
+        vec![material.ca.clone()],
+        &material.client_provider,
+    )
+    .is_ok());
+}
+
 #[cfg(unix)]
 #[test]
 fn pem_identity_requires_owner_private_nofollow_key_path() {
@@ -1285,7 +1729,35 @@ fn pem_identity_requires_owner_private_nofollow_key_path() {
     std::fs::write(&key_path, generated.signing_key.serialize_pem()).unwrap();
     std::fs::set_permissions(&certificate_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
-    assert!(crate::OwnerOnlyPemClientIdentity::load(&certificate_path, &key_path).is_ok());
+    let identity = crate::OwnerOnlyPemClientIdentity::load(&certificate_path, &key_path).unwrap();
+    let first_peer = PeerIdentity::new([0x61; 32], NodeId::from_str(NODE_ID).unwrap()).unwrap();
+    let second_peer = PeerIdentity::new(
+        [0x62; 32],
+        NodeId::from_str("3333333333333333333333333333333333333333").unwrap(),
+    )
+    .unwrap();
+    let first_profile = *identity.binding(&first_peer).unwrap().expected_profile();
+    assert_eq!(
+        first_profile,
+        *identity.binding(&first_peer).unwrap().expected_profile()
+    );
+    assert_ne!(
+        first_profile,
+        *identity.binding(&second_peer).unwrap().expected_profile()
+    );
+
+    let second = rcgen::generate_simple_self_signed(vec!["client-2.test".to_owned()]).unwrap();
+    let second_certificate_path = directory.path().join("client-2-cert.pem");
+    let second_key_path = directory.path().join("client-2-key.pem");
+    std::fs::write(&second_certificate_path, second.cert.pem()).unwrap();
+    std::fs::write(&second_key_path, second.signing_key.serialize_pem()).unwrap();
+    std::fs::set_permissions(&second_certificate_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::set_permissions(&second_key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let second_identity = crate::OwnerOnlyPemClientIdentity::load(&second_certificate_path, &second_key_path).unwrap();
+    assert_ne!(
+        first_profile,
+        *second_identity.binding(&first_peer).unwrap().expected_profile()
+    );
 
     std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert!(crate::OwnerOnlyPemClientIdentity::load(&certificate_path, &key_path).is_err());
@@ -1368,6 +1840,42 @@ async fn wrong_ca_spki_and_optional_client_auth_fail_closed() {
             "unexpected {error:?} for {case}"
         );
     }
+}
+
+#[tokio::test]
+async fn mutable_provider_cannot_rotate_resolver_away_from_profiled_public_key() {
+    let expected = tls_material();
+    let rotated = tls_material();
+    let server = MockTlsServer::start(Arc::new(build_fixture()), server_config(&expected, false))
+        .await
+        .unwrap();
+    let selected = Arc::new(Mutex::new(Arc::clone(&expected.client_certified)));
+    let provider = TestIdentityProvider {
+        resolver: Arc::new(RotatingResolver {
+            key: Arc::clone(&selected),
+        }),
+        certificates: expected.client_certified.cert.clone(),
+        certified_public_key_spki: expected.client_certified.key.public_key().unwrap().as_ref().to_vec(),
+    };
+    let peer = HttpsPeer::new(
+        &server.url(),
+        NodeId::from_str(NODE_ID).unwrap(),
+        crate::tls::spki_sha256(&expected.server_certificate).unwrap(),
+        vec![expected.ca.clone()],
+        &provider,
+    )
+    .unwrap();
+    *selected.lock().unwrap() = Arc::clone(&rotated.client_certified);
+    assert!(matches!(
+        fetch_trace(
+            &RuntimePeer::new(RpcPeer::Https(peer)).unwrap(),
+            &fetch_spec(),
+            limits(),
+            retry(1),
+        )
+        .await,
+        Err(RpcTransportError::Certificate | RpcTransportError::Tls)
+    ));
 }
 
 #[tokio::test]
@@ -1798,15 +2306,21 @@ fn tls_material() -> TlsMaterial {
         &provider,
     )
     .unwrap();
+    let certificates = certified.cert.clone();
+    let certified_public_key_spki = certified.key.public_key().unwrap().as_ref().to_vec();
+    let client_certified = Arc::new(certified);
     TlsMaterial {
         ca: ca_certificate.der().clone(),
         server_certificate: server_certificate.der().clone(),
         server_key: server_key.serialize_der(),
         client_provider: TestIdentityProvider {
             resolver: Arc::new(TestResolver {
-                key: Arc::new(certified),
+                key: Arc::clone(&client_certified),
             }),
+            certificates,
+            certified_public_key_spki,
         },
+        client_certified,
     }
 }
 

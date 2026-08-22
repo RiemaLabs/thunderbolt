@@ -10,6 +10,7 @@ use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as
 use rustls::client::ResolvesClientCert;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::sign::CertifiedKey;
+use sha2::{Digest as _, Sha256};
 use thunderbolt_cometbft_client::PeerIdentity;
 use zeroize::Zeroizing;
 
@@ -17,14 +18,61 @@ use crate::{Result, RpcTransportError};
 
 const MAX_CERTIFICATE_PEM_BYTES: usize = 256 * 1024;
 const MAX_PRIVATE_KEY_PEM_BYTES: usize = 64 * 1024;
+const CLIENT_CERTIFICATE_PROFILE_DOMAIN: &[u8] = b"bitcoin-thunderbolt/cometbft-rpc/client-certificate-profile/v1";
+const PEER_CLIENT_PROFILE_DOMAIN: &[u8] = b"bitcoin-thunderbolt/cometbft-rpc/peer-client-profile/v1";
 
 /// Private-key boundary used while building an immutable HTTPS peer.
 ///
 /// Implementations return a rustls resolver rather than raw key bytes. Peer
 /// configuration therefore never owns or serializes a client private key.
 pub trait ClientIdentityProvider: Send + Sync {
-    /// Returns the client-certificate resolver authorized for `peer`.
-    fn resolver(&self, peer: &PeerIdentity) -> Result<Arc<dyn ResolvesClientCert>>;
+    /// Atomically returns the expected public client profile and immutable
+    /// resolver authorized for `peer`.
+    fn binding(&self, peer: &PeerIdentity) -> Result<ClientIdentityBinding>;
+}
+
+/// Atomic public-profile and resolver binding from a client-identity provider.
+pub struct ClientIdentityBinding {
+    pub(crate) expected_profile: [u8; 32],
+    pub(crate) resolver: Arc<dyn ResolvesClientCert>,
+}
+
+impl ClientIdentityBinding {
+    /// Binds a resolver to the exact public certificate chain and certified-key
+    /// SPKI it must return during every TLS handshake.
+    pub fn new(
+        peer: &PeerIdentity,
+        certificate_chain: &[CertificateDer<'_>],
+        certified_public_key_spki: &[u8],
+        resolver: Arc<dyn ResolvesClientCert>,
+    ) -> Result<Self> {
+        if !resolver.has_certs() {
+            return Err(RpcTransportError::Credential);
+        }
+        let expected_profile = certified_client_profile(peer, certificate_chain, certified_public_key_spki)?;
+        if expected_profile == [0_u8; 32] {
+            return Err(RpcTransportError::Credential);
+        }
+        Ok(Self {
+            expected_profile,
+            resolver,
+        })
+    }
+
+    /// Returns the peer-bound expected public client profile.
+    pub const fn expected_profile(&self) -> &[u8; 32] {
+        &self.expected_profile
+    }
+}
+
+impl fmt::Debug for ClientIdentityBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ClientIdentityBinding")
+            .field("expected_profile", &self.expected_profile)
+            .field("resolver", &"[redacted provider]")
+            .finish()
+    }
 }
 
 /// Client identity loaded once from owner-private PEM files.
@@ -36,6 +84,8 @@ pub trait ClientIdentityProvider: Send + Sync {
 /// `Debug` and no serialization implementation.
 pub struct OwnerOnlyPemClientIdentity {
     resolver: Arc<dyn ResolvesClientCert>,
+    certificates: Vec<CertificateDer<'static>>,
+    certified_public_key_spki: Vec<u8>,
 }
 
 impl OwnerOnlyPemClientIdentity {
@@ -59,18 +109,68 @@ impl OwnerOnlyPemClientIdentity {
             .unwrap_or_else(|| Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
         let certified =
             CertifiedKey::from_der(certificates, key, &provider).map_err(|_| RpcTransportError::Credential)?;
+        certified.keys_match().map_err(|_| RpcTransportError::Credential)?;
+        let public_key = certified.key.public_key().ok_or(RpcTransportError::Credential)?;
+        let retained_certificates = certified.cert.clone();
+        let certified_public_key_spki = public_key.as_ref().to_vec();
         Ok(Self {
             resolver: Arc::new(StaticClientResolver {
                 certified: Arc::new(certified),
             }),
+            certificates: retained_certificates,
+            certified_public_key_spki,
         })
     }
 }
 
 impl ClientIdentityProvider for OwnerOnlyPemClientIdentity {
-    fn resolver(&self, _peer: &PeerIdentity) -> Result<Arc<dyn ResolvesClientCert>> {
-        Ok(Arc::clone(&self.resolver))
+    fn binding(&self, peer: &PeerIdentity) -> Result<ClientIdentityBinding> {
+        ClientIdentityBinding::new(
+            peer,
+            &self.certificates,
+            &self.certified_public_key_spki,
+            Arc::clone(&self.resolver),
+        )
     }
+}
+
+pub(crate) fn certified_client_profile(
+    peer: &PeerIdentity,
+    certificates: &[CertificateDer<'_>],
+    public_key: &[u8],
+) -> Result<[u8; 32]> {
+    if certificates.is_empty() || public_key.is_empty() {
+        return Err(RpcTransportError::Credential);
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(CLIENT_CERTIFICATE_PROFILE_DOMAIN);
+    hasher.update(
+        u64::try_from(certificates.len())
+            .map_err(|_| RpcTransportError::Credential)?
+            .to_be_bytes(),
+    );
+    for certificate in certificates {
+        hasher.update(
+            u64::try_from(certificate.len())
+                .map_err(|_| RpcTransportError::Credential)?
+                .to_be_bytes(),
+        );
+        hasher.update(certificate.as_ref());
+    }
+    hasher.update(
+        u64::try_from(public_key.len())
+            .map_err(|_| RpcTransportError::Credential)?
+            .to_be_bytes(),
+    );
+    hasher.update(public_key);
+    let base: [u8; 32] = hasher.finalize().into();
+    Ok(Sha256::new()
+        .chain_update(PEER_CLIENT_PROFILE_DOMAIN)
+        .chain_update(base)
+        .chain_update(peer.transport_binding())
+        .chain_update(peer.node_id().as_bytes())
+        .finalize()
+        .into())
 }
 
 impl fmt::Debug for OwnerOnlyPemClientIdentity {

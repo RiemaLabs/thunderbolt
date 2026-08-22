@@ -30,7 +30,8 @@ pub use error::{ControlError, Result};
 pub use server::{ControlHandler, ControlHandlerFuture, ControlServer, ControlServerConfig};
 pub use types::{
     ControlPayload, ControlRequest, ControlResponse, ControlStatus, RequestId, ABSOLUTE_MAX_FRAME_BYTES,
-    CONTROL_PROTOCOL_VERSION, DEFAULT_MAX_FRAME_BYTES, MAX_ERROR_MESSAGE_BYTES, MAX_METHOD_BYTES,
+    CONTROL_PROTOCOL_VERSION, DEFAULT_MAX_FRAME_BYTES, MAX_CONTROL_HANDLER_TIMEOUT, MAX_CONTROL_IO_TIMEOUT,
+    MAX_CONTROL_RESPONSE_TIMEOUT, MAX_ERROR_MESSAGE_BYTES, MAX_METHOD_BYTES,
 };
 
 #[cfg(test)]

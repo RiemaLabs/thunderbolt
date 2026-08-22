@@ -7,13 +7,16 @@ use rustls::client::WebPkiServerVerifier;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, RootCertStore, SignatureScheme};
 use sha2::{Digest, Sha256};
+use thunderbolt_cometbft_client::PeerIdentity;
 
 use crate::config::HttpsPeer;
+use crate::credentials::certified_client_profile;
 use crate::{Result, RpcTransportError};
 
 pub(crate) struct TrackedClientConfig {
     pub config: Arc<rustls::ClientConfig>,
     pub client_certificate_used: Arc<AtomicBool>,
+    pub client_certificate_mismatch: Arc<AtomicBool>,
 }
 
 pub(crate) fn client_config(peer: &HttpsPeer) -> Result<TrackedClientConfig> {
@@ -34,9 +37,13 @@ pub(crate) fn client_config(peer: &HttpsPeer) -> Result<TrackedClientConfig> {
         expected_spki: peer.expected_spki,
     });
     let client_certificate_used = Arc::new(AtomicBool::new(false));
+    let client_certificate_mismatch = Arc::new(AtomicBool::new(false));
     let resolver = Arc::new(TrackingClientResolver {
         inner: Arc::clone(&peer.client_resolver),
         used: Arc::clone(&client_certificate_used),
+        mismatch: Arc::clone(&client_certificate_mismatch),
+        expected_profile: peer.client_identity_profile,
+        peer: peer.identity.clone(),
     });
     let mut config = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
@@ -48,6 +55,7 @@ pub(crate) fn client_config(peer: &HttpsPeer) -> Result<TrackedClientConfig> {
     Ok(TrackedClientConfig {
         config: Arc::new(config),
         client_certificate_used,
+        client_certificate_mismatch,
     })
 }
 
@@ -70,6 +78,9 @@ struct PinnedServerVerifier {
 struct TrackingClientResolver {
     inner: Arc<dyn rustls::client::ResolvesClientCert>,
     used: Arc<AtomicBool>,
+    mismatch: Arc<AtomicBool>,
+    expected_profile: [u8; 32],
+    peer: PeerIdentity,
 }
 
 impl fmt::Debug for TrackingClientResolver {
@@ -84,11 +95,21 @@ impl rustls::client::ResolvesClientCert for TrackingClientResolver {
         root_hint_subjects: &[&[u8]],
         sigschemes: &[SignatureScheme],
     ) -> Option<Arc<rustls::sign::CertifiedKey>> {
-        let resolved = self.inner.resolve(root_hint_subjects, sigschemes);
-        if resolved.is_some() {
-            self.used.store(true, Ordering::SeqCst);
+        let resolved = self.inner.resolve(root_hint_subjects, sigschemes)?;
+        let public_key = match resolved.key.public_key() {
+            Some(public_key) => public_key,
+            None => {
+                self.mismatch.store(true, Ordering::SeqCst);
+                return None;
+            }
+        };
+        let actual = certified_client_profile(&self.peer, &resolved.cert, public_key.as_ref());
+        if actual.as_ref().ok() != Some(&self.expected_profile) {
+            self.mismatch.store(true, Ordering::SeqCst);
+            return None;
         }
-        resolved
+        self.used.store(true, Ordering::SeqCst);
+        Some(resolved)
     }
 
     fn has_certs(&self) -> bool {

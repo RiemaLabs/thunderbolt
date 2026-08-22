@@ -662,9 +662,12 @@ async fn connect(peer: &RuntimePeer, deadline: Instant) -> Result<(BoxedStream, 
             let tls = timeout_at(deadline, connector.connect(name, tcp))
                 .await?
                 .map_err(|_| RpcTransportError::Tls)?;
-            if !tracked
-                .client_certificate_used
+            if tracked
+                .client_certificate_mismatch
                 .load(std::sync::atomic::Ordering::SeqCst)
+                || !tracked
+                    .client_certificate_used
+                    .load(std::sync::atomic::Ordering::SeqCst)
             {
                 return Err(RpcTransportError::Certificate);
             }

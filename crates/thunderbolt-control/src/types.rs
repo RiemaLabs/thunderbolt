@@ -1,4 +1,5 @@
 use core::fmt;
+use std::time::Duration;
 
 use zeroize::Zeroizing;
 
@@ -14,6 +15,15 @@ pub const MAX_ERROR_MESSAGE_BYTES: usize = 512;
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 1024 * 1024;
 /// Absolute complete frame bound accepted by any configuration.
 pub const ABSOLUTE_MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CONTROL_IO_TIMEOUT_SECONDS: u64 = 60;
+const MAX_CONTROL_HANDLER_TIMEOUT_SECONDS: u64 = 300;
+/// Maximum server connect/read/write deadline.
+pub const MAX_CONTROL_IO_TIMEOUT: Duration = Duration::from_secs(MAX_CONTROL_IO_TIMEOUT_SECONDS);
+/// Maximum server role-handler deadline.
+pub const MAX_CONTROL_HANDLER_TIMEOUT: Duration = Duration::from_secs(MAX_CONTROL_HANDLER_TIMEOUT_SECONDS);
+/// Maximum client response deadline, covering one handler plus response I/O.
+pub const MAX_CONTROL_RESPONSE_TIMEOUT: Duration =
+    Duration::from_secs(MAX_CONTROL_HANDLER_TIMEOUT_SECONDS + MAX_CONTROL_IO_TIMEOUT_SECONDS);
 
 /// Nonzero 128-bit idempotency and correlation identifier.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

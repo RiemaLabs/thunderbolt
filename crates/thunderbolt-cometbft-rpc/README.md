@@ -19,6 +19,21 @@ key bytes never enter peer configuration, serde, or `Debug`. The transport uses
 direct TCP and hyper/rustls, so redirects, proxies, environment credentials,
 cookies, and ambient trust roots are absent.
 
+Every `ClientIdentityProvider` atomically returns an immutable resolver and its
+nonsecret peer-bound public profile. The PEM provider derives that profile from
+the exact certificate chain and certified public-key SPKI after requiring
+key/certificate equality; private key bytes are never hashed into configuration.
+Every resolver is wrapped: the actual `CertifiedKey` selected during each TLS
+handshake has its chain and `key.public_key()` profile recomputed and compared
+with the expected profile. Mutable/HSM resolver rotation therefore fails before
+the connection can issue evidence.
+
+`RpcTransportConfig::profile_id` is mechanically derived from the canonical
+set of peer origins, node IDs, SPKI pins, CA certificate digests, client
+identity profiles, production/regtest mode, retry policy, and every trace and
+Ledger body/header limit. Peer and CA set ordering is canonicalized; duplicate
+origins, identities, CA certificates, and zero client profiles fail closed.
+
 Plain HTTP is absent from default builds. Enabling the non-default `regtest`
 feature exposes an explicit constructor that accepts only a literal loopback
 IP. It is not a production authentication mechanism.

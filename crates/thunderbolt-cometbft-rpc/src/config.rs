@@ -8,12 +8,15 @@ use std::sync::Arc;
 
 use rustls::client::ResolvesClientCert;
 use rustls::pki_types::CertificateDer;
+use sha2::{Digest as _, Sha256};
 use tendermint::node::Id as NodeId;
 use thunderbolt_cometbft::{MAX_ADJACENT_HEADERS, MAX_VALIDATORS, MAX_WITNESSES};
 use thunderbolt_cometbft_client::PeerIdentity;
 use url::{Host, Url};
 
 use crate::{ClientIdentityProvider, Result, RpcTransportError};
+
+const TRANSPORT_PROFILE_DOMAIN: &[u8] = b"bitcoin-thunderbolt/cometbft-rpc/transport-profile/v1";
 
 /// Maximum adjacent headers fetched through one RPC session. Larger trust gaps
 /// must be advanced in multiple coordinator updates.
@@ -36,6 +39,17 @@ pub const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
 
 const _: () =
     assert!(MAX_LEDGER_RPC_RESPONSE_BYTES + MAX_LEDGER_STATUS_RESPONSE_BYTES <= MAX_LEDGER_RPC_AGGREGATE_BYTES);
+
+/// Mechanically derived identity of the complete authenticated RPC policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RpcTransportProfileId([u8; 32]);
+
+impl RpcTransportProfileId {
+    /// Returns the exact transport-policy digest.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
 
 /// Immutable retry policy for idempotent CometBFT JSON-RPC reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -221,6 +235,7 @@ pub struct HttpsPeer {
     pub(crate) identity: PeerIdentity,
     pub(crate) roots: Vec<CertificateDer<'static>>,
     pub(crate) expected_spki: [u8; 32],
+    pub(crate) client_identity_profile: [u8; 32],
     pub(crate) client_resolver: Arc<dyn ResolvesClientCert>,
 }
 
@@ -247,16 +262,36 @@ impl HttpsPeer {
         let identity = PeerIdentity::new(expected_spki_sha256, expected_node_id)
             .map_err(|_| RpcTransportError::InvalidConfiguration("peer identity is invalid"))?;
         let endpoint = Endpoint::parse(url, EndpointKind::Https)?;
-        let client_resolver = client_identity.resolver(&identity)?;
-        if !client_resolver.has_certs() {
-            return Err(RpcTransportError::Credential);
+        if endpoint.host.ends_with('.') {
+            return Err(RpcTransportError::InvalidConfiguration(
+                "HTTPS host must not use a trailing DNS root label",
+            ));
+        }
+        let _ = crate::tls::server_name(&endpoint.host)?;
+        let client_binding = client_identity.binding(&identity)?;
+        let client_identity_profile = client_binding.expected_profile;
+        if client_identity_profile == [0_u8; 32] {
+            return Err(RpcTransportError::InvalidConfiguration(
+                "client identity profile must be nonzero",
+            ));
+        }
+        let mut root_digests = BTreeSet::new();
+        if ca_certificates
+            .iter()
+            .map(|certificate| <[u8; 32]>::from(Sha256::digest(certificate.as_ref())))
+            .any(|digest| !root_digests.insert(digest))
+        {
+            return Err(RpcTransportError::InvalidConfiguration(
+                "HTTPS CA certificates must be distinct",
+            ));
         }
         Ok(Self {
             endpoint,
             identity,
             roots: ca_certificates,
             expected_spki: expected_spki_sha256,
-            client_resolver,
+            client_identity_profile,
+            client_resolver: client_binding.resolver,
         })
     }
 
@@ -274,6 +309,7 @@ impl fmt::Debug for HttpsPeer {
             .field("identity", &self.identity)
             .field("expected_spki", &self.expected_spki)
             .field("ca_certificates", &self.roots.len())
+            .field("client_identity_profile", &self.client_identity_profile)
             .field("client_identity", &"[redacted provider]")
             .finish()
     }
@@ -330,6 +366,85 @@ impl RpcPeer {
             Self::RegtestLoopback(peer) => &peer.endpoint,
         }
     }
+
+    fn profile_origin(&self) -> (u8, String) {
+        let kind = match self {
+            Self::Https(_) => 1,
+            #[cfg(any(test, feature = "regtest"))]
+            Self::RegtestLoopback(_) => 2,
+        };
+        (kind, self.endpoint().authority.clone())
+    }
+
+    fn profile_descriptor(&self) -> Vec<u8> {
+        let mut descriptor = Vec::with_capacity(512);
+        match self {
+            Self::Https(peer) => {
+                descriptor.push(1);
+                append_profile_bytes(&mut descriptor, peer.endpoint.authority.as_bytes());
+                descriptor.extend_from_slice(peer.identity.transport_binding());
+                descriptor.extend_from_slice(peer.identity.node_id().as_bytes());
+                descriptor.extend_from_slice(&peer.expected_spki);
+                descriptor.extend_from_slice(&peer.client_identity_profile);
+                let mut roots = peer
+                    .roots
+                    .iter()
+                    .map(|certificate| <[u8; 32]>::from(Sha256::digest(certificate.as_ref())))
+                    .collect::<Vec<_>>();
+                roots.sort_unstable();
+                descriptor.extend_from_slice(&u64::try_from(roots.len()).unwrap_or(u64::MAX).to_be_bytes());
+                for root in roots {
+                    descriptor.extend_from_slice(&root);
+                }
+            }
+            #[cfg(any(test, feature = "regtest"))]
+            Self::RegtestLoopback(peer) => {
+                descriptor.push(2);
+                append_profile_bytes(&mut descriptor, peer.endpoint.authority.as_bytes());
+                descriptor.extend_from_slice(peer.identity.transport_binding());
+                descriptor.extend_from_slice(peer.identity.node_id().as_bytes());
+            }
+        }
+        descriptor
+    }
+}
+
+fn derive_transport_profile(
+    peers: &[RpcPeer],
+    limits: RpcLimits,
+    ledger_limits: LedgerRpcLimits,
+    retry: RetryPolicy,
+) -> RpcTransportProfileId {
+    let mut descriptors = peers.iter().map(RpcPeer::profile_descriptor).collect::<Vec<_>>();
+    descriptors.sort_unstable();
+    let mut hasher = Sha256::new();
+    hasher.update(TRANSPORT_PROFILE_DOMAIN);
+    hasher.update(u64::try_from(descriptors.len()).unwrap_or(u64::MAX).to_be_bytes());
+    for descriptor in descriptors {
+        hasher.update(u64::try_from(descriptor.len()).unwrap_or(u64::MAX).to_be_bytes());
+        hasher.update(descriptor);
+    }
+    for value in [
+        limits.response_bytes(),
+        limits.aggregate_bytes(),
+        limits.max_adjacent_headers(),
+        limits.max_validators(),
+        usize::from(limits.validator_page_size().get()),
+        limits.max_headers(),
+        limits.max_header_bytes(),
+        ledger_limits.response_bytes(),
+        ledger_limits.aggregate_bytes(),
+        usize::from(retry.attempts().get()),
+    ] {
+        hasher.update(u64::try_from(value).unwrap_or(u64::MAX).to_be_bytes());
+    }
+    hasher.update(retry.base_delay().as_nanos().to_be_bytes());
+    RpcTransportProfileId(hasher.finalize().into())
+}
+
+fn append_profile_bytes(output: &mut Vec<u8>, bytes: &[u8]) {
+    output.extend_from_slice(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
+    output.extend_from_slice(bytes);
 }
 
 /// Complete immutable RPC transport configuration.
@@ -339,6 +454,7 @@ pub struct RpcTransportConfig {
     limits: RpcLimits,
     ledger_limits: LedgerRpcLimits,
     retry: RetryPolicy,
+    profile_id: RpcTransportProfileId,
 }
 
 impl RpcTransportConfig {
@@ -355,18 +471,25 @@ impl RpcTransportConfig {
         }
         let mut bindings = BTreeSet::new();
         let mut node_ids = BTreeSet::new();
+        let mut origins = BTreeSet::new();
         for peer in &peers {
-            if !bindings.insert(*peer.identity().transport_binding()) || !node_ids.insert(peer.identity().node_id()) {
+            if !bindings.insert(*peer.identity().transport_binding())
+                || !node_ids.insert(peer.identity().node_id())
+                || !origins.insert(peer.profile_origin())
+            {
                 return Err(RpcTransportError::InvalidConfiguration(
-                    "RPC peer identities must be distinct",
+                    "RPC peer identities and origins must be distinct",
                 ));
             }
         }
+        let ledger_limits = LedgerRpcLimits::inherited(limits);
+        let profile_id = derive_transport_profile(&peers, limits, ledger_limits, retry);
         Ok(Self {
             peers,
             limits,
-            ledger_limits: LedgerRpcLimits::inherited(limits),
+            ledger_limits,
             retry,
+            profile_id,
         })
     }
 
@@ -382,14 +505,20 @@ impl RpcTransportConfig {
 
     /// Overrides fixed Ledger body limits. Runtime policy must bind this value.
     #[must_use]
-    pub const fn with_ledger_limits(mut self, limits: LedgerRpcLimits) -> Self {
+    pub fn with_ledger_limits(mut self, limits: LedgerRpcLimits) -> Self {
         self.ledger_limits = limits;
+        self.profile_id = derive_transport_profile(&self.peers, self.limits, self.ledger_limits, self.retry);
         self
     }
 
     /// Returns fixed Ledger operation body limits.
     pub const fn ledger_limits(&self) -> LedgerRpcLimits {
         self.ledger_limits
+    }
+
+    /// Returns the mechanically derived complete transport-policy identity.
+    pub const fn profile_id(&self) -> RpcTransportProfileId {
+        self.profile_id
     }
 
     /// Returns the idempotent retry policy.
