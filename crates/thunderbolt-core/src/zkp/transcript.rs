@@ -41,6 +41,10 @@ impl ProofTranscript {
         self.append_bytes(label, &bytes);
     }
 
+    pub(crate) fn append_u32(&mut self, label: &[u8], value: u32) {
+        self.append_bytes(label, &value.to_be_bytes());
+    }
+
     pub(crate) fn challenge(self) -> ChallengeValue {
         let digest: [u8; 32] = self.hasher.finalize().into();
         ChallengeValue::from_digest(digest)

@@ -14,7 +14,7 @@ use bitcoin::{
 use bitcoin::{opcodes::all::OP_CHECKSIGADD, script::Builder};
 use std::{str::FromStr, sync::LazyLock};
 
-// TODO: Generate this key using a public method to prove it is not held by Nubit team.
+// Provably unspendable key (nothing-up-my-sleeve).
 // Refer to: https://github.com/BitVM/BitVM/blob/main/bridge/src/scripts.rs#L15
 pub static UNSPENDABLE_TAPROOT_PUBLIC_KEY: LazyLock<XOnlyPublicKey> = LazyLock::new(|| {
     XOnlyPublicKey::from_str("50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0").unwrap()

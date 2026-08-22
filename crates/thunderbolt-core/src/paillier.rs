@@ -204,6 +204,8 @@ pub fn build_response_lhs(pk: &EncryptionKey, z: &BigNumber, tau: &Nonce) -> Res
 
 #[cfg(test)]
 mod tests {
+    use zeroize::Zeroize;
+
     use super::*;
 
     fn small_test_key() -> (EncryptionKey, DecryptionKey) {

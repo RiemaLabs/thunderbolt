@@ -94,6 +94,7 @@ pub struct Sp1StageSummary {
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct Sp1BenchmarkReport {
     pub iterations: usize,
+    pub paillier_bits: usize,
     pub execute: Option<Sp1StageSummary>,
     pub prove: Option<Sp1StageSummary>,
     pub verify: Option<Sp1StageSummary>,
@@ -149,6 +150,96 @@ sp1 comparison
             ),
         );
     }
+    let _ = fmt::write(
+        &mut out,
+        format_args!(
+            "
+sp1 paillier bits: {}
+",
+            sp1.paillier_bits
+        ),
+    );
+    out
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct Groth16StageSummary {
+    pub total_secs: f64,
+    pub average_secs: f64,
+    pub min_secs: f64,
+    pub max_secs: f64,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct Groth16BenchmarkReport {
+    pub iterations: usize,
+    pub padding_muls: usize,
+    pub constraints: usize,
+    pub setup_secs: f64,
+    pub prove: Groth16StageSummary,
+    pub verify: Groth16StageSummary,
+    pub total: Groth16StageSummary,
+}
+
+pub fn format_groth16_comparison(
+    report: &SingleCommitteeBenchmarkReport,
+    groth16: &Groth16BenchmarkReport,
+) -> String {
+    let ours = secs(report.total_offchain_transfer.average);
+    let specialized_prove = secs(report.invoice_prove.average + report.transfer_prove.average);
+    let specialized_verify = secs(report.invoice_verify.average + report.transfer_verify.average);
+    let mut out = String::new();
+    out.push_str(
+        "
+groth16 comparison
+",
+    );
+    out.push_str(
+        "metric                               ours (s)   groth16 (s)   speedup
+",
+    );
+    out.push_str(
+        "--------------------------------------------------------------------
+",
+    );
+    let total_speedup = groth16.total.average_secs / ours;
+    let _ = fmt::write(
+        &mut out,
+        format_args!(
+            "{:<35} {:>8.3} {:>13.3} {:>8.2}x
+",
+            "total transfer benchmark", ours, groth16.total.average_secs, total_speedup,
+        ),
+    );
+    let prove_speedup = groth16.prove.average_secs / specialized_prove;
+    let _ = fmt::write(
+        &mut out,
+        format_args!(
+            "{:<35} {:>8.3} {:>13.3} {:>8.2}x
+",
+            "zk prove path", specialized_prove, groth16.prove.average_secs, prove_speedup,
+        ),
+    );
+    let verify_speedup = groth16.verify.average_secs / specialized_verify;
+    let _ = fmt::write(
+        &mut out,
+        format_args!(
+            "{:<35} {:>8.3} {:>13.3} {:>8.2}x
+",
+            "zk verify path", specialized_verify, groth16.verify.average_secs, verify_speedup,
+        ),
+    );
+    let _ = fmt::write(
+        &mut out,
+        format_args!(
+            "
+constraints: {}
+padding mul constraints: {}
+trusted setup (excluded from per-transfer total): {:.3}s
+",
+            groth16.constraints, groth16.padding_muls, groth16.setup_secs
+        ),
+    );
     out
 }
 

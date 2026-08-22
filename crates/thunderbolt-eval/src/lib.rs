@@ -4,3 +4,5 @@ pub mod mock_committee;
 pub mod mock_transactions;
 pub mod mock_users;
 pub mod phases;
+pub mod scalability;
+pub mod threshold_committee;

@@ -158,12 +158,12 @@ mod tests {
 
     #[test]
     fn test_fixed_seed_taproot_address() {
-        let seed_hex = "YOUR PRIVATE SEED";
+        let seed_hex = "000102030405060708090a0b0c0d0e0f";
         let network = Network::Bitcoin;
 
         let account = AccountInfo::new(network, seed_hex);
         let p2tr_address = account.p2tr_address(network);
 
-        println!("Taproot address for seed {}: {}", seed_hex, p2tr_address);
+        assert!(!p2tr_address.to_string().is_empty());
     }
 }

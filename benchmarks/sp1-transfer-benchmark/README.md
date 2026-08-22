@@ -1,21 +1,20 @@
 # SP1 single-transfer benchmark
 
-This benchmark measures a general-purpose zkVM proof for the same *transfer-step semantics*
-as the specialized single-committee Thunderbolt benchmark:
+This benchmark measures a general-purpose zkVM proof of the Thunderbolt invoice/transfer
+Paillier verification equations under a reduced Paillier modulus parameter.
 
-- holder update: `x_{s+1} = x_s + r_s`
-- committee update: `y_{s+1} = y_s - r_s`
-- invariant preservation: `x_{s+1} + y_{s+1} = x_s + y_s`
-
-It does **not** model Paillier ciphertext arithmetic or the specialized Sigma/Fiat–Shamir proof
-objects byte-for-byte. Instead, it measures a general-purpose proof of the same transfer relation.
+It preserves the same proof structure as the Thunderbolt consistency checks, but intentionally
+uses a much smaller modulus than the paper's 3072-bit deployment setting. The paper's final RQ4
+artifact uses `--paillier-bits 256`; larger moduli were not feasible for local proving on the
+evaluation machine due to memory pressure and substantially longer proving time.
 
 ## Run
 
 ```bash
 cd benchmarks/sp1-transfer-benchmark/script
-cargo run --release -- --execute --iterations 1
-cargo run --release -- --prove --iterations 1 --json
+bash ../../ensure_protoc.sh >/dev/null
+PROTOC="$(bash ../../ensure_protoc.sh)" cargo run --release -- --prove --iterations 5 --paillier-bits 256 --json
 ```
 
-If your local `protoc` is broken, set `PROTOC` to a working binary before running.
+The helper script downloads a repo-local official `protoc` binary into `benchmarks/.tools/`
+if you do not already have a working one.

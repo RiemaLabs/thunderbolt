@@ -1,5 +1,6 @@
 use std::sync::OnceLock;
 
+use bitcoin::key::rand::{thread_rng, RngCore};
 use libpaillier::unknown_order::BigNumber;
 use secp::{MaybePoint, MaybeScalar, Point, Scalar};
 
@@ -10,10 +11,13 @@ const CURVE_ORDER_BYTES: [u8; 32] = [
     0xe6, 0xaf, 0x48, 0xa0, 0x3b, 0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36, 0x41, 0x41,
 ];
 
+const STATISTICAL_SECURITY_PARAMETER: u32 = 128;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProofTag {
     Invoice,
     Transfer,
+    ShareEncryption,
 }
 
 impl ProofTag {
@@ -21,6 +25,7 @@ impl ProofTag {
         match self {
             ProofTag::Invoice => b"tb/invoice",
             ProofTag::Transfer => b"tb/xfer",
+            ProofTag::ShareEncryption => b"tb/share",
         }
     }
 }
@@ -113,12 +118,12 @@ impl IntegerResponse {
         Ok(Self { integer, scalar_mod_q })
     }
 
-    pub fn from_linear_relation(alpha: Scalar, challenge: &BigNumber, witness: Scalar) -> Result<Self> {
+    pub fn from_linear_relation(alpha: &BigNumber, challenge: &BigNumber, witness: Scalar) -> Result<Self> {
+        ensure_non_negative("commitment scalar alpha", alpha)?;
         ensure_non_negative("Fiat-Shamir challenge", challenge)?;
 
-        let alpha_bn = scalar_to_big_number(alpha);
         let witness_bn = scalar_to_big_number(witness);
-        let response = alpha_bn + (challenge.clone() * witness_bn);
+        let response = alpha + &(challenge.clone() * witness_bn);
 
         Self::new(response)
     }
@@ -135,6 +140,29 @@ impl IntegerResponse {
 pub fn curve_order() -> &'static BigNumber {
     static CURVE_ORDER: OnceLock<BigNumber> = OnceLock::new();
     CURVE_ORDER.get_or_init(|| BigNumber::from_slice(CURVE_ORDER_BYTES))
+}
+
+pub fn masking_range() -> &'static BigNumber {
+    static MASKING_RANGE: OnceLock<BigNumber> = OnceLock::new();
+    MASKING_RANGE.get_or_init(|| {
+        let q = curve_order();
+        let q_squared = q * q;
+        q_squared << STATISTICAL_SECURITY_PARAMETER
+    })
+}
+
+pub fn random_commitment_scalar() -> BigNumber {
+    let q_tilde = masking_range();
+    let byte_len = (q_tilde.bit_length() + 8) / 8;
+    let mut buf = vec![0u8; byte_len];
+    loop {
+        thread_rng().fill_bytes(&mut buf);
+        buf[0] &= 0x7f;
+        let candidate = BigNumber::from_slice(&buf);
+        if &candidate < q_tilde {
+            return candidate;
+        }
+    }
 }
 
 pub fn scalar_to_big_number(scalar: Scalar) -> BigNumber {

@@ -1,4 +1,3 @@
-use bitcoin::key::rand::thread_rng;
 use libpaillier::{unknown_order::BigNumber, Ciphertext, EncryptionKey, Nonce};
 use secp::{Point, Scalar};
 
@@ -7,7 +6,10 @@ use crate::paillier::{
     exponentiate_ciphertext, random_nonce_in_group, validate_ciphertext, validate_nonce, validate_plaintext,
 };
 use crate::zkp::transcript::ProofTranscript;
-use crate::zkp::types::{scalar_to_big_number, IntegerResponse, ProofContext, ProofTag};
+use crate::zkp::types::{
+    random_commitment_scalar, reduce_big_number_mod_curve_order, scalar_to_big_number, IntegerResponse, ProofContext,
+    ProofTag,
+};
 use crate::{Result, ThunderboltError};
 
 #[derive(Clone, Debug)]
@@ -95,17 +97,19 @@ pub fn prove_invoice(statement: &InvoiceStatement, witness: &InvoiceWitness) -> 
         ));
     }
 
-    let alpha = Scalar::random(&mut thread_rng());
-    let alpha_bn = scalar_to_big_number(alpha);
+    let alpha_bn = random_commitment_scalar();
+    let alpha_scalar = reduce_big_number_mod_curve_order(&alpha_bn)?
+        .not_zero()
+        .map_err(|_| ThunderboltError::CryptographicError("commitment scalar reduced to zero mod q".to_string()))?;
     let beta_bob = random_nonce_in_group(&statement.bob_key);
     let beta_committee = random_nonce_in_group(&statement.committee_key);
 
-    let a_delta = statement.anchor_base * alpha;
+    let a_delta = statement.anchor_base * alpha_scalar;
     let a_bob = compose_ciphertext(&statement.bob_key, &alpha_bn, &beta_bob)?;
     let a_committee = compose_ciphertext(&statement.committee_key, &alpha_bn, &beta_committee)?;
 
     let challenge = invoice_challenge(statement, &a_delta, &a_bob, &a_committee);
-    let response = IntegerResponse::from_linear_relation(alpha, challenge.integer(), witness.refresh)?;
+    let response = IntegerResponse::from_linear_relation(&alpha_bn, challenge.integer(), witness.refresh)?;
     let tau_bob = combine_response_nonce(&statement.bob_key, &beta_bob, &witness.bob_nonce, challenge.integer())?;
     let tau_committee = combine_response_nonce(
         &statement.committee_key,

@@ -7,7 +7,7 @@ $$
 P = (x_s + y_s)G.
 $$
 
-All scalar equalities appearing in elliptic-curve relations are interpreted modulo the group order $q$.
+All scalar equalities appearing in elliptic-curve relations are interpreted modulo the group order $q$. Let $\kappa$ denote the statistical security parameter (concretely, $\kappa = 128$); the masking range for commitment scalars is $\tilde{q} = q^2 \cdot 2^{\kappa}$, which ensures statistical zero-knowledge with distance at most $2^{-\kappa}$.
 
 The transfer is split into two phases.
 
@@ -105,7 +105,7 @@ $$
 
 ## NIZK proof and verification
 
-**Proof:** $\pi_{\mathrm{inv}} = (A_D, A_B, A_C, z, \tau_B, \tau_C)$ (obtained via Fiat--Shamir on the above relation). The prover uses one integer value $r_s$ and one commitment randomness $\alpha$: commitments are $A_D = \alpha H$, $A_B = g_B^{\alpha}\beta_B^{N_B}$, $A_C = g_C^{\alpha}\beta_C^{N_C}$; response $z = \alpha + c r_s$ is the **same** in all three components, so the verifier sees a single $z$ tying $D_s$, $\mathrm{ct}_B$, and $\mathrm{ct}_C$ to the same $r_s$.
+**Proof:** $\pi_{\mathrm{inv}} = (A_D, A_B, A_C, z, \tau_B, \tau_C)$ (obtained via Fiat--Shamir on the above relation). The prover uses one integer value $r_s$ and one commitment randomness $\alpha \gets \mathbb{Z}_{\tilde{q}}$: commitments are $A_D = \alpha H$, $A_B = g_B^{\alpha}\beta_B^{N_B}$, $A_C = g_C^{\alpha}\beta_C^{N_C}$; response $z = \alpha + c r_s$ (computed over the integers) is the **same** in all three components, so the verifier sees a single $z$ tying $D_s$, $\mathrm{ct}_B$, and $\mathrm{ct}_C$ to the same $r_s$.
 
 **Verification:** set
 $$

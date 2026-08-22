@@ -1,0 +1,19 @@
+single-committee off-chain transfer benchmark
+iterations: 100
+scope: invoice -> proof1 -> proof2 -> bob decrypt -> committee update
+note: excludes Paillier key generation and any chain/network time
+note: discards a fixed 3-iteration warmup before measurement
+
+stage                     avg (µs)   min (µs)   max (µs)   total (ms)
+---------------------------------------------------------------------
+invoice_setup           119040.93  115880.08  152916.67    11904.09
+invoice_prove           308966.63  301621.21  339825.88    30896.66
+invoice_verify          196348.80  191780.67  217572.75    19634.88
+transfer_setup           64543.30   62975.96   81565.71     6454.33
+transfer_prove          161480.15  157015.62  169395.00    16148.01
+anchor_verify                5.43       4.08       6.79        0.54
+transfer_verify         110630.82  108011.46  114782.58    11063.08
+bob_decrypt              30407.75   29628.54   33344.29     3040.78
+committee_update         30404.13   29499.71   31935.63     3040.41
+total_offchain         1021841.00  998609.29 1073255.29   102184.10
+

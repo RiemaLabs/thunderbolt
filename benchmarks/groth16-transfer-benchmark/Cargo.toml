@@ -1,0 +1,3 @@
+[workspace]
+members = ["script"]
+resolver = "2"
