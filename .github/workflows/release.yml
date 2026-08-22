@@ -163,16 +163,22 @@ jobs:
             done
           done
 
+          # gzip and zip output may differ across host implementations even when
+          # both jobs package the same tagged source tree. Publish one canonical
+          # source archive set from Ubuntu and retain both platform binaries.
           for shared_name in \
             "bitcoin-thunderbolt-${software_version}-source.tar.gz" \
             "bitcoin-thunderbolt-${software_version}-source.zip" \
             SIGNING-INSTRUCTIONS.txt; do
             reference="$linux_dir/$shared_name"
             test -s "$reference"
-            for artifact_dir in "${artifact_dirs[@]}"; do
-              cmp -s "$reference" "$artifact_dir/$shared_name"
-            done
             cp "$reference" release-assets/
+          done
+          for artifact_dir in "${artifact_dirs[@]}"; do
+            if ! cmp -s "$linux_dir/SIGNING-INSTRUCTIONS.txt" "$artifact_dir/SIGNING-INSTRUCTIONS.txt"; then
+              echo "release instructions differ across platform artifacts" >&2
+              exit 1
+            fi
           done
 
           (
