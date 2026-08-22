@@ -36,6 +36,6 @@ prove possession of the BIP340 actor key.
 The production prover samples its nonce directly from operating-system
 randomness. Secret witness and random-byte buffers zeroize on drop. The binary
 codec is versioned, canonical, bounded, and covered by a stable golden vector
-and property tests. The accepted closing-transaction bound reserves 16 KiB of
-the Ledger's 256 KiB event cap for Finalize framing, this fixed-size ownership
+and property tests. The accepted closing-transaction bound reserves 16 KiB
+within the Ledger event cap for Finalize framing, this fixed-size ownership
 envelope, and Committee attestation.

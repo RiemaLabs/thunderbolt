@@ -5,10 +5,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest as _, Sha256};
 use thunderbolt_ledger::{EntryHashV2, LedgerChainIdV2, ParticipantIdV2};
 use thunderbolt_protocol::v2::{
-    ChannelEventV2, ChannelPhaseV2, ChannelSnapshotV2, PendingInvoiceV2, StateHashV2, ABSOLUTE_MAX_PENDING_INVOICES_V2,
-    HASH_FORMAT_VERSION_V2, PROTOCOL_VERSION_V2,
+    ArtifactV2, ChannelEventV2, ChannelPhaseV2, ChannelSnapshotV2, PendingInvoiceV2, StateHashV2,
+    ABSOLUTE_MAX_PENDING_INVOICES_V2, HASH_FORMAT_VERSION_V2, MAX_CANONICAL_SNAPSHOT_BYTES_V2, PROTOCOL_VERSION_V2,
 };
-use thunderbolt_protocol::Artifact;
 use thunderbolt_wire::{CanonicalDigest as _, ChannelBindingV2, InvoiceId, ValidateWire as _};
 
 use crate::error::RedactedDebug;
@@ -16,7 +15,7 @@ use crate::primitives::{deserialize_hex_bounded, FixedHex32Wire};
 use crate::{FinalityVerifierProfileIdV2, Result, RpcCodecError};
 
 /// Maximum canonical materialized channel-state bytes returned by one status query.
-pub const MAX_SNAPSHOT_BYTES: usize = 12 * 1024 * 1024;
+pub const MAX_SNAPSHOT_BYTES: usize = MAX_CANONICAL_SNAPSHOT_BYTES_V2;
 /// Maximum opaque consensus receipt carried by the transport-neutral contract.
 pub const MAX_CONSENSUS_RECEIPT_BYTES: usize = 1024 * 1024;
 /// Minimum opaque ambiguity-token width.
@@ -228,8 +227,9 @@ where
 /// Opaque, bounded consensus proof returned by a concrete Ledger adapter.
 ///
 /// The bytes confer no authority by themselves. Only an implementation of
-/// [`crate::ExternalFinalityVerifierV2`] can turn a complete entry bundle into
-/// a verified finality capability.
+/// [`crate::ExternalFinalityVerifierV2`] can authenticate a compact block
+/// commitment and exact included entry, then issue a verified finality
+/// capability.
 #[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OpaqueConsensusReceiptV2 {
@@ -408,8 +408,8 @@ impl<'a> SnapshotReader<'a> {
         self.take(length)
     }
 
-    fn artifact(&mut self) -> Result<Artifact> {
-        Artifact::new(self.bytes()?).map_err(|_| RpcCodecError::InvalidField("snapshot artifact is invalid"))
+    fn artifact(&mut self) -> Result<ArtifactV2> {
+        ArtifactV2::new(self.bytes()?).map_err(|_| RpcCodecError::InvalidField("snapshot artifact is invalid"))
     }
 
     fn optional_u64(&mut self) -> Result<Option<u64>> {

@@ -1,5 +1,4 @@
 use super::*;
-use crate::Artifact;
 use bitcoin::Network;
 use proptest::prelude::*;
 use secp256k1::{Keypair, Secp256k1, SecretKey};
@@ -74,8 +73,18 @@ impl ExternalVerifierV2 for AcceptAll {
     }
 }
 
-fn artifact(byte: u8) -> Artifact {
-    Artifact::new([byte]).expect("bounded public test artifact")
+#[test]
+fn artifact_v2_has_an_independent_two_mib_bound() {
+    assert!(ArtifactV2::new(vec![0x51; MAX_ARTIFACT_BYTES_V2]).is_ok());
+    assert!(ArtifactV2::new(vec![0x51; MAX_ARTIFACT_BYTES_V2 + 1]).is_err());
+    assert_ne!(
+        std::any::TypeId::of::<crate::Artifact>(),
+        std::any::TypeId::of::<ArtifactV2>()
+    );
+}
+
+fn artifact(byte: u8) -> ArtifactV2 {
+    ArtifactV2::new([byte]).expect("bounded public test artifact")
 }
 
 fn invoice_id(index: u32) -> InvoiceIdV2 {
@@ -168,6 +177,32 @@ fn invoice_event(index: u32, holder_step: u64, expires_at_ms: Option<u64>) -> Ch
         invoice_proof: artifact(9),
         expires_at_ms: expires_at_ms.unwrap_or(10_000_000),
     })
+}
+
+const MAX_TOPOLOGY_INVOICE_EVENT_BYTES: usize = 1_705_843;
+
+fn max_topology_sized_invoice_event(index: u32, holder_step: u64) -> ChannelEventV2 {
+    sized_invoice_event(index, holder_step, MAX_TOPOLOGY_INVOICE_EVENT_BYTES)
+}
+
+fn sized_invoice_event(index: u32, holder_step: u64, target_bytes: usize) -> ChannelEventV2 {
+    let mut event = invoice_event(index, holder_step, None);
+    let baseline = event.canonical_bytes().expect("baseline Invoice event").len();
+    let ChannelEventV2::Invoice(invoice) = &mut event else {
+        unreachable!("fixture is Invoice")
+    };
+    let package_len = invoice
+        .committee_package
+        .as_bytes()
+        .len()
+        .checked_add(target_bytes - baseline)
+        .expect("fixture package length");
+    invoice.committee_package = ArtifactV2::new(vec![0x5a; package_len]).expect("sized Invoice package");
+    assert_eq!(
+        event.canonical_bytes().expect("sized Invoice event").len(),
+        target_bytes
+    );
+    event
 }
 
 fn transfer_event(snapshot: &ChannelSnapshotV2, index: u32) -> ChannelEventV2 {
@@ -462,6 +497,215 @@ fn pending_invoice_set_obeys_configured_bound() {
 }
 
 #[test]
+fn pending_invoice_byte_budget_accepts_four_max_topologies_and_rejects_five() {
+    let (reducer, mut snapshot) = opened();
+    for index in 1..=4 {
+        let event = max_topology_sized_invoice_event(index, snapshot.transfers_completed);
+        let signed = proposal(
+            &event,
+            snapshot.next_sequence().expect("next sequence"),
+            snapshot.head_entry_hash.clone(),
+            u64::from(index) + 10,
+            ActorRoleV2::Recipient,
+            u8::try_from(index + 100).expect("bounded nonce"),
+        );
+        snapshot = apply(
+            &reducer,
+            Some(&snapshot),
+            &signed,
+            &event,
+            test_history(1_000 + u64::from(index)),
+        )
+        .expect("maximum-topology Invoice fits cumulative budget")
+        .snapshot;
+    }
+    assert_eq!(
+        snapshot.pending_invoice_event_bytes().expect("pending byte total"),
+        4 * MAX_TOPOLOGY_INVOICE_EVENT_BYTES
+    );
+    assert!(snapshot.canonical_bytes().expect("bounded snapshot bytes").len() <= 12 * 1024 * 1024);
+    assert!(serde_json::to_vec(&snapshot).expect("bounded snapshot JSON").len() <= 24 * 1024 * 1024);
+
+    let fifth = max_topology_sized_invoice_event(5, snapshot.transfers_completed);
+    let fifth_signed = proposal(
+        &fifth,
+        snapshot.next_sequence().expect("next sequence"),
+        snapshot.head_entry_hash.clone(),
+        15,
+        ActorRoleV2::Recipient,
+        105,
+    );
+    assert_eq!(
+        apply(&reducer, Some(&snapshot), &fifth_signed, &fifth, test_history(1_005))
+            .expect_err("fifth maximum-topology Invoice exceeds byte budget"),
+        V2Error::PendingInvoiceBytesLimitReached {
+            limit: MAX_PENDING_INVOICE_EVENT_BYTES_V2,
+        }
+    );
+
+    let ChannelEventV2::Invoice(fifth_event) = fifth else {
+        unreachable!("fixture is Invoice")
+    };
+    let mut unreachable = snapshot;
+    let fifth_id = fifth_event.invoice_id.clone();
+    unreachable.pending_invoices.insert(
+        fifth_id.clone(),
+        PendingInvoiceV2 {
+            event: fifth_event.clone(),
+            invoice_id: fifth_id,
+            recipient: fifth_signed.body().participant_id().expect("participant"),
+            holder_step: fifth_event.holder_step,
+            created_at_ms: unreachable.last_block_time_ms,
+            expires_at_ms: fifth_event.expires_at_ms,
+            committed_entry_hash: fifth_signed.body().entry_hash().expect("entry hash"),
+        },
+    );
+    assert!(matches!(
+        unreachable.validate(),
+        Err(V2Error::InvalidSnapshot {
+            reason: "pending Invoice events exceed the cumulative byte bound"
+        })
+    ));
+    let oversized_snapshot = serde_json::to_vec(&unreachable).expect("oversized pending snapshot JSON");
+    let error = serde_json::from_slice::<ChannelSnapshotV2>(&oversized_snapshot)
+        .expect_err("cumulative pending bytes rejected during map decode");
+    assert!(error.to_string().contains("pending Invoice events exceed"));
+}
+
+#[test]
+fn retained_state_budget_closes_open_transfer_pending_and_query_sizes() {
+    const LOCK_BYTES: usize = 1_500_000;
+    const NEXT_ANCHOR_BYTES: usize = 1_000_000;
+    const NEXT_CIPHERTEXT_BYTES: usize =
+        MAX_RETAINED_CHANNEL_STATE_BYTES_V2 - LOCK_BYTES - NEXT_ANCHOR_BYTES - 4 * EVENT_BYTES_MAX;
+
+    let reducer = test_reducer();
+    let mut open = open_event();
+    let ChannelEventV2::Open(open_payload) = &mut open else {
+        unreachable!("fixture is Open")
+    };
+    open_payload.lock_key = ArtifactV2::new(vec![0x41; LOCK_BYTES]).expect("sized lock key");
+    let signed_open = proposal(&open, 0, EntryHashV2::zero(), 1, ActorRoleV2::Holder, 201);
+    let opened = apply(&reducer, None, &signed_open, &open, test_history(1_000))
+        .expect("sized Open applies")
+        .snapshot;
+
+    let (with_invoice, _, _) = add_invoice(&reducer, &opened, 90, 2, 1_001, None);
+    let mut transfer = transfer_event(&with_invoice, 90);
+    let ChannelEventV2::Transfer(transfer_payload) = &mut transfer else {
+        unreachable!("fixture is Transfer")
+    };
+    transfer_payload.next_holder_anchor = ArtifactV2::new(vec![0x42; NEXT_ANCHOR_BYTES]).expect("sized next anchor");
+    transfer_payload.next_holder_ciphertext =
+        ArtifactV2::new(vec![0x43; NEXT_CIPHERTEXT_BYTES]).expect("sized next ciphertext");
+    let signed_transfer = proposal(
+        &transfer,
+        with_invoice.next_sequence().expect("next sequence"),
+        with_invoice.head_entry_hash.clone(),
+        1,
+        ActorRoleV2::Holder,
+        202,
+    );
+    let after_transfer = apply(
+        &reducer,
+        Some(&with_invoice),
+        &signed_transfer,
+        &transfer,
+        test_history(1_002),
+    )
+    .expect("sized Transfer applies")
+    .snapshot;
+
+    let mut after_three = after_transfer;
+    for index in 1_u32..=3 {
+        let invoice = sized_invoice_event(index, after_three.transfers_completed, EVENT_BYTES_MAX);
+        let signed = proposal(
+            &invoice,
+            after_three.next_sequence().expect("next sequence"),
+            after_three.head_entry_hash.clone(),
+            u64::from(index) + 20,
+            ActorRoleV2::Recipient,
+            u8::try_from(index + 210).expect("bounded nonce"),
+        );
+        after_three = apply(
+            &reducer,
+            Some(&after_three),
+            &signed,
+            &invoice,
+            test_history(1_002 + u64::from(index)),
+        )
+        .expect("exact-size Invoice fits before boundary")
+        .snapshot;
+    }
+
+    let fourth = sized_invoice_event(4, after_three.transfers_completed, EVENT_BYTES_MAX);
+    let signed_fourth = proposal(
+        &fourth,
+        after_three.next_sequence().expect("next sequence"),
+        after_three.head_entry_hash.clone(),
+        24,
+        ActorRoleV2::Recipient,
+        214,
+    );
+    let mut one_byte_over = after_three.clone();
+    // This one-byte-larger pair is still a valid pre-fourth snapshot and could
+    // have been produced by the preceding Transfer; the fourth Invoice must be
+    // rejected before external verification or persistence.
+    one_byte_over.current_holder_ciphertext =
+        ArtifactV2::new(vec![0x43; NEXT_CIPHERTEXT_BYTES + 1]).expect("one-byte-larger current ciphertext");
+    one_byte_over
+        .validate()
+        .expect("pre-fourth state remains reachable within budget");
+    assert_eq!(
+        apply(
+            &reducer,
+            Some(&one_byte_over),
+            &signed_fourth,
+            &fourth,
+            test_history(1_006),
+        )
+        .expect_err("fourth Invoice exceeds retained-state budget by one byte"),
+        V2Error::RetainedStateBytesLimitReached {
+            limit: MAX_RETAINED_CHANNEL_STATE_BYTES_V2,
+        }
+    );
+
+    let exact = apply(
+        &reducer,
+        Some(&after_three),
+        &signed_fourth,
+        &fourth,
+        test_history(1_006),
+    )
+    .expect("exact retained-state boundary applies")
+    .snapshot;
+    assert_eq!(
+        exact.pending_invoice_event_bytes().expect("pending bytes"),
+        4 * EVENT_BYTES_MAX
+    );
+    assert_eq!(
+        exact.retained_state_bytes().expect("retained bytes"),
+        MAX_RETAINED_CHANNEL_STATE_BYTES_V2
+    );
+    let snapshot_bytes = exact.canonical_bytes().expect("snapshot bytes");
+    let snapshot_query_json = serde_json::to_vec(&exact).expect("snapshot query JSON");
+    assert_eq!(snapshot_bytes.len(), 11_535_033);
+    assert_eq!(snapshot_query_json.len(), 23_070_745);
+    assert!(snapshot_bytes.len() <= MAX_CANONICAL_SNAPSHOT_BYTES_V2);
+    assert!(snapshot_query_json.len() <= 24 * 1024 * 1024);
+
+    let mut invalid_snapshot = exact;
+    invalid_snapshot.current_holder_ciphertext =
+        ArtifactV2::new(vec![0x43; NEXT_CIPHERTEXT_BYTES + 1]).expect("one-byte-larger retained state");
+    assert!(matches!(
+        invalid_snapshot.validate(),
+        Err(V2Error::InvalidSnapshot {
+            reason: "retained channel state exceeds the cumulative byte bound"
+        })
+    ));
+}
+
+#[test]
 fn committee_topology_matches_active_wire_bound() {
     assert!(super::types::validate_committee_topology(MAX_COMMITTEE_MEMBERS_V2, 171).is_ok());
     assert_eq!(
@@ -585,6 +829,80 @@ fn snapshot_validation_rejects_unreachable_pending_state() {
 }
 
 #[test]
+fn snapshot_deserialize_bounds_pending_count_and_rejects_duplicate_keys() {
+    let (_, mut snapshot) = opened();
+    let recipient = snapshot.current_holder.clone();
+    for index in 1_u32..=u32::try_from(ABSOLUTE_MAX_PENDING_INVOICES_V2 + 1).expect("bounded count") {
+        let ChannelEventV2::Invoice(event) = invoice_event(index, 0, None) else {
+            unreachable!("fixture is Invoice")
+        };
+        let invoice_id = event.invoice_id.clone();
+        snapshot.pending_invoices.insert(
+            invoice_id.clone(),
+            PendingInvoiceV2 {
+                event,
+                invoice_id,
+                recipient: recipient.clone(),
+                holder_step: 0,
+                created_at_ms: 1_000,
+                expires_at_ms: 10_000_000,
+                committed_entry_hash: EntryHashV2::from_bytes([u8::try_from(index).expect("bounded index"); 32])
+                    .expect("entry hash"),
+            },
+        );
+    }
+    let oversized = serde_json::to_vec(&snapshot).expect("oversized snapshot JSON");
+    let count_error = serde_json::from_slice::<ChannelSnapshotV2>(&oversized).expect_err("count must fail early");
+    assert!(count_error.to_string().contains("pending Invoice count"));
+
+    let (_, base) = opened();
+    let event = invoice_event(1, 0, None);
+    let ChannelEventV2::Invoice(invoice) = event else {
+        unreachable!("fixture is Invoice")
+    };
+    let key = invoice.invoice_id.clone();
+    let pending = PendingInvoiceV2 {
+        event: invoice,
+        invoice_id: key.clone(),
+        recipient: base.current_holder.clone(),
+        holder_step: 0,
+        created_at_ms: 1_000,
+        expires_at_ms: 10_000_000,
+        committed_entry_hash: EntryHashV2::from_bytes([0x55; 32]).expect("entry hash"),
+    };
+    let empty = serde_json::to_string(&base).expect("empty snapshot JSON");
+    let duplicate_map = format!(
+        "\"pending_invoices\":{{{}:{},{}:{}}}",
+        serde_json::to_string(&key).expect("map key"),
+        serde_json::to_string(&pending).expect("pending record"),
+        serde_json::to_string(&key).expect("map key"),
+        serde_json::to_string(&pending).expect("pending record")
+    );
+    let duplicate = empty.replacen("\"pending_invoices\":{}", &duplicate_map, 1);
+    assert_ne!(duplicate, empty);
+    let duplicate_error = serde_json::from_str::<ChannelSnapshotV2>(&duplicate).expect_err("duplicate key rejected");
+    assert!(duplicate_error.to_string().contains("duplicate pending Invoice"));
+}
+
+#[test]
+fn invoice_deserialize_stops_when_artifact_sum_exceeds_event_bound() {
+    let large = EVENT_BYTES_MAX / 2 + 1;
+    let event = InvoiceEventV2 {
+        invoice_id: invoice_id(1),
+        holder_step: 0,
+        recipient_encryption_key: ArtifactV2::new(vec![0x41; large]).expect("first large artifact"),
+        public_delta: ArtifactV2::new(vec![0x42; large]).expect("second large artifact"),
+        recipient_ciphertext: artifact(7),
+        committee_package: artifact(8),
+        invoice_proof: artifact(9),
+        expires_at_ms: 10_000,
+    };
+    let encoded = serde_json::to_vec(&event).expect("oversized Invoice JSON");
+    let error = serde_json::from_slice::<InvoiceEventV2>(&encoded).expect_err("artifact sum rejected");
+    assert!(error.to_string().contains("Invoice artifacts exceed"));
+}
+
+#[test]
 fn canonical_event_size_is_checked_before_encoding() {
     let mut event = open_event();
     let baseline = event.canonical_bytes().expect("baseline event").len();
@@ -592,7 +910,7 @@ fn canonical_event_size_is_checked_before_encoding() {
         unreachable!("fixture is Open")
     };
     let exact_proof_len = 1 + (EVENT_BYTES_MAX - baseline);
-    open.open_proof = Artifact::new(vec![0x5a; exact_proof_len]).expect("exact-size proof");
+    open.open_proof = ArtifactV2::new(vec![0x5a; exact_proof_len]).expect("exact-size proof");
     assert_eq!(
         event.canonical_bytes().expect("exact maximum event").len(),
         EVENT_BYTES_MAX
@@ -600,7 +918,7 @@ fn canonical_event_size_is_checked_before_encoding() {
     let ChannelEventV2::Open(open) = &mut event else {
         unreachable!("fixture is Open")
     };
-    open.open_proof = Artifact::new(vec![0x5a; exact_proof_len + 1]).expect("maximum plus one proof");
+    open.open_proof = ArtifactV2::new(vec![0x5a; exact_proof_len + 1]).expect("maximum plus one proof");
     assert_eq!(
         event.canonical_bytes().expect_err("oversized event rejected"),
         V2Error::InvalidCanonicalEvent
@@ -617,7 +935,7 @@ proptest! {
         step in any::<u64>(),
         expiry in 1_u64..u64::MAX,
     ) {
-        let artifact = Artifact::new(artifact_bytes).expect("bounded generated artifact");
+        let artifact = ArtifactV2::new(artifact_bytes).expect("bounded generated artifact");
         let event = ChannelEventV2::Invoice(InvoiceEventV2 {
             invoice_id: HexBytes::from_bytes("generated Invoice id", invoice).expect("bounded Invoice id"),
             holder_step: step,
@@ -719,7 +1037,7 @@ proptest! {
         let ChannelEventV2::Invoice(changed_invoice) = &mut changed else {
             unreachable!("fixture is Invoice")
         };
-        changed_invoice.invoice_proof = Artifact::new([delta, 0]).expect("distinct changed proof");
+        changed_invoice.invoice_proof = ArtifactV2::new([delta, 0]).expect("distinct changed proof");
         let changed_signed = proposal(
             &changed,
             1,

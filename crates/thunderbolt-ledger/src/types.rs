@@ -14,8 +14,17 @@ pub const LEDGER_PROTOCOL_VERSION_V2: u16 = 2;
 pub const REQUEST_NONCE_MIN: usize = 16;
 /// Maximum client request nonce width.
 pub const REQUEST_NONCE_MAX: usize = 64;
+/// Maximum compact JSON accepted for one signed proposal or correlated submit request.
+pub const MAX_SIGNED_PROPOSAL_JSON_BYTES: usize = 4 * 1024 * 1024;
+/// Reviewed allowance for all signed-proposal and submit-request JSON outside
+/// the hexadecimal canonical event.
+pub const SIGNED_PROPOSAL_RPC_METADATA_ALLOWANCE_BYTES: usize = 4 * 1024;
 /// Maximum canonical event payload committed by one proposal.
-pub const EVENT_BYTES_MAX: usize = 256 * 1024;
+///
+/// JSON renders the event as hexadecimal, so two encoded bytes are required per
+/// event byte. Reserving the reviewed metadata allowance keeps every maximum
+/// event closed under both signed-proposal and submit-request encoding.
+pub const EVENT_BYTES_MAX: usize = (MAX_SIGNED_PROPOSAL_JSON_BYTES - SIGNED_PROPOSAL_RPC_METADATA_ALLOWANCE_BYTES) / 2;
 /// Conservative maximum for a CometBFT-compatible Ledger chain id.
 pub const LEDGER_CHAIN_ID_MAX: usize = 50;
 

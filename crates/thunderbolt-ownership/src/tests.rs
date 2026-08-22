@@ -6,10 +6,7 @@ use secp::Scalar;
 use thunderbolt_ledger::{
     ActorKeyAlgorithmV2, ActorPublicKeyV2, EntryHashV2, LedgerChainIdV2, ParticipantIdV2, EVENT_BYTES_MAX,
 };
-use thunderbolt_protocol::{
-    v2::{ChannelEventV2, ChannelPhaseV2, ChannelSnapshotV2, FinalizeEventV2},
-    Artifact,
-};
+use thunderbolt_protocol::v2::{ArtifactV2, ChannelEventV2, ChannelPhaseV2, ChannelSnapshotV2, FinalizeEventV2};
 use thunderbolt_wire::{
     AnchorParameterSuiteIdV2, BitcoinGenesisHashV2, ChannelBindingV2, CommitteeDescriptorDigestV2, FundingOutpointV2,
     InvoiceId, ProtocolSuiteIdV2,
@@ -85,12 +82,12 @@ fn snapshot(secret: Scalar, step: u64) -> Result<(ChannelSnapshotV2, ActorPublic
             capacity_sat: 100_000,
             committee_member_count: 3,
             committee_threshold: 2,
-            lock_key: Artifact::new(scalar(23)?.base_point_mul().serialize())
+            lock_key: ArtifactV2::new(scalar(23)?.base_point_mul().serialize())
                 .map_err(|_| OwnershipError::InvalidContext("test lock key"))?,
             current_holder,
-            current_holder_anchor: Artifact::new((anchor_base * secret).serialize())
+            current_holder_anchor: ArtifactV2::new((anchor_base * secret).serialize())
                 .map_err(|_| OwnershipError::InvalidContext("test anchor"))?,
-            current_holder_ciphertext: Artifact::new([0x99])
+            current_holder_ciphertext: ArtifactV2::new([0x99])
                 .map_err(|_| OwnershipError::InvalidContext("test ciphertext"))?,
             transfers_completed: step,
             pending_invoices: BTreeMap::new(),
@@ -167,12 +164,12 @@ fn maximum_transaction_and_proof_fit_exact_protocol_event_cap() -> std::result::
     let context = trusted_context(scalar(5)?, 0, closing.clone())?;
     let witness = OwnershipWitness::from_bytes(scalar_bytes(5))?;
     let envelope = prove_context_with_nonce_bytes(context.data.clone(), &witness, scalar_bytes(7))?;
-    let ownership_proof = Artifact::new(envelope.to_bytes()?)?;
+    let ownership_proof = ArtifactV2::new(envelope.to_bytes()?)?;
     let mut event = ChannelEventV2::Finalize(FinalizeEventV2 {
         closing_txid: [0x42; 32],
-        closing_transaction: Artifact::new(closing)?,
+        closing_transaction: ArtifactV2::new(closing)?,
         ownership_proof,
-        committee_attestation: Artifact::new([0x01])?,
+        committee_attestation: ArtifactV2::new([0x01])?,
     });
     let baseline = event.canonical_bytes()?.len();
     assert!(baseline < EVENT_BYTES_MAX);
@@ -180,7 +177,7 @@ fn maximum_transaction_and_proof_fit_exact_protocol_event_cap() -> std::result::
     let ChannelEventV2::Finalize(finalize) = &mut event else {
         return Err(OwnershipError::InvalidContext("test Finalize event").into());
     };
-    finalize.committee_attestation = Artifact::new(vec![0x01; 1 + remaining])?;
+    finalize.committee_attestation = ArtifactV2::new(vec![0x01; 1 + remaining])?;
     assert_eq!(event.canonical_bytes()?.len(), EVENT_BYTES_MAX);
     Ok(())
 }

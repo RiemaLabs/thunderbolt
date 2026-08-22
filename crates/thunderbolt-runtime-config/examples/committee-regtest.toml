@@ -1,0 +1,91 @@
+config_version = 2
+role = "committee"
+
+[identity]
+network = "regtest"
+ledger_chain_id = "thunderbolt-regtest-1"
+deployment_id_hex = "7468756e646572626f6c742d72656774657374"
+protocol_suite_id = "1111111111111111111111111111111111111111111111111111111111111111"
+bitcoin_genesis_hash = "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
+committee_epoch = 9
+committee_descriptor_digest = "2222222222222222222222222222222222222222222222222222222222222222"
+anchor_parameter_suite_id = "3333333333333333333333333333333333333333333333333333333333333333"
+runtime_profile_id = "4ba1fc95b531329ae4161c164302210a740b60e9071859687aa64d3ebbad53c2"
+finality_verifier_profile_id = "5e4d04cd79e904b5457c689d6c1f810f01c81c156ec637af30126f7a9fbfe7b8"
+finality_policy_digest = "50d4e01279dbb7fcf6cb0e8a7d407b7713d86b83346b13c60f13b52f8045728d"
+application_version = 2
+
+[capabilities]
+deployment_mode = "non_production"
+holder_signing = "unavailable"
+committee_threshold_signing = "unavailable"
+paillier_profile = "legacy_rc2048_v1"
+
+[paths]
+data_dir = "/var/lib/thunderbolt/regtest/committee-01"
+control_dir = "/run/user/1000/thunderbolt-regtest-committee-01"
+control_socket = "/run/user/1000/thunderbolt-regtest-committee-01/control.sock"
+service_db = "/var/lib/thunderbolt/regtest/committee-01/service.sqlite3"
+vault_file = "/var/lib/thunderbolt/regtest/committee-01/vault.tbks"
+vault_password_file = { path = "/etc/thunderbolt/regtest/committee-01-vault-password" }
+vault_checkpoint_provider = { manifest_path = "/etc/thunderbolt/regtest/committee-01-vault-checkpoint-provider.json", manifest_sha256 = "4747474747474747474747474747474747474747474747474747474747474747", required_provider_id = "417af1de2cc3a40d610071d6850b942a37cb57c1c218ccbd187326aa3fee271b", required_trust_domain_id = "64c0515f27e5fb2acdeff9635e785eb519dbeaa4bbb3e013e80d6a95a5a74630", policy_profile_id = "4ba1fc95b531329ae4161c164302210a740b60e9071859687aa64d3ebbad53c2" }
+trust_coordinator_db = "/var/lib/thunderbolt/regtest/committee-01/comet-trust.sqlite3"
+trust_checkpoint_provider = { manifest_path = "/etc/thunderbolt/regtest/committee-01-trust-checkpoint-provider.json", manifest_sha256 = "5757575757575757575757575757575757575757575757575757575757575757", required_provider_id = "a00f8446597a24ffe2c4f46510c0a62abd91cc431182e9e7c8972ddb6b5d6ef2", required_trust_domain_id = "40a2d3e139584ca8b965475c5a2f7c8b9ec7ca8c4d3c00145cec6f5146bdcd23", policy_profile_id = "5e4d04cd79e904b5457c689d6c1f810f01c81c156ec637af30126f7a9fbfe7b8" }
+trust_root_light_block = { path = "/etc/thunderbolt/regtest/comet-root.json", sha256 = "6666666666666666666666666666666666666666666666666666666666666666" }
+bitcoin_cookie_file = { path = "/etc/thunderbolt/regtest/bitcoin-cookie.ref" }
+committee_descriptor = { path = "/etc/thunderbolt/regtest/committee-descriptor.json", sha256 = "2222222222222222222222222222222222222222222222222222222222222222" }
+anchor_suite_registry = { path = "/etc/thunderbolt/regtest/anchor-suite.json", sha256 = "3333333333333333333333333333333333333333333333333333333333333333" }
+profile_manifest = { path = "/etc/thunderbolt/regtest/runtime-profile.json", sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+
+[control]
+max_frame_bytes = 1048576
+max_concurrent_requests = 32
+max_inflight_bytes = 8388608
+io_timeout_ms = 5000
+handler_timeout_ms = 4000
+shutdown_grace_ms = 10000
+
+[bitcoin]
+endpoint = "http://127.0.0.1:18443/"
+request_timeout_ms = 15000
+connect_timeout_ms = 5000
+retry_delay_ms = 100
+max_request_bytes = 4194304
+max_response_bytes = 4194304
+read_attempts = 3
+max_chain_sync_blocks = 2016
+
+[comet]
+coordinator_identity = "7272727272727272727272727272727272727272727272727272727272727272"
+source_version = 1
+primary = { endpoint = "http://127.0.0.1:26657/", node_id = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1", transport_binding_sha256 = "8181818181818181818181818181818181818181818181818181818181818181" }
+witnesses = [{ endpoint = "http://127.0.0.1:27657/", node_id = "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2", transport_binding_sha256 = "8282828282828282828282828282828282828282828282828282828282828282" }]
+trust_root_height = 10
+trust_root_header_hash = "9999999999999999999999999999999999999999999999999999999999999999"
+trusting_period_seconds = 120
+clock_drift_ms = 1000
+max_validators = 16
+max_adjacent_headers = 64
+min_witnesses = 1
+max_witnesses = 2
+busy_timeout_ms = 5000
+max_trace_encoded_bytes = 1048576
+max_execution_encoded_bytes = 8388608
+max_proof_bundle_bytes = 16777216
+operation_timeout_ms = 10000
+history_max_transitions = 64
+history_max_proof_bytes = 67108864
+history_max_requests = 4096
+rpc_response_bytes = 262144
+rpc_aggregate_bytes = 786432
+rpc_retry_attempts = 3
+rpc_retry_base_delay_ms = 100
+rpc_validator_page_size = 64
+rpc_max_headers = 64
+rpc_max_header_bytes = 65536
+
+[committee]
+member_id = 1
+max_inbox_rows = 10000
+max_outbox_rows = 10000
+fetch_batch_size = 64

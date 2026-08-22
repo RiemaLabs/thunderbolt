@@ -12,8 +12,9 @@ use thunderbolt_ledger_app::{
     ApplicationError, ApplicationOptions, BlockInputV2, LedgerApplication, APPLICATION_VERSION_V2,
 };
 use thunderbolt_protocol::v2::{
-    ExternalVerifierV2, FinalizeVerificationRequestV2, InvoiceVerificationRequestV2, OpenVerificationRequestV2,
-    ProtocolLimitsV2, TransferVerificationRequestV2,
+    ArtifactV2, ChannelEventV2, ExternalVerifierV2, FinalizeVerificationRequestV2, InvoiceVerificationRequestV2,
+    OpenVerificationRequestV2, PendingInvoiceV2, ProtocolLimitsV2, TransferVerificationRequestV2,
+    MAX_ARTIFACT_BYTES_V2,
 };
 
 #[derive(Debug, Default)]
@@ -146,6 +147,32 @@ fn open_proposal(channel_byte: u8) -> thunderbolt_ledger::SignedProposalV2 {
         ActorRoleV2::Holder,
         [1; 16],
     )
+}
+
+const MAX_TOPOLOGY_INVOICE_EVENT_BYTES: usize = 1_705_843;
+
+fn max_topology_sized_invoice_event(index: u32, holder_step: u64, expires_at_ms: u64) -> ChannelEventV2 {
+    sized_invoice_event(index, holder_step, expires_at_ms, MAX_TOPOLOGY_INVOICE_EVENT_BYTES)
+}
+
+fn sized_invoice_event(index: u32, holder_step: u64, expires_at_ms: u64, target_bytes: usize) -> ChannelEventV2 {
+    let mut event = invoice_event(index, holder_step, expires_at_ms);
+    let baseline = event.canonical_bytes().expect("baseline Invoice event").len();
+    let ChannelEventV2::Invoice(invoice) = &mut event else {
+        panic!("fixture is Invoice")
+    };
+    let package_len = invoice
+        .committee_package
+        .as_bytes()
+        .len()
+        .checked_add(target_bytes - baseline)
+        .expect("fixture package length");
+    invoice.committee_package = ArtifactV2::new(vec![0x5a; package_len]).expect("sized Invoice package");
+    assert_eq!(
+        event.canonical_bytes().expect("sized Invoice event").len(),
+        target_bytes
+    );
+    event
 }
 
 fn sqlite_bytes(path: &Path) -> Result<Vec<Vec<u8>>, Box<dyn Error>> {
@@ -638,6 +665,155 @@ fn schema_reopen_pins_chain_and_protocol_limits() -> Result<(), Box<dyn Error>> 
             },
         ),
         Err(ApplicationError::ConfigurationMismatch)
+    ));
+    Ok(())
+}
+
+#[test]
+fn restart_rejects_snapshot_above_pending_invoice_byte_budget() -> Result<(), Box<dyn Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("pending-budget.sqlite3");
+    let app = LedgerApplication::open(&path, chain_id(), ApplicationOptions::default())?;
+    let channel = binding(93);
+    let open = proposal(
+        channel.clone(),
+        &open_event(),
+        0,
+        EntryHashV2::zero(),
+        1,
+        ActorRoleV2::Holder,
+        [1; 16],
+    );
+    let first = app.apply_block(block(1, 1_000, zero_app_hash(), vec![open])?, &AcceptAll)?;
+    let invoice = invoice_event(1, 0, 10_000);
+    let signed_invoice = proposal(
+        channel.clone(),
+        &invoice,
+        1,
+        first.block().entries()[0].metadata().entry_hash().clone(),
+        2,
+        ActorRoleV2::Recipient,
+        [2; 16],
+    );
+    let _ = app.apply_block(
+        block(2, 1_001, first.block().app_hash().clone(), vec![signed_invoice.clone()])?,
+        &AcceptAll,
+    )?;
+    let mut snapshot = app.channel(&channel)?.ok_or("channel snapshot")?;
+    snapshot.pending_invoices.clear();
+    let recipient = signed_invoice.body().participant_id()?;
+    for index in 1_u32..=5 {
+        let event = max_topology_sized_invoice_event(index, 0, 10_000);
+        let ChannelEventV2::Invoice(invoice) = event else {
+            panic!("fixture is Invoice")
+        };
+        let invoice_id = invoice.invoice_id.clone();
+        snapshot.pending_invoices.insert(
+            invoice_id.clone(),
+            PendingInvoiceV2 {
+                event: invoice,
+                invoice_id,
+                recipient: recipient.clone(),
+                holder_step: 0,
+                created_at_ms: 1_001,
+                expires_at_ms: 10_000,
+                committed_entry_hash: EntryHashV2::from_bytes([u8::try_from(index)?; 32])?,
+            },
+        );
+    }
+    assert!(snapshot.validate().is_err());
+    let encoded = serde_json::to_vec(&snapshot)?;
+    drop(app);
+
+    let connection = rusqlite::Connection::open(&path)?;
+    connection.execute(
+        "UPDATE channel_snapshots SET snapshot_json=?1 WHERE channel_context_id=?2",
+        rusqlite::params![encoded, channel.context_id()?.as_slice()],
+    )?;
+    drop(connection);
+
+    let reopened = LedgerApplication::open(&path, chain_id(), ApplicationOptions::default())?;
+    assert!(matches!(
+        reopened.channel(&channel),
+        Err(ApplicationError::CorruptData(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn restart_rejects_snapshot_above_retained_state_byte_budget() -> Result<(), Box<dyn Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("retained-budget.sqlite3");
+    let app = LedgerApplication::open(&path, chain_id(), ApplicationOptions::default())?;
+    let channel = binding(94);
+    let open = proposal(
+        channel.clone(),
+        &open_event(),
+        0,
+        EntryHashV2::zero(),
+        1,
+        ActorRoleV2::Holder,
+        [1; 16],
+    );
+    let first = app.apply_block(block(1, 1_000, zero_app_hash(), vec![open])?, &AcceptAll)?;
+    let invoice = invoice_event(1, 0, 10_000);
+    let signed_invoice = proposal(
+        channel.clone(),
+        &invoice,
+        1,
+        first.block().entries()[0].metadata().entry_hash().clone(),
+        2,
+        ActorRoleV2::Recipient,
+        [2; 16],
+    );
+    let _ = app.apply_block(
+        block(2, 1_001, first.block().app_hash().clone(), vec![signed_invoice.clone()])?,
+        &AcceptAll,
+    )?;
+    let mut snapshot = app.channel(&channel)?.ok_or("channel snapshot")?;
+    snapshot.pending_invoices.clear();
+    snapshot.lock_key = ArtifactV2::new(vec![0x41; MAX_ARTIFACT_BYTES_V2])?;
+    snapshot.current_holder_anchor = ArtifactV2::new(vec![0x42; 1024 * 1024])?;
+    snapshot.current_holder_ciphertext = ArtifactV2::new(vec![0x43; 256 * 1024])?;
+    let recipient = signed_invoice.body().participant_id()?;
+    for index in 1_u32..=4 {
+        let event = sized_invoice_event(index, 0, 10_000, thunderbolt_ledger::EVENT_BYTES_MAX);
+        let ChannelEventV2::Invoice(invoice) = event else {
+            panic!("fixture is Invoice")
+        };
+        let invoice_id = invoice.invoice_id.clone();
+        snapshot.pending_invoices.insert(
+            invoice_id.clone(),
+            PendingInvoiceV2 {
+                event: invoice,
+                invoice_id,
+                recipient: recipient.clone(),
+                holder_step: 0,
+                created_at_ms: 1_001,
+                expires_at_ms: 10_000,
+                committed_entry_hash: EntryHashV2::from_bytes([u8::try_from(index)?; 32])?,
+            },
+        );
+    }
+    assert_eq!(
+        snapshot.pending_invoice_event_bytes()?,
+        4 * thunderbolt_ledger::EVENT_BYTES_MAX
+    );
+    assert!(snapshot.validate().is_err());
+    let encoded = serde_json::to_vec(&snapshot)?;
+    drop(app);
+
+    let connection = rusqlite::Connection::open(&path)?;
+    connection.execute(
+        "UPDATE channel_snapshots SET snapshot_json=?1 WHERE channel_context_id=?2",
+        rusqlite::params![encoded, channel.context_id()?.as_slice()],
+    )?;
+    drop(connection);
+
+    let reopened = LedgerApplication::open(&path, chain_id(), ApplicationOptions::default())?;
+    assert!(matches!(
+        reopened.channel(&channel),
+        Err(ApplicationError::CorruptData(_))
     ));
     Ok(())
 }

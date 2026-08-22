@@ -1,0 +1,74 @@
+config_version = 2
+role = "ledger"
+
+[identity]
+network = "regtest"
+ledger_chain_id = "thunderbolt-regtest-1"
+deployment_id_hex = "7468756e646572626f6c742d72656774657374"
+protocol_suite_id = "1111111111111111111111111111111111111111111111111111111111111111"
+bitcoin_genesis_hash = "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
+committee_epoch = 9
+committee_descriptor_digest = "2222222222222222222222222222222222222222222222222222222222222222"
+anchor_parameter_suite_id = "3333333333333333333333333333333333333333333333333333333333333333"
+runtime_profile_id = "4ba1fc95b531329ae4161c164302210a740b60e9071859687aa64d3ebbad53c2"
+finality_verifier_profile_id = "5e4d04cd79e904b5457c689d6c1f810f01c81c156ec637af30126f7a9fbfe7b8"
+finality_policy_digest = "50d4e01279dbb7fcf6cb0e8a7d407b7713d86b83346b13c60f13b52f8045728d"
+application_version = 2
+
+[capabilities]
+deployment_mode = "non_production"
+holder_signing = "unavailable"
+committee_threshold_signing = "unavailable"
+paillier_profile = "legacy_rc2048_v1"
+
+[paths]
+data_dir = "/var/lib/thunderbolt/regtest/ledger"
+control_dir = "/run/user/1000/thunderbolt-regtest-ledger"
+control_socket = "/run/user/1000/thunderbolt-regtest-ledger/control.sock"
+application_db = "/var/lib/thunderbolt/regtest/ledger/application.sqlite3"
+bitcoin_cookie_file = { path = "/etc/thunderbolt/regtest/bitcoin-cookie.ref" }
+committee_descriptor = { path = "/etc/thunderbolt/regtest/committee-descriptor.json", sha256 = "2222222222222222222222222222222222222222222222222222222222222222" }
+anchor_suite_registry = { path = "/etc/thunderbolt/regtest/anchor-suite.json", sha256 = "3333333333333333333333333333333333333333333333333333333333333333" }
+profile_manifest = { path = "/etc/thunderbolt/regtest/runtime-profile.json", sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+
+[control]
+max_frame_bytes = 1048576
+max_concurrent_requests = 32
+max_inflight_bytes = 8388608
+io_timeout_ms = 5000
+handler_timeout_ms = 4000
+shutdown_grace_ms = 10000
+
+[bitcoin]
+endpoint = "http://127.0.0.1:18443/"
+request_timeout_ms = 15000
+connect_timeout_ms = 5000
+retry_delay_ms = 100
+max_request_bytes = 4194304
+max_response_bytes = 4194304
+read_attempts = 3
+max_chain_sync_blocks = 2016
+
+[application]
+busy_timeout_ms = 5000
+max_entries_per_channel = 1000000
+max_pending_invoices = 8
+max_invoice_ttl_ms = 86400000
+
+[abci]
+bind_address = "127.0.0.1:26658"
+max_frame_bytes = 27262976
+mempool_max_transactions = 4096
+mempool_max_bytes = 25165824
+admission_requests_per_second = 1000
+max_connections = 32
+minimum_fee = 1
+fatal_exit_code = 86
+supervisor_max_restarts = 5
+supervisor_window_seconds = 60
+supervisor_backoff_ms = 1000
+
+[ledger_profiles]
+static_verifier_profile_id = "b1e18cafc550975a6602a8311b016bc3ad9b2580975ff427eb1da9b0af17359b"
+deployment_descriptor_digest = "36fc734f78f1fb5fdcb380ae7905d6871144063db36f2846bb6412dfde3e1eb7"
+consensus_profile_digest = "81461d89549ebcc121f89b19f80148d0f2b1c80f3c08cac31530dd58b6e9a5e0"

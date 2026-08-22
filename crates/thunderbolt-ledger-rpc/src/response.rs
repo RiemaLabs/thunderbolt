@@ -3,8 +3,9 @@ use std::error::Error;
 use serde::de::{Error as _, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use thunderbolt_ledger::{
-    ActorRoleV2, EntryHashV2, EntryMerkleProofV2, EventDigestV2, EventKindV2, ExecutedBlockV2, ExecutedEntryMetadataV2,
-    ExecutedEntryV2, LedgerChainIdV2, ParticipantIdV2, ProposalDigestV2, RequestDigestV2, MAX_BLOCK_ENTRIES,
+    ActorRoleV2, EntryHashV2, EntryMerkleProofV2, EventDigestV2, EventKindV2, ExecutedBlockCommitmentV2,
+    ExecutedEntryMetadataV2, ExecutedEntryV2, LedgerChainIdV2, ParticipantIdV2, ProposalDigestV2, RequestDigestV2,
+    MAX_BLOCK_ENTRIES,
 };
 use thunderbolt_protocol::v2::StateHashV2;
 use thunderbolt_wire::ChannelBindingV2;
@@ -383,13 +384,13 @@ pub(crate) fn decode_channel_status_response_value(value: serde_json::Value) -> 
 
 /// Exact finality-carrying entry material returned by a finalized lookup.
 ///
-/// Deserialization recomputes the deterministic block and verifies exact entry
-/// equality and its ordered Merkle proof. Those checks still do not establish
-/// consensus finality.
+/// Deserialization revalidates the compact block commitment, re-derives the
+/// exact entry metadata, and verifies its ordered Merkle proof. Those checks
+/// still do not establish consensus finality.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FinalizedEntryBundleV2 {
-    block: ExecutedBlockV2,
+    commitment: ExecutedBlockCommitmentV2,
     entry: ExecutedEntryV2,
     proof: EntryMerkleProofV2,
     consensus_receipt: OpaqueConsensusReceiptV2,
@@ -398,7 +399,7 @@ pub struct FinalizedEntryBundleV2 {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FinalizedEntryBundleInput {
-    block: ExecutedBlockV2,
+    commitment: ExecutedBlockCommitmentV2,
     entry: ExecutedEntryV2,
     proof: EntryMerkleProofV2,
     #[serde(deserialize_with = "deserialize_opaque_consensus_receipt")]
@@ -407,40 +408,33 @@ struct FinalizedEntryBundleInput {
 
 impl FinalizedEntryBundleInput {
     fn into_bundle(self) -> Result<FinalizedEntryBundleV2> {
-        FinalizedEntryBundleV2::new(self.block, self.entry, self.proof, self.consensus_receipt)
+        FinalizedEntryBundleV2::new(self.commitment, self.entry, self.proof, self.consensus_receipt)
     }
 }
 
 impl FinalizedEntryBundleV2 {
     /// Constructs and deterministically validates a finality-carrying bundle.
     pub fn new(
-        block: ExecutedBlockV2,
+        commitment: ExecutedBlockCommitmentV2,
         entry: ExecutedEntryV2,
         proof: EntryMerkleProofV2,
         consensus_receipt: OpaqueConsensusReceiptV2,
     ) -> Result<Self> {
-        let index = usize::try_from(entry.metadata().block_index())
-            .map_err(|_| RpcCodecError::InvalidField("entry index does not fit usize"))?;
-        if block.entries().get(index) != Some(&entry) {
-            return Err(RpcCodecError::BindingMismatch(
-                "finalized entry is not the exact entry at its block index",
-            ));
-        }
-        proof.verify(entry.metadata(), &block)?;
+        proof.verify_entry_against_commitment(&entry, &commitment)?;
         Ok(Self {
-            block,
+            commitment,
             entry,
             proof,
             consensus_receipt,
         })
     }
 
-    /// Returns the deterministic execution output, not a finality capability.
-    pub const fn block(&self) -> &ExecutedBlockV2 {
-        &self.block
+    /// Returns the compact deterministic execution commitment, not finality.
+    pub const fn commitment(&self) -> &ExecutedBlockCommitmentV2 {
+        &self.commitment
     }
 
-    /// Returns the exact entry duplicated from the checked block position.
+    /// Returns the exact entry whose metadata and inclusion were re-derived.
     pub const fn entry(&self) -> &ExecutedEntryV2 {
         &self.entry
     }
@@ -467,7 +461,7 @@ impl FinalizedEntryBundleV2 {
             return Err(FinalityCapabilityError::ProfileMismatch);
         }
         verifier
-            .verify(&self.block, &self.entry, &self.proof, &self.consensus_receipt)
+            .verify(&self.commitment, &self.entry, &self.proof, &self.consensus_receipt)
             .map_err(FinalityCapabilityError::Verifier)?;
         Ok(VerifiedFinalizedEntryV2 { bundle: self })
     }
@@ -491,7 +485,8 @@ where
 ///
 /// A production implementation must bind the configured chain and trust root,
 /// validator quorum or light-client header continuity, height, time, app hash,
-/// application version two, exact entry metadata, and the supplied Merkle proof.
+/// application version two, every compact commitment field (including the app
+/// hash), exact entry metadata, and the supplied Merkle proof.
 pub trait ExternalFinalityVerifierV2: Send + Sync {
     /// Non-secret verification error.
     type Error: Error + Send + Sync + 'static;
@@ -502,7 +497,7 @@ pub trait ExternalFinalityVerifierV2: Send + Sync {
     /// Verifies an opaque receipt against all deterministic bundle components.
     fn verify(
         &self,
-        block: &ExecutedBlockV2,
+        commitment: &ExecutedBlockCommitmentV2,
         entry: &ExecutedEntryV2,
         proof: &EntryMerkleProofV2,
         receipt: &OpaqueConsensusReceiptV2,
@@ -539,7 +534,7 @@ pub enum RequestLifecycleV2 {
     },
     /// Deterministic execution plus an externally verifiable receipt is available.
     FinalityReceiptAvailable {
-        /// Exact block, entry, Merkle proof, and opaque consensus receipt.
+        /// Exact compact commitment, entry, Merkle proof, and opaque receipt.
         bundle: Box<FinalizedEntryBundleV2>,
     },
 }

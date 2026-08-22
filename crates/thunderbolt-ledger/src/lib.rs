@@ -4,10 +4,11 @@
 //! agree on: authenticated proposals, entry metadata, ordered Merkle roots,
 //! and an incremental application hash. It deliberately contains no clock,
 //! filesystem, JSON signing, network, ABCI, or verifier-evidence logic.
-//! [`ExecutedBlockV2`] and [`ExecutedEntryV2`] prove deterministic execution,
-//! not consensus finality. A CometBFT quorum or light-client receipt remains a
-//! separate future capability. Integrations must also persist a cross-block
-//! `request_digest -> entry_hash` mapping and reject conflicting reuse.
+//! [`ExecutedBlockV2`], [`ExecutedBlockCommitmentV2`], and [`ExecutedEntryV2`]
+//! prove deterministic execution, not consensus finality. A CometBFT quorum or
+//! light-client receipt remains a separate future capability. Integrations must
+//! also persist a cross-block `request_digest -> entry_hash` mapping and reject
+//! conflicting reuse.
 //!
 //! JSON and other serde formats are transport conveniences only. Signatures
 //! and hashes always cover the canonical binary transcripts defined here.
@@ -29,8 +30,9 @@ mod proposal;
 mod types;
 
 pub use block::{
-    compute_app_hash_v2, entry_merkle_proof_v2, entry_merkle_root_v2, EntryMerkleProofV2, ExecutedBlockV2,
-    MerkleSiblingV2, MerkleSideV2, PendingBlockV2, MAX_BLOCK_ENTRIES, MAX_BLOCK_EVENT_BYTES, MAX_MERKLE_PROOF_DEPTH,
+    compute_app_hash_v2, entry_merkle_proof_v2, entry_merkle_root_v2, EntryMerkleProofV2, ExecutedBlockCommitmentV2,
+    ExecutedBlockV2, MerkleSiblingV2, MerkleSideV2, PendingBlockV2, MAX_BLOCK_ENTRIES, MAX_BLOCK_EVENT_BYTES,
+    MAX_MERKLE_PROOF_DEPTH,
 };
 pub use error::{LedgerContractError, Result};
 pub use proposal::{
@@ -40,5 +42,6 @@ pub use types::{
     ActorKeyAlgorithmV2, ActorPublicKeyV2, ActorRequestIdV2, ActorRoleV2, ActorSignatureV2, AppHashV2,
     CanonicalEventV2, ChannelContextIdV2, ClientRequestNonceV2, EntryHashV2, EntryMerkleRootV2, EventDigestV2,
     EventKindV2, LedgerChainIdV2, MerkleNodeHashV2, ParticipantIdV2, ProposalDigestV2, RequestDigestV2,
-    EVENT_BYTES_MAX, LEDGER_CHAIN_ID_MAX, LEDGER_PROTOCOL_VERSION_V2, REQUEST_NONCE_MAX, REQUEST_NONCE_MIN,
+    EVENT_BYTES_MAX, LEDGER_CHAIN_ID_MAX, LEDGER_PROTOCOL_VERSION_V2, MAX_SIGNED_PROPOSAL_JSON_BYTES,
+    REQUEST_NONCE_MAX, REQUEST_NONCE_MIN, SIGNED_PROPOSAL_RPC_METADATA_ALLOWANCE_BYTES,
 };

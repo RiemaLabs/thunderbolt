@@ -22,14 +22,14 @@ use tendermint_proto::v0_38::abci::{
 use tendermint_proto::v0_38::types::{AbciParams, ConsensusParams, VersionParams};
 use thunderbolt_ledger::{
     ActorKeyAlgorithmV2, ActorPublicKeyV2, ActorRoleV2, ActorSignatureV2, CanonicalEventV2, ChannelContextIdV2,
-    ClientRequestNonceV2, EntryHashV2, LedgerChainIdV2, ProposalBodyV2, SignedProposalV2, MAX_BLOCK_ENTRIES,
+    ClientRequestNonceV2, EntryHashV2, LedgerChainIdV2, ProposalBodyV2, SignedProposalV2, EVENT_BYTES_MAX,
+    MAX_BLOCK_ENTRIES,
 };
 use thunderbolt_ledger_app::{ApplicationOptions, LedgerApplication};
 use thunderbolt_protocol::v2::{
-    ChannelEventV2, ExternalVerifierV2, FinalizeVerificationRequestV2, InvoiceEventV2, InvoiceVerificationRequestV2,
-    OpenEventV2, OpenVerificationRequestV2, TransferVerificationRequestV2,
+    ArtifactV2, ChannelEventV2, ExternalVerifierV2, FinalizeVerificationRequestV2, InvoiceEventV2,
+    InvoiceVerificationRequestV2, OpenEventV2, OpenVerificationRequestV2, TransferVerificationRequestV2,
 };
-use thunderbolt_protocol::Artifact;
 use thunderbolt_wire::{
     AnchorParameterSuiteIdV2, BitcoinGenesisHashV2, ChannelBindingV2, CommitteeDescriptorDigestV2, FundingOutpointV2,
     HexBytes, ProtocolSuiteIdV2,
@@ -203,10 +203,10 @@ fn open_event() -> ChannelEventV2 {
         committee_member_count: 3,
         committee_threshold: 2,
         capacity_sat: 1_000_000,
-        lock_key: Artifact::new([1]).expect("artifact"),
-        initial_holder_anchor: Artifact::new([2]).expect("artifact"),
-        initial_holder_ciphertext: Artifact::new([3]).expect("artifact"),
-        open_proof: Artifact::new([4]).expect("artifact"),
+        lock_key: ArtifactV2::new([1]).expect("artifact"),
+        initial_holder_anchor: ArtifactV2::new([2]).expect("artifact"),
+        initial_holder_ciphertext: ArtifactV2::new([3]).expect("artifact"),
+        open_proof: ArtifactV2::new([4]).expect("artifact"),
     })
 }
 
@@ -238,7 +238,7 @@ fn signed_open_custom(
     let ChannelEventV2::Open(open) = &mut event else {
         panic!("Open test event changed variant");
     };
-    open.open_proof = Artifact::new([proof_byte]).expect("artifact");
+    open.open_proof = ArtifactV2::new([proof_byte]).expect("artifact");
     let body = ProposalBodyV2::new(
         chain_id(),
         binding(channel_byte),
@@ -268,11 +268,11 @@ fn signed_absent_channel_invoice(request_index: u32) -> SignedProposalV2 {
     let event = ChannelEventV2::Invoice(InvoiceEventV2 {
         invoice_id: HexBytes::from_bytes("invoice id", request_index.to_be_bytes()).expect("invoice id"),
         holder_step: 0,
-        recipient_encryption_key: Artifact::new([5]).expect("artifact"),
-        public_delta: Artifact::new([6]).expect("artifact"),
-        recipient_ciphertext: Artifact::new([7]).expect("artifact"),
-        committee_package: Artifact::new([8]).expect("artifact"),
-        invoice_proof: Artifact::new([9]).expect("artifact"),
+        recipient_encryption_key: ArtifactV2::new([5]).expect("artifact"),
+        public_delta: ArtifactV2::new([6]).expect("artifact"),
+        recipient_ciphertext: ArtifactV2::new([7]).expect("artifact"),
+        committee_package: ArtifactV2::new([8]).expect("artifact"),
+        invoice_proof: ArtifactV2::new([9]).expect("artifact"),
         expires_at_ms: 10_000,
     });
     let mut nonce = [0_u8; 16];
@@ -307,11 +307,11 @@ fn signed_invoice_after_open(open: &SignedProposalV2, request_index: u32, expire
     let event = ChannelEventV2::Invoice(InvoiceEventV2 {
         invoice_id: HexBytes::from_bytes("invoice id", request_index.to_be_bytes()).expect("invoice id"),
         holder_step: 0,
-        recipient_encryption_key: Artifact::new([5]).expect("artifact"),
-        public_delta: Artifact::new([6]).expect("artifact"),
-        recipient_ciphertext: Artifact::new([7]).expect("artifact"),
-        committee_package: Artifact::new([8]).expect("artifact"),
-        invoice_proof: Artifact::new([9]).expect("artifact"),
+        recipient_encryption_key: ArtifactV2::new([5]).expect("artifact"),
+        public_delta: ArtifactV2::new([6]).expect("artifact"),
+        recipient_ciphertext: ArtifactV2::new([7]).expect("artifact"),
+        committee_package: ArtifactV2::new([8]).expect("artifact"),
+        invoice_proof: ArtifactV2::new([9]).expect("artifact"),
         expires_at_ms,
     });
     let mut nonce = [0_u8; 16];
@@ -498,8 +498,8 @@ fn consensus_profile_has_a_golden_digest_and_changes_with_identity_or_limits() -
     assert_eq!(
         profile.as_bytes(),
         &[
-            0xd9, 0xfd, 0xa2, 0xe1, 0x0c, 0xb6, 0xad, 0x3d, 0x38, 0x32, 0xc9, 0x15, 0xa8, 0xad, 0x3b, 0xad, 0x56, 0x67,
-            0xbe, 0x52, 0xbc, 0xd5, 0xa5, 0x67, 0x7f, 0x6e, 0x8c, 0xdb, 0xb2, 0x84, 0x84, 0x04,
+            0x8a, 0x46, 0x38, 0x64, 0x7d, 0x2e, 0x2a, 0x96, 0x9c, 0xb9, 0x04, 0xbf, 0x7f, 0x46, 0x09, 0x6d, 0x25, 0xf1,
+            0x0d, 0xaf, 0x60, 0xa8, 0x3f, 0xf7, 0x76, 0xef, 0xcc, 0xbb, 0xe3, 0xe2, 0x94, 0x7a,
         ]
     );
     assert_ne!(
@@ -522,6 +522,39 @@ fn consensus_profile_has_a_golden_digest_and_changes_with_identity_or_limits() -
     assert_ne!(
         profile,
         ConsensusProfileV2::from_verifier(&LedgerChainIdV2::new("different-profile-chain")?, limits, &AcceptAll,)?
+    );
+    let mut resource_values = compiled_resource_profile_values();
+    resource_values[COMPILED_RETAINED_STATE_INDEX] = resource_values[COMPILED_RETAINED_STATE_INDEX]
+        .checked_add(1)
+        .ok_or(AbciAdapterError::InvalidRequest("test resource value overflows"))?;
+    let changed_retained_budget = ConsensusProfileV2 {
+        digest: consensus_profile_digest(
+            &chain_id(),
+            limits,
+            AcceptAll.verifier_profile_id(),
+            AcceptAll.deployment_descriptor(),
+            &resource_values,
+        )?,
+    };
+    assert_ne!(profile, changed_retained_budget);
+    Ok(())
+}
+
+#[test]
+fn compiled_resource_limits_are_closed_across_events_transactions_and_blocks() -> Result<()> {
+    validate_compiled_resource_limits()?;
+    assert_eq!(MAX_TRANSACTION_BYTES, MAX_SIGNED_PROPOSAL_JSON_BYTES);
+    assert_eq!(
+        EVENT_BYTES_MAX * 2 + SIGNED_PROPOSAL_RPC_METADATA_ALLOWANCE_BYTES,
+        MAX_SIGNED_PROPOSAL_JSON_BYTES
+    );
+    assert_eq!(
+        MAX_RETAINED_CHANNEL_STATE_BYTES_V2 + SNAPSHOT_CANONICAL_FRAMING_ALLOWANCE_BYTES_V2,
+        MAX_CANONICAL_SNAPSHOT_BYTES_V2
+    );
+    assert_eq!(
+        MAX_RETAINED_CHANNEL_STATE_BYTES_V2 * 2 + SNAPSHOT_QUERY_JSON_METADATA_ALLOWANCE_BYTES,
+        MAX_QUERY_RESPONSE_BYTES
     );
     Ok(())
 }
@@ -1308,6 +1341,61 @@ fn explicit_oversize_requests_fail_without_panicking_or_allocating_unbounded_res
     let failure =
         capture_fatal(|| app.finalize_block(finalize_request(vec![Bytes::new(); MAX_BLOCK_ENTRIES + 1], 1, 1_000)));
     assert_eq!(failure.stage(), FatalAbciStage::FinalizeBlock);
+    Ok(())
+}
+
+#[test]
+fn exact_maximum_event_fits_the_abci_transaction_boundary() -> Result<()> {
+    let mut event = open_event();
+    let baseline = event
+        .canonical_bytes()
+        .map_err(thunderbolt_ledger_app::ApplicationError::from)?
+        .len();
+    let ChannelEventV2::Open(open) = &mut event else {
+        return Err(AbciAdapterError::InvalidRequest("test event is not Open"));
+    };
+    let proof_len = open
+        .open_proof
+        .as_bytes()
+        .len()
+        .checked_add(EVENT_BYTES_MAX - baseline)
+        .ok_or(AbciAdapterError::InvalidRequest("test event capacity overflows"))?;
+    open.open_proof = ArtifactV2::new(vec![0x5a; proof_len])
+        .map_err(|_| AbciAdapterError::InvalidRequest("test proof exceeds artifact bound"))?;
+    let event_bytes = event
+        .canonical_bytes()
+        .map_err(thunderbolt_ledger_app::ApplicationError::from)?;
+    assert_eq!(event_bytes.len(), EVENT_BYTES_MAX);
+
+    let keypair = keypair(91);
+    let (public, _) = keypair.x_only_public_key();
+    let body = ProposalBodyV2::new(
+        chain_id(),
+        binding(91),
+        0,
+        EntryHashV2::zero(),
+        ClientRequestNonceV2::from_bytes([0x91; 64])?,
+        ActorKeyAlgorithmV2::Bip340V1,
+        ActorPublicKeyV2::from_bytes(public.serialize())?,
+        ActorRoleV2::Holder,
+        event.kind(),
+        CanonicalEventV2::from_bytes(event_bytes)?,
+    )?;
+    let signature = Secp256k1::signing_only().sign_schnorr_no_aux_rand(body.proposal_digest()?.as_bytes(), &keypair);
+    let proposal = SignedProposalV2::new(body, ActorSignatureV2::from_bytes(signature.to_byte_array())?)?;
+    let transaction = transaction(&proposal);
+    assert!(transaction.len() <= MAX_TRANSACTION_BYTES);
+
+    let directory = TempDir::new().map_err(|_| AbciAdapterError::InvalidRequest("tempdir"))?;
+    let app = adapter(&directory)?;
+    assert_eq!(
+        app.check_tx(RequestCheckTx {
+            tx: transaction,
+            r#type: 0,
+        })
+        .code,
+        OK_CODE
+    );
     Ok(())
 }
 

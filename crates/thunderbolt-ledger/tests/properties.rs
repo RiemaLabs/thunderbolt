@@ -3,7 +3,8 @@ mod common;
 use proptest::prelude::*;
 use serde_json::Value;
 use thunderbolt_ledger::{
-    ActorRoleV2, AppHashV2, EntryMerkleProofV2, ExecutedBlockV2, LedgerChainIdV2, PendingBlockV2, SignedProposalV2,
+    ActorRoleV2, AppHashV2, EntryMerkleProofV2, ExecutedBlockCommitmentV2, ExecutedBlockV2, LedgerChainIdV2,
+    PendingBlockV2, SignedProposalV2,
 };
 
 use common::signed_open;
@@ -38,7 +39,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(96))]
 
     #[test]
-    fn signed_proposal_and_executed_block_serde_round_trip(
+    fn signed_proposal_block_and_commitment_serde_round_trip(
         proposal in signed_proposal_strategy(),
         block_time_ms in 1_u64..=u64::MAX,
     ) {
@@ -55,7 +56,17 @@ proptest! {
         let executed = pending.execute()?;
         let encoded = serde_json::to_vec(&executed).expect("executed block JSON");
         let decoded: ExecutedBlockV2 = serde_json::from_slice(&encoded).expect("validated block decode");
-        prop_assert_eq!(decoded, executed);
+        prop_assert_eq!(&decoded, &executed);
+
+        let commitment = executed.commitment()?;
+        let encoded = serde_json::to_vec(&commitment).expect("commitment JSON");
+        let value: Value = serde_json::from_slice(&encoded).expect("commitment value");
+        let pretty = serde_json::to_vec_pretty(&value).expect("pretty commitment JSON");
+        let decoded: ExecutedBlockCommitmentV2 =
+            serde_json::from_slice(&pretty).expect("validated commitment decode");
+        prop_assert_eq!(&decoded, &commitment);
+        prop_assert_eq!(decoded.canonical_bytes()?, commitment.canonical_bytes()?);
+        prop_assert_eq!(decoded.app_hash(), executed.app_hash());
     }
 
     #[test]
@@ -132,6 +143,7 @@ proptest! {
         payloads in prop::collection::vec(prop::collection::vec(any::<u8>(), 1..=128), 2..=12),
         requested_index in any::<usize>(),
         tamper_target in 0_u8..4,
+        commitment_tamper_target in 0_u8..7,
         block_time_ms in 1_u64..=u64::MAX,
     ) {
         let chain_text = format!("tb-{chain_suffix}");
@@ -159,6 +171,36 @@ proptest! {
         let metadata = executed.entries()[leaf_index].metadata();
         let proof = executed.entry_proof(leaf_index)?;
         proof.verify(metadata, &executed)?;
+        let commitment = executed.commitment()?;
+        proof.verify_against_commitment(metadata, &commitment)?;
+        proof.verify_entry_against_commitment(&executed.entries()[leaf_index], &commitment)?;
+
+        let commitment_json = serde_json::to_vec(&commitment).expect("commitment JSON");
+        let decoded_commitment: ExecutedBlockCommitmentV2 =
+            serde_json::from_slice(&commitment_json).expect("commitment roundtrip");
+        prop_assert_eq!(&decoded_commitment, &commitment);
+        prop_assert_eq!(decoded_commitment.canonical_digest()?, commitment.canonical_digest()?);
+
+        let mut commitment_value = serde_json::to_value(&commitment).expect("commitment value");
+        match commitment_tamper_target {
+            0 => {
+                let chain = commitment_value["ledger_chain_id"].as_str().expect("chain");
+                commitment_value["ledger_chain_id"] = Value::String(format!("{chain}x"));
+            }
+            1 => commitment_value["height"] = Value::from(2),
+            2 => {
+                let time = commitment_value["block_time_ms"].as_u64().expect("block time");
+                commitment_value["block_time_ms"] = Value::from(if time == u64::MAX { time - 1 } else { time + 1 });
+            }
+            3 => mutate_first_hex_nibble(&mut commitment_value["previous_app_hash"]),
+            4 => {
+                commitment_value["entry_count"] =
+                    Value::from(u64::try_from(executed.entries().len() + 1).expect("small count"));
+            }
+            5 => mutate_first_hex_nibble(&mut commitment_value["entry_merkle_root"]),
+            _ => mutate_first_hex_nibble(&mut commitment_value["app_hash"]),
+        }
+        prop_assert!(serde_json::from_value::<ExecutedBlockCommitmentV2>(commitment_value).is_err());
 
         let encoded = serde_json::to_vec(&proof).expect("proof JSON");
         let decoded: EntryMerkleProofV2 = serde_json::from_slice(&encoded).expect("proof decode");

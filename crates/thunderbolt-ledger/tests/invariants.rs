@@ -2,9 +2,9 @@ mod common;
 
 use serde_json::Value;
 use thunderbolt_ledger::{
-    entry_merkle_root_v2, ActorKeyAlgorithmV2, ActorRoleV2, AppHashV2, CanonicalEventV2, ClientRequestNonceV2,
-    EntryHashV2, EventKindV2, ExecutedBlockV2, LedgerChainIdV2, PendingBlockV2, ProposalBodyV2, EVENT_BYTES_MAX,
-    LEDGER_CHAIN_ID_MAX,
+    compute_app_hash_v2, entry_merkle_root_v2, ActorKeyAlgorithmV2, ActorRoleV2, AppHashV2, CanonicalEventV2,
+    ClientRequestNonceV2, EntryHashV2, EntryMerkleRootV2, EventKindV2, ExecutedBlockCommitmentV2, ExecutedBlockV2,
+    LedgerChainIdV2, LedgerContractError, PendingBlockV2, ProposalBodyV2, EVENT_BYTES_MAX, LEDGER_CHAIN_ID_MAX,
 };
 
 use common::{actor_keypair, actor_public_key, channel, sign, signed_open};
@@ -267,6 +267,213 @@ fn executed_block_serde_recomputes_metadata_root_time_and_app_hash() {
 }
 
 #[test]
+fn compact_commitment_verifies_exact_metadata_and_entry_without_full_block() {
+    let first = signed_open(
+        "tb-commitment",
+        [1; 32],
+        0,
+        1,
+        1,
+        ActorRoleV2::Holder,
+        vec![1; 16],
+        vec![1],
+    );
+    let second = signed_open(
+        "tb-commitment",
+        [2; 32],
+        1,
+        1,
+        2,
+        ActorRoleV2::Recipient,
+        vec![2; 16],
+        vec![2],
+    );
+    let mut pending = PendingBlockV2::new(
+        LedgerChainIdV2::new("tb-commitment").expect("chain"),
+        1,
+        123,
+        AppHashV2::zero(),
+    )
+    .expect("pending block");
+    pending.push(first).expect("first");
+    pending.push(second).expect("second");
+    let block = pending.execute().expect("executed block");
+    let commitment = block.commitment().expect("compact commitment");
+    assert_eq!(commitment.ledger_chain_id(), block.ledger_chain_id());
+    assert_eq!(commitment.height(), block.height());
+    assert_eq!(commitment.block_time_ms(), block.block_time_ms());
+    assert_eq!(commitment.previous_app_hash(), block.previous_app_hash());
+    assert_eq!(commitment.entry_count(), 2);
+    assert_eq!(commitment.entry_merkle_root(), block.entry_merkle_root());
+    assert_eq!(commitment.app_hash(), block.app_hash());
+
+    let encoded = serde_json::to_vec(&commitment).expect("commitment JSON");
+    let decoded: ExecutedBlockCommitmentV2 = serde_json::from_slice(&encoded).expect("commitment decode");
+    assert_eq!(decoded, commitment);
+    let proof = block.entry_proof(0).expect("entry proof");
+    proof
+        .verify_against_commitment(block.entries()[0].metadata(), &commitment)
+        .expect("metadata inclusion");
+    proof
+        .verify_entry_against_commitment(&block.entries()[0], &commitment)
+        .expect("entry inclusion");
+    assert!(proof
+        .verify_entry_against_commitment(&block.entries()[1], &commitment)
+        .is_err());
+    assert!(commitment
+        .validate_chain_id(&LedgerChainIdV2::new("tb-other").expect("other chain"))
+        .is_err());
+}
+
+#[test]
+fn commitment_and_proof_reject_wrong_count_root_app_chain_time_and_index() {
+    let proposal = signed_open("tb-scope", [7; 32], 0, 1, 7, ActorRoleV2::Holder, vec![7; 16], vec![7]);
+    let mut pending = PendingBlockV2::new(
+        LedgerChainIdV2::new("tb-scope").expect("chain"),
+        1,
+        777,
+        AppHashV2::zero(),
+    )
+    .expect("pending");
+    pending.push(proposal).expect("proposal");
+    let block = pending.execute().expect("block");
+    let commitment = block.commitment().expect("commitment");
+    let proof = block.entry_proof(0).expect("proof");
+    let metadata = block.entries()[0].metadata();
+
+    let wrong_scope_block = PendingBlockV2::new(commitment.ledger_chain_id().clone(), 1, 778, AppHashV2::zero())
+        .expect("wrong-scope pending block")
+        .execute()
+        .expect("wrong-scope block");
+    assert!(matches!(
+        proof.verify(metadata, &wrong_scope_block),
+        Err(LedgerContractError::InvalidMerkleProof {
+            reason: "proof scope does not match executed block"
+        })
+    ));
+
+    let other_proposal = signed_open(
+        "tb-scope",
+        [8; 32],
+        1,
+        1,
+        8,
+        ActorRoleV2::Recipient,
+        vec![8; 16],
+        vec![8],
+    );
+    let mut wrong_root_pending = PendingBlockV2::new(
+        commitment.ledger_chain_id().clone(),
+        commitment.height(),
+        commitment.block_time_ms(),
+        commitment.previous_app_hash().clone(),
+    )
+    .expect("wrong-root pending block");
+    wrong_root_pending.push(other_proposal).expect("other proposal");
+    let wrong_root_block = wrong_root_pending.execute().expect("wrong-root block");
+    assert!(matches!(
+        proof.verify(metadata, &wrong_root_block),
+        Err(LedgerContractError::InvalidMerkleProof {
+            reason: "inclusion path does not reconstruct the executed block Merkle root"
+        })
+    ));
+
+    let wrong_count = commitment_with(
+        commitment.ledger_chain_id().clone(),
+        commitment.height(),
+        commitment.block_time_ms(),
+        commitment.previous_app_hash().clone(),
+        2,
+        commitment.entry_merkle_root().clone(),
+    );
+    assert!(proof.verify_against_commitment(metadata, &wrong_count).is_err());
+
+    let wrong_root_value = EntryMerkleRootV2::from_bytes([0x99; 32]).expect("root");
+    let wrong_root = commitment_with(
+        commitment.ledger_chain_id().clone(),
+        commitment.height(),
+        commitment.block_time_ms(),
+        commitment.previous_app_hash().clone(),
+        commitment.entry_count(),
+        wrong_root_value,
+    );
+    assert!(proof.verify_against_commitment(metadata, &wrong_root).is_err());
+
+    let other_chain = LedgerChainIdV2::new("tb-other").expect("other chain");
+    let wrong_chain = commitment_with(
+        other_chain,
+        commitment.height(),
+        commitment.block_time_ms(),
+        commitment.previous_app_hash().clone(),
+        commitment.entry_count(),
+        commitment.entry_merkle_root().clone(),
+    );
+    assert!(proof.verify_against_commitment(metadata, &wrong_chain).is_err());
+
+    let wrong_height = commitment_with(
+        commitment.ledger_chain_id().clone(),
+        2,
+        commitment.block_time_ms(),
+        AppHashV2::from_bytes([0x11; 32]).expect("prior app hash"),
+        commitment.entry_count(),
+        commitment.entry_merkle_root().clone(),
+    );
+    assert!(proof.verify_against_commitment(metadata, &wrong_height).is_err());
+
+    let wrong_time = commitment_with(
+        commitment.ledger_chain_id().clone(),
+        commitment.height(),
+        commitment.block_time_ms() + 1,
+        commitment.previous_app_hash().clone(),
+        commitment.entry_count(),
+        commitment.entry_merkle_root().clone(),
+    );
+    assert!(proof.verify_against_commitment(metadata, &wrong_time).is_err());
+    let expected_digest = commitment.canonical_digest().expect("commitment digest");
+    for changed in [&wrong_count, &wrong_root, &wrong_chain, &wrong_height, &wrong_time] {
+        assert_ne!(changed.canonical_digest().expect("changed digest"), expected_digest);
+    }
+
+    let mut bad_app = serde_json::to_value(&commitment).expect("commitment value");
+    mutate_first_hex_nibble(&mut bad_app["app_hash"]);
+    assert!(serde_json::from_value::<ExecutedBlockCommitmentV2>(bad_app).is_err());
+
+    let mut bad_index = serde_json::to_value(&proof).expect("proof value");
+    bad_index["leaf_index"] = Value::from(1);
+    assert!(serde_json::from_value::<thunderbolt_ledger::EntryMerkleProofV2>(bad_index).is_err());
+}
+
+fn mutate_first_hex_nibble(value: &mut Value) {
+    let encoded = value.as_str().expect("hex string");
+    let replacement = if encoded.starts_with('0') { '1' } else { '0' };
+    let mut mutated = encoded.to_owned();
+    mutated.replace_range(..1, &replacement.to_string());
+    *value = Value::String(mutated);
+}
+
+fn commitment_with(
+    chain: LedgerChainIdV2,
+    height: u64,
+    block_time_ms: u64,
+    previous_app_hash: AppHashV2,
+    entry_count: u32,
+    root: EntryMerkleRootV2,
+) -> ExecutedBlockCommitmentV2 {
+    let app_hash = compute_app_hash_v2(&chain, &previous_app_hash, height, block_time_ms, entry_count, &root)
+        .expect("self-consistent app hash");
+    ExecutedBlockCommitmentV2::new(
+        chain,
+        height,
+        block_time_ms,
+        previous_app_hash,
+        entry_count,
+        root,
+        app_hash,
+    )
+    .expect("self-consistent commitment")
+}
+
+#[test]
 fn empty_block_has_a_defined_merkle_root_and_application_hash() {
     let empty_root = entry_merkle_root_v2(&[]).expect("empty root");
     let block = PendingBlockV2::new(
@@ -281,4 +488,27 @@ fn empty_block_has_a_defined_merkle_root_and_application_hash() {
     assert!(block.entries().is_empty());
     assert_eq!(block.entry_merkle_root(), &empty_root);
     assert!(!block.app_hash().is_zero());
+    let commitment = block.commitment().expect("empty commitment");
+    assert_eq!(commitment.entry_count(), 0);
+    assert_eq!(commitment.entry_merkle_root(), &empty_root);
+    let wrong_root = EntryMerkleRootV2::from_bytes([0x44; 32]).expect("wrong empty root");
+    let wrong_app = compute_app_hash_v2(
+        commitment.ledger_chain_id(),
+        commitment.previous_app_hash(),
+        commitment.height(),
+        commitment.block_time_ms(),
+        0,
+        &wrong_root,
+    )
+    .expect("shape-valid wrong empty app hash");
+    assert!(ExecutedBlockCommitmentV2::new(
+        commitment.ledger_chain_id().clone(),
+        commitment.height(),
+        commitment.block_time_ms(),
+        commitment.previous_app_hash().clone(),
+        0,
+        wrong_root,
+        wrong_app,
+    )
+    .is_err());
 }

@@ -63,7 +63,7 @@ values. The adapter does not run
 CometBFT, configure validator governance, verify quorum finality, provide a
 network daemon, or claim Byzantine finality by itself.
 
-Hard application limits are 1 MiB per transaction, 24 MiB of transaction bytes
+Hard application limits are 4 MiB per transaction, 24 MiB of transaction bytes
 per block, 1,024 transactions per block, 4,096 scanned proposer candidates,
 32 MiB of scanned proposer bytes, 128 query-key bytes, and 24 MiB per query
 value. Query JSON is written through a bounded writer. Operators must set
@@ -73,6 +73,12 @@ allocation, so a production process must use a reviewed bounded dispatcher and
 authenticated local boundary. The feature-gated live process includes a
 26 MiB pre-allocation cap on a loopback-only listener, but is not a production
 server.
+
+The consensus profile also commits the 2 MiB `ArtifactV2` ceiling, the event/JSON
+expansion reserve, the 8 MiB pending-Invoice budget, the 11 MiB retained-state
+budget, and the 12 MiB canonical snapshot ceiling. Startup checks the compiled
+single-request, block, snapshot, and query relationships before deriving that
+profile, so replicas cannot silently run an incoherent resource policy.
 
 ## Opt-in live gate
 

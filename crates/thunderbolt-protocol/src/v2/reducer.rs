@@ -5,9 +5,10 @@ use thunderbolt_ledger::{
 };
 
 use super::{
-    types::{validate_capacity, validate_committee_topology},
-    ChannelEventV2, ChannelPhaseV2, ChannelSnapshotV2, FinalizeEventV2, InvoiceEventV2, OpenEventV2, PendingInvoiceV2,
-    ProtocolLimitsV2, TransferEventV2, V2Error, PROTOCOL_VERSION_V2,
+    types::{retained_state_bytes, validate_capacity, validate_committee_topology},
+    ArtifactV2, ChannelEventV2, ChannelPhaseV2, ChannelSnapshotV2, FinalizeEventV2, InvoiceEventV2, OpenEventV2,
+    PendingInvoiceV2, ProtocolLimitsV2, TransferEventV2, V2Error, MAX_PENDING_INVOICE_EVENT_BYTES_V2,
+    MAX_RETAINED_CHANNEL_STATE_BYTES_V2, PROTOCOL_VERSION_V2,
 };
 
 /// Signature-authenticated proposal paired with its exact typed event.
@@ -360,6 +361,12 @@ impl V2Reducer {
         require_role(proposal.actor_role(), ActorRoleV2::Holder)?;
         validate_capacity(event.capacity_sat)?;
         validate_committee_topology(event.committee_member_count, event.committee_threshold)?;
+        require_retained_state_budget(
+            &event.lock_key,
+            &event.initial_holder_anchor,
+            &event.initial_holder_ciphertext,
+            0,
+        )?;
         verifier
             .verify_open(OpenVerificationRequestV2 {
                 entry,
@@ -480,6 +487,36 @@ impl V2Reducer {
                         limit: self.limits.max_pending_invoices,
                     });
                 }
+                let retained_event_bytes = current
+                    .pending_invoices
+                    .values()
+                    .filter(|invoice| !invoice.is_expired_at(block_time_ms))
+                    .try_fold(0_usize, |total, invoice| {
+                        total
+                            .checked_add(invoice.canonical_event_len()?)
+                            .ok_or(V2Error::InvalidSnapshot {
+                                reason: "pending Invoice event byte count overflows",
+                            })
+                    })?;
+                let proposed_event_bytes = super::canonical::encoded_invoice_event_len(event)
+                    .filter(|length| *length <= thunderbolt_ledger::EVENT_BYTES_MAX)
+                    .ok_or(V2Error::InvalidCanonicalEvent)?;
+                let next_event_bytes = retained_event_bytes.checked_add(proposed_event_bytes).ok_or(
+                    V2Error::PendingInvoiceBytesLimitReached {
+                        limit: MAX_PENDING_INVOICE_EVENT_BYTES_V2,
+                    },
+                )?;
+                if next_event_bytes > MAX_PENDING_INVOICE_EVENT_BYTES_V2 {
+                    return Err(V2Error::PendingInvoiceBytesLimitReached {
+                        limit: MAX_PENDING_INVOICE_EVENT_BYTES_V2,
+                    });
+                }
+                require_retained_state_budget(
+                    &current.lock_key,
+                    &current.current_holder_anchor,
+                    &current.current_holder_ciphertext,
+                    next_event_bytes,
+                )?;
                 verifier
                     .verify_invoice(InvoiceVerificationRequestV2 {
                         entry,
@@ -530,6 +567,12 @@ impl V2Reducer {
                         current_step: current.transfers_completed,
                     });
                 }
+                require_retained_state_budget(
+                    &current.lock_key,
+                    &event.next_holder_anchor,
+                    &event.next_holder_ciphertext,
+                    0,
+                )?;
                 verifier
                     .verify_transfer(TransferVerificationRequestV2 {
                         entry,
@@ -560,6 +603,12 @@ impl V2Reducer {
                 if proposal.participant_id() != &current.current_holder {
                     return Err(V2Error::ActorMismatch);
                 }
+                require_retained_state_budget(
+                    &current.lock_key,
+                    &current.current_holder_anchor,
+                    &current.current_holder_ciphertext,
+                    0,
+                )?;
                 verifier
                     .verify_finalize(FinalizeVerificationRequestV2 {
                         entry,
@@ -601,6 +650,25 @@ fn require_role(found: ActorRoleV2, expected: ActorRoleV2) -> Result<(), V2Error
 fn validate_block_time(block_time_ms: u64) -> Result<(), V2Error> {
     if block_time_ms == 0 {
         return Err(V2Error::InvalidBlockTime);
+    }
+    Ok(())
+}
+
+fn require_retained_state_budget(
+    lock_key: &ArtifactV2,
+    holder_anchor: &ArtifactV2,
+    holder_ciphertext: &ArtifactV2,
+    pending_event_bytes: usize,
+) -> Result<(), V2Error> {
+    let total = retained_state_bytes(lock_key, holder_anchor, holder_ciphertext, pending_event_bytes).ok_or(
+        V2Error::RetainedStateBytesLimitReached {
+            limit: MAX_RETAINED_CHANNEL_STATE_BYTES_V2,
+        },
+    )?;
+    if total > MAX_RETAINED_CHANNEL_STATE_BYTES_V2 {
+        return Err(V2Error::RetainedStateBytesLimitReached {
+            limit: MAX_RETAINED_CHANNEL_STATE_BYTES_V2,
+        });
     }
     Ok(())
 }

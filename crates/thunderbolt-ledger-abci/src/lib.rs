@@ -47,12 +47,17 @@ use tendermint_proto::v0_38::abci::{
 use tendermint_proto::v0_38::types::{AbciParams, ConsensusParams, VersionParams};
 use thunderbolt_ledger::{
     ActorSignatureV2, AppHashV2, ChannelContextIdV2, ParticipantIdV2, PendingBlockV2, ProposalBodyV2, RequestDigestV2,
-    SignedProposalV2, MAX_BLOCK_ENTRIES, MAX_BLOCK_EVENT_BYTES,
+    SignedProposalV2, EVENT_BYTES_MAX, MAX_BLOCK_ENTRIES, MAX_BLOCK_EVENT_BYTES, MAX_SIGNED_PROPOSAL_JSON_BYTES,
+    SIGNED_PROPOSAL_RPC_METADATA_ALLOWANCE_BYTES,
 };
 use thunderbolt_ledger_app::{
     ApplicationStatusV2, BlockInputV2, LedgerApplication, LedgerApplicationVerifierV2, PreparedBlockV2,
 };
-use thunderbolt_protocol::v2::{ChannelEventV2, ChannelSnapshotV2, ProtocolLimitsV2};
+use thunderbolt_protocol::v2::{
+    ChannelEventV2, ChannelSnapshotV2, ProtocolLimitsV2, MAX_ARTIFACT_BYTES_V2, MAX_CANONICAL_SNAPSHOT_BYTES_V2,
+    MAX_PENDING_INVOICE_EVENT_BYTES_V2, MAX_RETAINED_CHANNEL_STATE_BYTES_V2,
+    SNAPSHOT_CANONICAL_FRAMING_ALLOWANCE_BYTES_V2,
+};
 
 pub use error::{AbciAdapterError, Result};
 pub use thunderbolt_ledger_app::APPLICATION_VERSION_V2;
@@ -77,13 +82,15 @@ pub const QUERY_REQUEST_PATH: &str = "/thunderbolt/v2/request";
 pub const QUERY_PROOF_PATH: &str = "/thunderbolt/v2/proof";
 
 /// Maximum canonical JSON bytes accepted for one signed proposal.
-pub const MAX_TRANSACTION_BYTES: usize = 1024 * 1024;
+pub const MAX_TRANSACTION_BYTES: usize = MAX_SIGNED_PROPOSAL_JSON_BYTES;
 /// Maximum aggregate transaction bytes accepted in one proposal or block.
 pub const MAX_BLOCK_TRANSACTION_BYTES: usize = 24 * 1024 * 1024;
 /// Maximum ABCI query key bytes accepted before parsing.
 pub const MAX_QUERY_REQUEST_BYTES: usize = 128;
 /// Maximum serialized query value returned by this adapter.
 pub const MAX_QUERY_RESPONSE_BYTES: usize = 24 * 1024 * 1024;
+/// Reserved JSON field and index overhead outside hex-encoded retained state.
+pub const SNAPSHOT_QUERY_JSON_METADATA_ALLOWANCE_BYTES: usize = 2 * 1024 * 1024;
 /// Maximum misbehavior records accepted in one consensus request.
 pub const MAX_MISBEHAVIOR_RECORDS: usize = 64;
 /// Maximum validator votes accepted in one commit-info value.
@@ -244,38 +251,15 @@ impl ConsensusProfileV2 {
         protocol_limits: ProtocolLimitsV2,
         verifier: &V,
     ) -> Result<Self> {
-        let pending_invoices = u64::try_from(protocol_limits.max_pending_invoices)
-            .map_err(|_| AbciAdapterError::InvalidRequest("pending Invoice limit exceeds u64"))?;
-        let chain_len = u64::try_from(ledger_chain_id.as_str().len())
-            .map_err(|_| AbciAdapterError::InvalidRequest("Ledger chain id length exceeds u64"))?;
-        let mut hasher = Sha256::new();
-        hasher.update(b"bitcoin-thunderbolt/abci-consensus-profile/v2");
-        hasher.update(chain_len.to_be_bytes());
-        hasher.update(ledger_chain_id.as_str().as_bytes());
-        hasher.update(verifier.verifier_profile_id());
-        hasher.update(verifier.deployment_descriptor());
-        hasher.update(protocol_limits.max_entries_per_channel.to_be_bytes());
-        hasher.update(pending_invoices.to_be_bytes());
-        hasher.update(protocol_limits.max_invoice_ttl_ms.to_be_bytes());
-        for value in [
-            APPLICATION_VERSION,
-            MAX_TRANSACTION_BYTES as u64,
-            MAX_BLOCK_TRANSACTION_BYTES as u64,
-            MAX_QUERY_REQUEST_BYTES as u64,
-            MAX_QUERY_RESPONSE_BYTES as u64,
-            MAX_PREPARE_PREVIEW_WORK as u64,
-            MAX_PREPARE_SCAN_TRANSACTIONS as u64,
-            MAX_PREPARE_SCAN_BYTES as u64,
-            MAX_MISBEHAVIOR_RECORDS as u64,
-            MAX_COMMIT_VOTES as u64,
-            MAX_BLOCK_ENTRIES as u64,
-            MAX_BLOCK_EVENT_BYTES as u64,
-            MAX_STATIC_REJECTION_CACHE_ENTRIES as u64,
-        ] {
-            hasher.update(value.to_be_bytes());
-        }
+        validate_compiled_resource_limits()?;
         Ok(Self {
-            digest: hasher.finalize().into(),
+            digest: consensus_profile_digest(
+                ledger_chain_id,
+                protocol_limits,
+                verifier.verifier_profile_id(),
+                verifier.deployment_descriptor(),
+                &compiled_resource_profile_values(),
+            )?,
         })
     }
 
@@ -297,6 +281,107 @@ impl ConsensusProfileV2 {
             consensus_profile_digest: &self.digest,
         })?)
     }
+}
+
+fn consensus_profile_digest(
+    ledger_chain_id: &thunderbolt_ledger::LedgerChainIdV2,
+    protocol_limits: ProtocolLimitsV2,
+    verifier_profile_id: [u8; 32],
+    deployment_descriptor: [u8; 32],
+    resource_values: &[u64],
+) -> Result<[u8; 32]> {
+    let pending_invoices = u64::try_from(protocol_limits.max_pending_invoices)
+        .map_err(|_| AbciAdapterError::InvalidRequest("pending Invoice limit exceeds u64"))?;
+    let chain_len = u64::try_from(ledger_chain_id.as_str().len())
+        .map_err(|_| AbciAdapterError::InvalidRequest("Ledger chain id length exceeds u64"))?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"bitcoin-thunderbolt/abci-consensus-profile/v2");
+    hasher.update(chain_len.to_be_bytes());
+    hasher.update(ledger_chain_id.as_str().as_bytes());
+    hasher.update(verifier_profile_id);
+    hasher.update(deployment_descriptor);
+    hasher.update(protocol_limits.max_entries_per_channel.to_be_bytes());
+    hasher.update(pending_invoices.to_be_bytes());
+    hasher.update(protocol_limits.max_invoice_ttl_ms.to_be_bytes());
+    for value in resource_values {
+        hasher.update(value.to_be_bytes());
+    }
+    Ok(hasher.finalize().into())
+}
+
+#[cfg(test)]
+const COMPILED_RETAINED_STATE_INDEX: usize = 6;
+
+fn compiled_resource_profile_values() -> [u64; 22] {
+    [
+        APPLICATION_VERSION,
+        MAX_ARTIFACT_BYTES_V2 as u64,
+        EVENT_BYTES_MAX as u64,
+        MAX_SIGNED_PROPOSAL_JSON_BYTES as u64,
+        SIGNED_PROPOSAL_RPC_METADATA_ALLOWANCE_BYTES as u64,
+        MAX_PENDING_INVOICE_EVENT_BYTES_V2 as u64,
+        MAX_RETAINED_CHANNEL_STATE_BYTES_V2 as u64,
+        MAX_CANONICAL_SNAPSHOT_BYTES_V2 as u64,
+        SNAPSHOT_CANONICAL_FRAMING_ALLOWANCE_BYTES_V2 as u64,
+        SNAPSHOT_QUERY_JSON_METADATA_ALLOWANCE_BYTES as u64,
+        MAX_TRANSACTION_BYTES as u64,
+        MAX_BLOCK_TRANSACTION_BYTES as u64,
+        MAX_QUERY_REQUEST_BYTES as u64,
+        MAX_QUERY_RESPONSE_BYTES as u64,
+        MAX_PREPARE_PREVIEW_WORK as u64,
+        MAX_PREPARE_SCAN_TRANSACTIONS as u64,
+        MAX_PREPARE_SCAN_BYTES as u64,
+        MAX_MISBEHAVIOR_RECORDS as u64,
+        MAX_COMMIT_VOTES as u64,
+        MAX_BLOCK_ENTRIES as u64,
+        MAX_BLOCK_EVENT_BYTES as u64,
+        MAX_STATIC_REJECTION_CACHE_ENTRIES as u64,
+    ]
+}
+
+fn validate_compiled_resource_limits() -> Result<()> {
+    let closed_request_bytes = EVENT_BYTES_MAX
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(SIGNED_PROPOSAL_RPC_METADATA_ALLOWANCE_BYTES))
+        .ok_or(AbciAdapterError::InvalidRequest(
+            "compiled request byte relationship overflows",
+        ))?;
+    let worst_block_transaction_bytes = MAX_BLOCK_EVENT_BYTES
+        .checked_mul(2)
+        .and_then(|value| {
+            MAX_BLOCK_ENTRIES
+                .checked_mul(SIGNED_PROPOSAL_RPC_METADATA_ALLOWANCE_BYTES)
+                .and_then(|allowance| value.checked_add(allowance))
+        })
+        .ok_or(AbciAdapterError::InvalidRequest(
+            "compiled block byte relationship overflows",
+        ))?;
+    let maximum_snapshot_bytes = MAX_RETAINED_CHANNEL_STATE_BYTES_V2
+        .checked_add(SNAPSHOT_CANONICAL_FRAMING_ALLOWANCE_BYTES_V2)
+        .ok_or(AbciAdapterError::InvalidRequest(
+            "compiled snapshot byte relationship overflows",
+        ))?;
+    let maximum_snapshot_query_bytes = MAX_RETAINED_CHANNEL_STATE_BYTES_V2
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(SNAPSHOT_QUERY_JSON_METADATA_ALLOWANCE_BYTES))
+        .ok_or(AbciAdapterError::InvalidRequest(
+            "compiled snapshot query relationship overflows",
+        ))?;
+    if closed_request_bytes != MAX_SIGNED_PROPOSAL_JSON_BYTES
+        || MAX_TRANSACTION_BYTES != MAX_SIGNED_PROPOSAL_JSON_BYTES
+        || MAX_TRANSACTION_BYTES > MAX_BLOCK_TRANSACTION_BYTES
+        || worst_block_transaction_bytes > MAX_BLOCK_TRANSACTION_BYTES
+        || MAX_BLOCK_TRANSACTION_BYTES > MAX_PREPARE_SCAN_BYTES
+        || MAX_PENDING_INVOICE_EVENT_BYTES_V2 > MAX_BLOCK_EVENT_BYTES
+        || MAX_PENDING_INVOICE_EVENT_BYTES_V2 > MAX_RETAINED_CHANNEL_STATE_BYTES_V2
+        || maximum_snapshot_bytes != MAX_CANONICAL_SNAPSHOT_BYTES_V2
+        || maximum_snapshot_query_bytes != MAX_QUERY_RESPONSE_BYTES
+    {
+        return Err(AbciAdapterError::InvalidRequest(
+            "compiled transaction, event, block, and pending-state byte limits are inconsistent",
+        ));
+    }
+    Ok(())
 }
 
 /// Clone-safe ABCI application backed by one synchronized Ledger application.

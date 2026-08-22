@@ -66,17 +66,17 @@ digesting are available, but `to_core`, `from_core`, and `verify` intentionally
 fail at the core raw-profile ingress before constructing a 3072-bit key. There
 is no fallback to the legacy 2048-bit profile.
 
-The 256-member topology fits the 2 MiB wire cap but does not fit the current
-Ledger transport. With maximum identifiers and threshold 256, measured compact
-sizes are 212,661 bytes for the wrapped `RecipientShare`, 1,491,757 bytes for
+The 256-member topology fits the coordinated release caps. With maximum
+identifiers and threshold 256, measured compact sizes are 212,661 bytes for the
+wrapped `RecipientShare`, 1,491,757 bytes for
 the wrapped `ThresholdRefresh`, 1,705,843 bytes for the corresponding canonical
 `InvoiceEventV2`, 3,413,182 bytes for its hex-wrapped signed-proposal JSON, and
-3,413,339 bytes for the Ledger-RPC request. These exceed the current 1 MiB
-`Artifact`, 256 KiB event, and 2 MiB RPC-request limits. Protocol-v2 activation
-therefore remains blocked until one coordinated Ledger, ABCI, RPC, storage, and
-consensus sizing change lands with load and denial-of-service review. The wire
-crate does not silently shrink the protocol's 256-member topology to fit the
-old event limit.
+3,413,339 bytes for the Ledger-RPC request. The Ledger stack permits 2 MiB
+`ArtifactV2` values while retaining v1's 1 MiB `Artifact`; events use up to
+2 MiB minus a 2 KiB transport reserve, with 4 MiB signed
+and RPC request bodies. Independent 8 MiB pending-Invoice and 11 MiB retained
+state budgets keep snapshots and query responses bounded. The wire crate does
+not shrink the protocol's 256-member topology to fit a transport limit.
 
 ## Stable version 2 binding
 

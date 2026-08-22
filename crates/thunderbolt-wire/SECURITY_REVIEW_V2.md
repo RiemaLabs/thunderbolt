@@ -48,11 +48,18 @@ No 2048-bit fallback exists. A focused regression test supplies legacy typed mat
 
 The Recipient proof remains the implemented `tb/share` transcript. A v2-only derived Fiat-Shamir context now commits the stable channel context, mandatory profile, complete operation, and expected step. Recipient and VESS proofs additionally share one context that commits the package id and ordered roster commitment. The two-message threshold package also binds the Recipient statement, distribution, and public points at the wire and package-digest boundary. It is not represented as the paper's exact `R_inv^thr` transcript. The source and README state this limitation explicitly.
 
-### Cross-layer size blocker, not a finding
+### Cross-layer size follow-up
 
 The maximum 256-member topology fits the 2 MiB wire-message limit, but it cannot enter the current Ledger stack. With maximum identifiers, vout, step, and threshold, the locked measurements are 212,661 bytes for wrapped RecipientShare, 1,491,757 bytes for wrapped ThresholdRefresh, 1,705,843 bytes for the canonical Invoice event, 3,413,182 bytes for signed-proposal JSON, and 3,413,339 bytes for the Ledger-RPC request.
 
-These exceed the current 1 MiB Artifact, 256 KiB event, and 2 MiB RPC request limits. Activation remains blocked pending one coordinated Ledger, ABCI, RPC, storage, and consensus cap change. The wire format keeps the protocol's 256-member topology rather than silently shrinking it to match an obsolete transport limit.
+At the time of this wire-only review, these exceeded the 1 MiB Artifact,
+256 KiB event, and 2 MiB RPC request limits. The coordinated follow-up now uses
+2 MiB `ArtifactV2` values without changing v1's 1 MiB `Artifact`, a
+2 MiB-minus-2 KiB event limit, 4 MiB signed/RPC requests,
+and consensus-bound pending, retained-state, snapshot, block, and query
+relationships. The wire format keeps the protocol's 256-member topology rather
+than silently shrinking it to match an obsolete transport limit. Production
+proof activation remains independently blocked on the Paillier backend.
 
 ## Adversarial analysis
 
@@ -111,7 +118,8 @@ An independent focused re-review examined the final stable working diff after th
 - Adopt and audit an approved arbitrary-precision Paillier backend before enabling v2 conversion or verification.
 - Re-run real 3072-bit invoice, transfer, share, and threshold proof vectors after that backend exists.
 - Treat an exact `R_inv^thr` transcript as a separately versioned cryptographic change if implemented.
-- Land coordinated Ledger, ABCI, RPC, storage, and consensus size limits before routing maximum-topology messages.
+- Keep the coordinated Ledger, ABCI, RPC, storage, and consensus size profile
+  locked to the maximum-topology regression.
 
 ### Before integration
 

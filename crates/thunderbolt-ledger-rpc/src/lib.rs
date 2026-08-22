@@ -3,7 +3,8 @@
 //! This crate deliberately separates three different facts:
 //!
 //! 1. a transport admitted a signed proposal;
-//! 2. [`thunderbolt_ledger::ExecutedBlockV2`] is internally deterministic; and
+//! 2. [`thunderbolt_ledger::ExecutedBlockCommitmentV2`] plus an exact entry and
+//!    Merkle proof establish deterministic execution consistency; and
 //! 3. an external consensus verifier accepted an opaque finality receipt.
 //!
 //! Encoding or decoding never creates finality authority. Concrete HTTP, gRPC,

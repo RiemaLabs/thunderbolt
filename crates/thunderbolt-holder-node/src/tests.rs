@@ -16,8 +16,8 @@ use thunderbolt_ledger::{
     ActorPublicKeyV2, ActorRoleV2, ActorSignatureV2, ClientRequestNonceV2, EntryHashV2, ProposalDigestV2,
     SignedProposalV2,
 };
+use thunderbolt_protocol::v2::ArtifactV2;
 use thunderbolt_protocol::v2::{ChannelEventV2, OpenEventV2};
-use thunderbolt_protocol::Artifact;
 use thunderbolt_wire::{
     AnchorParameterSuiteIdV2, BitcoinGenesisHashV2, ChannelBindingV2, CommitteeDescriptorDigestV2, FundingOutpointV2,
     ProtocolSuiteIdV2,
@@ -338,10 +338,10 @@ fn queue_request(
             committee_member_count: 3,
             committee_threshold: 2,
             capacity_sat: 50_000,
-            lock_key: Artifact::new(vec![0x41; 33])?,
-            initial_holder_anchor: Artifact::new(vec![0x42; 33])?,
-            initial_holder_ciphertext: Artifact::new(vec![0x43; 64])?,
-            open_proof: Artifact::new(vec![0x44; 64])?,
+            lock_key: ArtifactV2::new(vec![0x41; 33])?,
+            initial_holder_anchor: ArtifactV2::new(vec![0x42; 33])?,
+            initial_holder_ciphertext: ArtifactV2::new(vec![0x43; 64])?,
+            open_proof: ArtifactV2::new(vec![0x44; 64])?,
         }),
         now_ms,
     })

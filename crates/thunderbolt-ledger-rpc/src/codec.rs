@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use thunderbolt_ledger::MAX_SIGNED_PROPOSAL_JSON_BYTES;
 
 use crate::{
     primitives::digest_request, CorrelatedRpcResponseV2, Result, RpcCodecError, RpcRequestDigestV2, RpcRequestV2,
@@ -6,7 +7,7 @@ use crate::{
 };
 
 /// Maximum canonical request body accepted by the codec.
-pub const MAX_RPC_REQUEST_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_RPC_REQUEST_BYTES: usize = MAX_SIGNED_PROPOSAL_JSON_BYTES;
 /// Maximum canonical response body accepted by the codec.
 pub const MAX_RPC_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 

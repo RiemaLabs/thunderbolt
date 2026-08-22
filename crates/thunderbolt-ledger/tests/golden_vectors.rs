@@ -1,5 +1,6 @@
 mod common;
 
+use sha2::{Digest as _, Sha256};
 use thunderbolt_ledger::{ActorRoleV2, AppHashV2, MerkleSideV2, PendingBlockV2};
 
 use common::signed_open;
@@ -73,10 +74,29 @@ fn protocol_v2_hash_and_signature_golden_vectors() {
         "f54854c14b6dcc935a51d5d453066e31c21decea1c8350a295c0179a751aa5d1"
     );
 
+    let commitment = executed.commitment().expect("compact commitment");
+    assert_eq!(commitment.canonical_bytes().expect("canonical commitment").len(), 412);
+    assert_eq!(
+        hex::encode(commitment.canonical_digest().expect("commitment digest")),
+        "9829aead0b3dad6a724e85fa6a2d875fdda281cdcc98c64da9dd37ec9343eabf"
+    );
+    assert_eq!(
+        hex::encode(Sha256::digest(
+            serde_json::to_vec(&commitment).expect("commitment JSON")
+        )),
+        "ab50c79a10c8efa1d6cd8c1826eae1bae1034baed855517641dafc9c99426812"
+    );
+
     let proof = executed.entry_proof(0).expect("first entry proof");
     proof
         .verify(executed.entries()[0].metadata(), &executed)
         .expect("golden inclusion proof");
+    proof
+        .verify_against_commitment(executed.entries()[0].metadata(), &commitment)
+        .expect("golden compact inclusion proof");
+    proof
+        .verify_entry_against_commitment(&executed.entries()[0], &commitment)
+        .expect("golden compact entry proof");
     assert_eq!(proof.siblings().len(), 1);
     assert_eq!(proof.siblings()[0].side(), MerkleSideV2::Right);
     assert_eq!(

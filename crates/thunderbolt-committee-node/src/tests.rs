@@ -27,10 +27,7 @@ use thunderbolt_ledger::{
     ActorKeyAlgorithmV2, ActorPublicKeyV2, ActorRoleV2, ActorSignatureV2, AppHashV2, CanonicalEventV2,
     ClientRequestNonceV2, EntryHashV2, LedgerChainIdV2, PendingBlockV2, ProposalBodyV2, SignedProposalV2,
 };
-use thunderbolt_protocol::{
-    v2::{ChannelEventV2, InvoiceEventV2, TransferEventV2},
-    Artifact,
-};
+use thunderbolt_protocol::v2::{ArtifactV2, ChannelEventV2, InvoiceEventV2, TransferEventV2};
 use thunderbolt_wire::{
     AnchorParameterSuiteIdV2, BindingContext, BitcoinGenesisHashV2, ChannelBindingV2, CommitteeDescriptorDigestV2,
     FundingOutpointV2, ProtocolSuiteIdV2, ShareEnvelopeV1, ThresholdEnvelopeV1, TransferEnvelopeV1,
@@ -589,13 +586,13 @@ fn crash_after_private_update_replays_into_one_outbox_record() -> std::result::R
     let invoice_event = ChannelEventV2::Invoice(InvoiceEventV2 {
         invoice_id: thunderbolt_wire::InvoiceId::from_bytes("invoice", b"invoice-9")?,
         holder_step: 0,
-        recipient_encryption_key: Artifact::new(recipient_statement.recipient_key.to_bytes())?,
-        public_delta: Artifact::new(distribution.delta.serialize())?,
-        recipient_ciphertext: Artifact::new(recipient_statement.ciphertext.to_bytes())?,
-        committee_package: Artifact::new(thunderbolt_wire::to_json_vec(
+        recipient_encryption_key: ArtifactV2::new(recipient_statement.recipient_key.to_bytes())?,
+        public_delta: ArtifactV2::new(distribution.delta.serialize())?,
+        recipient_ciphertext: ArtifactV2::new(recipient_statement.ciphertext.to_bytes())?,
+        committee_package: ArtifactV2::new(thunderbolt_wire::to_json_vec(
             &thunderbolt_wire::PublicMessageV1::ThresholdRefresh(threshold_distribution.clone()),
         )?)?,
-        invoice_proof: Artifact::new(thunderbolt_wire::to_json_vec(
+        invoice_proof: ArtifactV2::new(thunderbolt_wire::to_json_vec(
             &thunderbolt_wire::PublicMessageV1::Share(recipient_share.clone()),
         )?)?,
         expires_at_ms: 100_000,
@@ -612,9 +609,9 @@ fn crash_after_private_update_replays_into_one_outbox_record() -> std::result::R
     let transfer_event = ChannelEventV2::Transfer(TransferEventV2 {
         invoice_id: thunderbolt_wire::InvoiceId::from_bytes("invoice", b"invoice-9")?,
         invoice_entry_hash: invoice_hash.clone(),
-        next_holder_anchor: Artifact::new(next_anchor.serialize())?,
-        next_holder_ciphertext: Artifact::new(transfer_statement.next_holder_ciphertext.to_bytes())?,
-        transfer_proof: Artifact::new(thunderbolt_wire::to_json_vec(
+        next_holder_anchor: ArtifactV2::new(next_anchor.serialize())?,
+        next_holder_ciphertext: ArtifactV2::new(transfer_statement.next_holder_ciphertext.to_bytes())?,
+        transfer_proof: ArtifactV2::new(thunderbolt_wire::to_json_vec(
             &thunderbolt_wire::PublicMessageV1::Transfer(transfer_proof.clone()),
         )?)?,
     });

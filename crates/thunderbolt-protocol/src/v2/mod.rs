@@ -33,10 +33,12 @@ pub use thunderbolt_ledger::{
 };
 pub use thunderbolt_wire::{ChannelBindingV2, InvoiceId as InvoiceIdV2};
 pub use types::{
-    ChannelEventV2, ChannelPhaseV2, ChannelSnapshotV2, FinalizeEventV2, InvoiceEventV2, OpenEventV2, PendingInvoiceV2,
-    ProtocolLimitsV2, StateHashV2, TransferEventV2, V2Error, ABSOLUTE_MAX_INVOICE_TTL_MS_V2,
+    ArtifactV2, ChannelEventV2, ChannelPhaseV2, ChannelSnapshotV2, FinalizeEventV2, InvoiceEventV2, OpenEventV2,
+    PendingInvoiceV2, ProtocolLimitsV2, StateHashV2, TransferEventV2, V2Error, ABSOLUTE_MAX_INVOICE_TTL_MS_V2,
     ABSOLUTE_MAX_PENDING_INVOICES_V2, DEFAULT_MAX_ENTRIES_PER_CHANNEL_V2, DEFAULT_MAX_INVOICE_TTL_MS_V2,
-    DEFAULT_MAX_PENDING_INVOICES_V2, HASH_FORMAT_VERSION_V2, MAX_COMMITTEE_MEMBERS_V2, PROTOCOL_VERSION_V2,
+    DEFAULT_MAX_PENDING_INVOICES_V2, HASH_FORMAT_VERSION_V2, MAX_ARTIFACT_BYTES_V2, MAX_CANONICAL_SNAPSHOT_BYTES_V2,
+    MAX_COMMITTEE_MEMBERS_V2, MAX_PENDING_INVOICE_EVENT_BYTES_V2, MAX_RETAINED_CHANNEL_STATE_BYTES_V2,
+    PROTOCOL_VERSION_V2, SNAPSHOT_CANONICAL_FRAMING_ALLOWANCE_BYTES_V2,
 };
 
 #[cfg(test)]

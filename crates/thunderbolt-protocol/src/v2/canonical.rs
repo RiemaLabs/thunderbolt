@@ -1,16 +1,15 @@
-use crate::Artifact;
 use thunderbolt_ledger::EntryHashV2;
 use thunderbolt_wire::{CanonicalDigest as _, HexBytes, InvoiceId};
 
 use super::{
-    ChannelEventV2, ChannelPhaseV2, ChannelSnapshotV2, FinalizeEventV2, InvoiceEventV2, OpenEventV2, TransferEventV2,
-    V2Error, HASH_FORMAT_VERSION_V2,
+    ArtifactV2, ChannelEventV2, ChannelPhaseV2, ChannelSnapshotV2, FinalizeEventV2, InvoiceEventV2, OpenEventV2,
+    TransferEventV2, V2Error, HASH_FORMAT_VERSION_V2,
 };
 
 const EVENT_DOMAIN: &[u8] = b"bitcoin-thunderbolt/protocol-event/v2";
 
 pub(crate) fn encoded_event_len(event: &ChannelEventV2) -> Option<usize> {
-    let mut length = 8_usize.checked_add(EVENT_DOMAIN.len())?.checked_add(3)?;
+    let mut length = event_prefix_len()?;
     match event {
         ChannelEventV2::Open(event) => {
             add_len(&mut length, 12)?;
@@ -19,15 +18,7 @@ pub(crate) fn encoded_event_len(event: &ChannelEventV2) -> Option<usize> {
             add_bytes_len(&mut length, event.initial_holder_ciphertext.as_bytes())?;
             add_bytes_len(&mut length, event.open_proof.as_bytes())?;
         }
-        ChannelEventV2::Invoice(event) => {
-            add_bytes_len(&mut length, event.invoice_id.as_bytes())?;
-            add_len(&mut length, 16)?;
-            add_bytes_len(&mut length, event.recipient_encryption_key.as_bytes())?;
-            add_bytes_len(&mut length, event.public_delta.as_bytes())?;
-            add_bytes_len(&mut length, event.recipient_ciphertext.as_bytes())?;
-            add_bytes_len(&mut length, event.committee_package.as_bytes())?;
-            add_bytes_len(&mut length, event.invoice_proof.as_bytes())?;
-        }
+        ChannelEventV2::Invoice(event) => add_invoice_len(&mut length, event)?,
         ChannelEventV2::Transfer(event) => {
             add_bytes_len(&mut length, event.invoice_id.as_bytes())?;
             add_len(&mut length, 32)?;
@@ -43,6 +34,26 @@ pub(crate) fn encoded_event_len(event: &ChannelEventV2) -> Option<usize> {
         }
     }
     Some(length)
+}
+
+pub(crate) fn encoded_invoice_event_len(event: &InvoiceEventV2) -> Option<usize> {
+    let mut length = event_prefix_len()?;
+    add_invoice_len(&mut length, event)?;
+    Some(length)
+}
+
+fn event_prefix_len() -> Option<usize> {
+    8_usize.checked_add(EVENT_DOMAIN.len())?.checked_add(3)
+}
+
+fn add_invoice_len(length: &mut usize, event: &InvoiceEventV2) -> Option<()> {
+    add_bytes_len(length, event.invoice_id.as_bytes())?;
+    add_len(length, 16)?;
+    add_bytes_len(length, event.recipient_encryption_key.as_bytes())?;
+    add_bytes_len(length, event.public_delta.as_bytes())?;
+    add_bytes_len(length, event.recipient_ciphertext.as_bytes())?;
+    add_bytes_len(length, event.committee_package.as_bytes())?;
+    add_bytes_len(length, event.invoice_proof.as_bytes())
 }
 
 fn add_len(length: &mut usize, amount: usize) -> Option<()> {
@@ -246,7 +257,7 @@ impl CanonicalWriter {
         self.fixed(value);
     }
 
-    fn artifact(&mut self, artifact: &Artifact) {
+    fn artifact(&mut self, artifact: &ArtifactV2) {
         self.bytes(artifact.as_bytes());
     }
 
@@ -307,8 +318,8 @@ impl<'a> CanonicalReader<'a> {
         Ok(value)
     }
 
-    fn artifact(&mut self) -> Result<Artifact, V2Error> {
-        Artifact::new(self.bytes()?).map_err(|_| V2Error::InvalidCanonicalEvent)
+    fn artifact(&mut self) -> Result<ArtifactV2, V2Error> {
+        ArtifactV2::new(self.bytes()?).map_err(|_| V2Error::InvalidCanonicalEvent)
     }
 
     fn invoice_id(&mut self) -> Result<InvoiceId, V2Error> {

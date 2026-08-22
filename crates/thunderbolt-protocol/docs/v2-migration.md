@@ -32,6 +32,17 @@ budget reserves its last position for Finalize, so Invoice traffic cannot make
 the channel uncloseable. Pending state retains the exact authenticated Invoice
 payload required by the Transfer verifier.
 
+Resource bounds preserve the 256-member topology without allowing retained
+state to grow with the count bound alone. `ArtifactV2` is at most 2 MiB while
+the distinct version-one `Artifact` remains capped at 1 MiB;
+one canonical event is at most 2 MiB minus a 2 KiB JSON-transport reserve.
+Pending Invoice events have both the independent 32-entry count bound and an
+8 MiB cumulative canonical-byte budget. The lock key, current Holder
+anchor/ciphertext, and all pending Invoice events together have an 11 MiB
+retained-state budget. Canonical snapshot framing is capped at 12 MiB. These
+fixed limits are part of the Ledger consensus profile and are revalidated when
+stored state is loaded after restart.
+
 Ledger block time is positive trusted consensus input, not client evidence. The
 reducer accepts time only through a proposal position in a validated pending
 block or through recomputed executed-entry metadata, and it pins one expected

@@ -7,9 +7,8 @@ use thunderbolt_ledger::{
     ClientRequestNonceV2, EntryHashV2, LedgerChainIdV2, ProposalBodyV2, SignedProposalV2,
 };
 use thunderbolt_protocol::v2::{
-    ChannelEventV2, ChannelSnapshotV2, FinalizeEventV2, InvoiceEventV2, OpenEventV2, TransferEventV2,
+    ArtifactV2, ChannelEventV2, ChannelSnapshotV2, FinalizeEventV2, InvoiceEventV2, OpenEventV2, TransferEventV2,
 };
-use thunderbolt_protocol::Artifact;
 use thunderbolt_wire::{
     AnchorParameterSuiteIdV2, BitcoinGenesisHashV2, ChannelBindingV2, CommitteeDescriptorDigestV2, FundingOutpointV2,
     HexBytes, ProtocolSuiteIdV2,
@@ -21,8 +20,8 @@ pub fn chain_id() -> LedgerChainIdV2 {
     LedgerChainIdV2::new(TEST_CHAIN_ID).expect("test chain id")
 }
 
-pub fn artifact(byte: u8) -> Artifact {
-    Artifact::new([byte]).expect("bounded public artifact")
+pub fn artifact(byte: u8) -> ArtifactV2 {
+    ArtifactV2::new([byte]).expect("bounded public artifact")
 }
 
 pub fn invoice_id(index: u32) -> thunderbolt_protocol::v2::InvoiceIdV2 {

@@ -4,12 +4,56 @@ use proptest::prelude::*;
 use thunderbolt_ledger::{AppHashV2, ChannelContextIdV2, LedgerChainIdV2, ParticipantIdV2, RequestDigestV2};
 use thunderbolt_ledger_rpc::{
     AmbiguityTokenV2, ChannelStatusRequestV2, ChannelStatusResponseV2, FinalityStatusV2, HistoryCursorV2,
-    HistoryPageLimitV2, HistoryRequestV2, RequestStatusRequestV2, RollbackFloorCasResponseV2, RollbackFloorCasStatusV2,
-    RpcRequestV2, RpcResponseV2, SnapshotBytesV2,
+    HistoryPageLimitV2, HistoryRequestV2, RequestLifecycleV2, RequestStatusRequestV2, RequestStatusResponseV2,
+    RollbackFloorCasResponseV2, RollbackFloorCasStatusV2, RpcRequestV2, RpcResponseV2, SnapshotBytesV2,
 };
 
 fn fail(error: impl std::fmt::Display) -> TestCaseError {
     TestCaseError::fail(error.to_string())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(96))]
+
+    #[test]
+    fn compact_finality_round_trips_and_app_hash_tamper_fails(
+        discriminator in 1_u8..=250,
+        profile_byte in 1_u8..=255,
+        receipt in prop::collection::vec(any::<u8>(), 1..=512),
+        bit in 0_u8..8,
+    ) {
+        let bundle = common::finalized_bundle(discriminator, profile_byte, receipt);
+        let metadata = bundle.entry().metadata();
+        let query = RequestStatusRequestV2::new(
+            metadata.ledger_chain_id().clone(),
+            metadata.channel_context_id().clone(),
+            metadata.participant_id().clone(),
+            metadata.request_digest().clone(),
+        );
+        let response = RpcResponseV2::RequestStatus(Box::new(
+            RequestStatusResponseV2::new(
+                &query,
+                RequestLifecycleV2::FinalityReceiptAvailable {
+                    bundle: Box::new(bundle),
+                },
+            ).map_err(fail)?,
+        ));
+        let encoded = response.to_canonical_bytes().map_err(fail)?;
+        let rpc_request = RpcRequestV2::RequestStatus(query);
+        let correlated = RpcResponseV2::from_canonical_bytes_for(&encoded, &rpc_request).map_err(fail)?;
+        prop_assert_eq!(correlated.response(), &response);
+
+        let mut value: serde_json::Value = serde_json::from_slice(&encoded).map_err(fail)?;
+        let app_hash = value["response"]["result"]["lifecycle"]["bundle"]["commitment"]["app_hash"]
+            .as_str()
+            .ok_or_else(|| TestCaseError::fail("missing compact commitment app hash"))?;
+        let mut app_hash = hex::decode(app_hash).map_err(fail)?;
+        app_hash[0] ^= 1_u8 << bit;
+        value["response"]["result"]["lifecycle"]["bundle"]["commitment"]["app_hash"] =
+            serde_json::Value::String(hex::encode(app_hash));
+        let tampered = serde_json::to_vec(&value).map_err(fail)?;
+        prop_assert!(RpcResponseV2::from_canonical_bytes_for(tampered, &rpc_request).is_err());
+    }
 }
 
 proptest! {

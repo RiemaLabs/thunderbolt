@@ -149,19 +149,51 @@ impl EntryMerkleProofV2 {
     /// state, and consensus finality must be established by an external quorum
     /// or light-client receipt.
     pub fn verify(&self, metadata: &ExecutedEntryMetadataV2, block: &ExecutedBlockV2) -> Result<()> {
-        self.validate_shape()?;
-        let block_leaf_count =
-            u32::try_from(block.entries().len()).map_err(|_| LedgerContractError::InvalidMerkleProof {
+        let commitment = block
+            .commitment()
+            .map_err(|_| LedgerContractError::InvalidMerkleProof {
                 reason: "executed block entry count does not fit in u32",
             })?;
-        if self.ledger_chain_id != *block.ledger_chain_id()
-            || self.block_height != block.height()
-            || self.block_time_ms != block.block_time_ms()
-            || self.leaf_count != block_leaf_count
+        self.verify_with_commitment(
+            metadata,
+            &commitment,
+            "proof scope does not match executed block",
+            "inclusion path does not reconstruct the executed block Merkle root",
+        )
+    }
+
+    /// Verifies exact metadata inclusion against a compact executed-block commitment.
+    ///
+    /// The commitment is deterministic execution output only. The caller must
+    /// separately authenticate its application hash through consensus finality.
+    pub fn verify_against_commitment(
+        &self,
+        metadata: &ExecutedEntryMetadataV2,
+        commitment: &ExecutedBlockCommitmentV2,
+    ) -> Result<()> {
+        self.verify_with_commitment(
+            metadata,
+            commitment,
+            "proof scope does not match executed-block commitment",
+            "inclusion path does not reconstruct the committed Merkle root",
+        )
+    }
+
+    fn verify_with_commitment(
+        &self,
+        metadata: &ExecutedEntryMetadataV2,
+        commitment: &ExecutedBlockCommitmentV2,
+        scope_reason: &'static str,
+        root_reason: &'static str,
+    ) -> Result<()> {
+        self.validate_shape()?;
+        commitment.validate()?;
+        if self.ledger_chain_id != *commitment.ledger_chain_id()
+            || self.block_height != commitment.height()
+            || self.block_time_ms != commitment.block_time_ms()
+            || self.leaf_count != commitment.entry_count()
         {
-            return Err(LedgerContractError::InvalidMerkleProof {
-                reason: "proof scope does not match executed block",
-            });
+            return Err(LedgerContractError::InvalidMerkleProof { reason: scope_reason });
         }
         if metadata.ledger_chain_id() != &self.ledger_chain_id
             || metadata.block_height() != self.block_height
@@ -179,12 +211,29 @@ impl EntryMerkleProofV2 {
                 MerkleSideV2::Right => merkle_node_hash(&running, sibling.hash.as_bytes())?,
             };
         }
-        if &running != block.entry_merkle_root().as_bytes() {
-            return Err(LedgerContractError::InvalidMerkleProof {
-                reason: "inclusion path does not reconstruct the executed block Merkle root",
-            });
+        if &running != commitment.entry_merkle_root().as_bytes() {
+            return Err(LedgerContractError::InvalidMerkleProof { reason: root_reason });
         }
         Ok(())
+    }
+
+    /// Recomputes an exact entry's metadata and verifies it against a compact commitment.
+    pub fn verify_entry_against_commitment(
+        &self,
+        entry: &ExecutedEntryV2,
+        commitment: &ExecutedBlockCommitmentV2,
+    ) -> Result<()> {
+        let expected =
+            ExecutedEntryMetadataV2::derive(self.block_height, self.block_time_ms, self.leaf_index, entry.proposal());
+        let expected = expected.map_err(|_| LedgerContractError::InvalidMerkleProof {
+            reason: "executed entry cannot reproduce proof-scoped metadata",
+        })?;
+        if &expected != entry.metadata() {
+            return Err(LedgerContractError::InvalidMerkleProof {
+                reason: "executed entry metadata does not match its proposal and proof index",
+            });
+        }
+        self.verify_against_commitment(entry.metadata(), commitment)
     }
 
     /// Returns the Ledger chain id of the executed block.
@@ -250,6 +299,203 @@ impl EntryMerkleProofV2 {
             });
         }
         Ok(())
+    }
+}
+
+/// Compact, self-validating commitment to one deterministic executed block.
+///
+/// This value omits executed entries while retaining every field needed to
+/// recompute the application hash and verify ordered entry inclusion. It is not
+/// a consensus-finality capability by itself.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutedBlockCommitmentV2 {
+    ledger_chain_id: LedgerChainIdV2,
+    height: u64,
+    block_time_ms: u64,
+    previous_app_hash: AppHashV2,
+    entry_count: u32,
+    entry_merkle_root: EntryMerkleRootV2,
+    app_hash: AppHashV2,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutedBlockCommitmentInput {
+    ledger_chain_id: LedgerChainIdV2,
+    height: u64,
+    block_time_ms: u64,
+    previous_app_hash: AppHashV2,
+    entry_count: u32,
+    entry_merkle_root: EntryMerkleRootV2,
+    app_hash: AppHashV2,
+}
+
+impl<'de> Deserialize<'de> for ExecutedBlockCommitmentV2 {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let input = ExecutedBlockCommitmentInput::deserialize(deserializer)?;
+        Self::new(
+            input.ledger_chain_id,
+            input.height,
+            input.block_time_ms,
+            input.previous_app_hash,
+            input.entry_count,
+            input.entry_merkle_root,
+            input.app_hash,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+impl ExecutedBlockCommitmentV2 {
+    /// Validates and constructs an exact compact executed-block commitment.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        ledger_chain_id: LedgerChainIdV2,
+        height: u64,
+        block_time_ms: u64,
+        previous_app_hash: AppHashV2,
+        entry_count: u32,
+        entry_merkle_root: EntryMerkleRootV2,
+        app_hash: AppHashV2,
+    ) -> Result<Self> {
+        let commitment = Self {
+            ledger_chain_id,
+            height,
+            block_time_ms,
+            previous_app_hash,
+            entry_count,
+            entry_merkle_root,
+            app_hash,
+        };
+        commitment.validate()?;
+        Ok(commitment)
+    }
+
+    /// Derives the compact commitment from a fully validated executed block.
+    pub fn from_executed_block(block: &ExecutedBlockV2) -> Result<Self> {
+        let entry_count = u32::try_from(block.entries().len()).map_err(|_| LedgerContractError::InvalidBlock {
+            reason: "executed block entry count does not fit in u32",
+        })?;
+        Self::new(
+            block.ledger_chain_id().clone(),
+            block.height(),
+            block.block_time_ms(),
+            block.previous_app_hash().clone(),
+            entry_count,
+            block.entry_merkle_root().clone(),
+            block.app_hash().clone(),
+        )
+    }
+
+    /// Recomputes and checks the application hash and all standalone shape rules.
+    pub fn validate(&self) -> Result<()> {
+        validate_height_and_previous_app_hash(self.height, &self.previous_app_hash).map_err(|_| {
+            LedgerContractError::InvalidBlock {
+                reason: "height and previous application hash are inconsistent",
+            }
+        })?;
+        validate_block_time(self.block_time_ms).map_err(|_| LedgerContractError::InvalidBlock {
+            reason: "block time must be positive",
+        })?;
+        let entry_count = usize::try_from(self.entry_count).map_err(|_| LedgerContractError::InvalidBlock {
+            reason: "entry count does not fit in usize",
+        })?;
+        if entry_count > MAX_BLOCK_ENTRIES {
+            return Err(LedgerContractError::InvalidBlock {
+                reason: "entry count exceeds the per-block limit",
+            });
+        }
+        if entry_count == 0 && self.entry_merkle_root != entry_merkle_root_v2(&[])? {
+            return Err(LedgerContractError::InvalidBlock {
+                reason: "empty commitment does not use the canonical empty Merkle root",
+            });
+        }
+        let expected = compute_app_hash_v2(
+            &self.ledger_chain_id,
+            &self.previous_app_hash,
+            self.height,
+            self.block_time_ms,
+            self.entry_count,
+            &self.entry_merkle_root,
+        )?;
+        if expected != self.app_hash {
+            return Err(LedgerContractError::InvalidBlock {
+                reason: "application hash does not match the committed block fields",
+            });
+        }
+        Ok(())
+    }
+
+    /// Returns the stable canonical binary transcript.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
+        Ok(self.canonical_transcript()?.finish())
+    }
+
+    /// Returns the SHA-256 digest of the canonical commitment transcript.
+    pub fn canonical_digest(&self) -> Result<[u8; 32]> {
+        Ok(self.canonical_transcript()?.digest())
+    }
+
+    /// Rejects a commitment from another consensus Ledger cluster.
+    pub fn validate_chain_id(&self, expected: &LedgerChainIdV2) -> Result<()> {
+        if &self.ledger_chain_id != expected {
+            return Err(LedgerContractError::InvalidBlock {
+                reason: "Ledger chain id does not match the expected consensus chain",
+            });
+        }
+        Ok(())
+    }
+
+    /// Returns the consensus Ledger chain id.
+    pub const fn ledger_chain_id(&self) -> &LedgerChainIdV2 {
+        &self.ledger_chain_id
+    }
+
+    /// Returns the positive consensus block height.
+    pub const fn height(&self) -> u64 {
+        self.height
+    }
+
+    /// Returns the positive consensus block time in Unix milliseconds.
+    pub const fn block_time_ms(&self) -> u64 {
+        self.block_time_ms
+    }
+
+    /// Returns the exact prior application hash.
+    pub const fn previous_app_hash(&self) -> &AppHashV2 {
+        &self.previous_app_hash
+    }
+
+    /// Returns the number of ordered entry leaves.
+    pub const fn entry_count(&self) -> u32 {
+        self.entry_count
+    }
+
+    /// Returns the ordered entry-Merkle root.
+    pub const fn entry_merkle_root(&self) -> &EntryMerkleRootV2 {
+        &self.entry_merkle_root
+    }
+
+    /// Returns the deterministic application hash after the block.
+    pub const fn app_hash(&self) -> &AppHashV2 {
+        &self.app_hash
+    }
+
+    fn canonical_transcript(&self) -> Result<CanonicalTranscript> {
+        self.validate()?;
+        let mut transcript = CanonicalTranscript::new(b"bitcoin-thunderbolt/executed-block-commitment/v2")?;
+        transcript.item(b"ledger_chain_id", self.ledger_chain_id.as_bytes())?;
+        transcript.u64(b"block_height", self.height)?;
+        transcript.u64(b"block_time_ms", self.block_time_ms)?;
+        transcript.item(b"previous_app_hash", self.previous_app_hash.as_bytes())?;
+        transcript.u32(b"entry_count", self.entry_count)?;
+        transcript.item(b"entry_merkle_root", self.entry_merkle_root.as_bytes())?;
+        transcript.item(b"app_hash", self.app_hash.as_bytes())?;
+        Ok(transcript)
     }
 }
 
@@ -755,6 +1001,11 @@ impl ExecutedBlockV2 {
         entry_merkle_proof_v2(&metadata, leaf_index)
     }
 
+    /// Derives a compact commitment without copying executed entries.
+    pub fn commitment(&self) -> Result<ExecutedBlockCommitmentV2> {
+        ExecutedBlockCommitmentV2::from_executed_block(self)
+    }
+
     /// Returns the ordered entry Merkle root.
     pub const fn entry_merkle_root(&self) -> &EntryMerkleRootV2 {
         &self.entry_merkle_root
@@ -769,8 +1020,9 @@ impl ExecutedBlockV2 {
 /// Generates a canonical leaf-to-root inclusion proof for executed metadata.
 ///
 /// The metadata must describe one ordered, non-empty executed block. The proof
-/// authenticates only against an [`ExecutedBlockV2`] Merkle root; it carries no
-/// consensus-finality receipt.
+/// authenticates against an [`ExecutedBlockV2`] or
+/// [`ExecutedBlockCommitmentV2`] Merkle root; it carries no consensus-finality
+/// receipt.
 pub fn entry_merkle_proof_v2(metadata: &[ExecutedEntryMetadataV2], leaf_index: usize) -> Result<EntryMerkleProofV2> {
     let _ = entry_merkle_root_v2(metadata)?;
     let target = metadata

@@ -7,8 +7,11 @@ This crate defines the versioned control-plane messages shared by Ledger clients
 Three results are deliberately different:
 
 1. `AdmissionStatusV2::Accepted` means only that a transport admitted a signed proposal.
-2. `ExecutedBlockV2` and an `EntryMerkleProofV2` establish deterministic execution consistency only.
-3. `VerifiedFinalizedEntryV2` is issued only after a caller-supplied `ExternalFinalityVerifierV2` accepts the exact block, entry, proof, application version, chain, app hash, and opaque consensus receipt.
+2. `ExecutedBlockCommitmentV2`, one exact `ExecutedEntryV2`, and an
+   `EntryMerkleProofV2` establish deterministic execution consistency only.
+3. `VerifiedFinalizedEntryV2` is issued only after a caller-supplied
+   `ExternalFinalityVerifierV2` accepts the compact commitment, exact entry,
+   proof, application version, chain, app hash, and opaque consensus receipt.
 
 `FinalityStatusV2::ReceiptAvailable` does not itself grant finality. It says that bounded receipt bytes are available for verification. There is no boolean `verified` field and no public constructor for the verified capability.
 
@@ -18,7 +21,7 @@ Three results are deliberately different:
 | --- | --- | --- | --- |
 | `submit_proposal` | Ledger chain plus `SignedProposalV2` | Proposal, entry, and request digests plus admission status | Admission only |
 | `channel_status` | Ledger chain plus stable `ChannelContextIdV2` | Full channel binding, executed location, entry hash, state hash, canonical snapshot bytes, receipt availability | Materialized state observation |
-| `request_status` | Chain, channel context, participant, and request digest | Unknown, admitted, executed, or a finality-carrying entry bundle | Exact idempotency-key lookup |
+| `request_status` | Chain, channel context, participant, and request digest | Unknown, admitted, executed, or a compact finality-carrying entry bundle | Exact idempotency-key lookup |
 | `history` | Channel context, bounded page size, and global execution cursor | Bounded executed-metadata projection plus an optional next cursor | Ordered pagination |
 | `rollback_floor_cas` | The floor crate's exact chain-bound `FloorCasRequest` | Transport acceptance, explicit ambiguity, or `CheckpointCasOutcome` plus receipt | Independent rollback checkpoint |
 
@@ -40,7 +43,7 @@ The rollback-floor RPC wrapper transports `FloorCasRequest::canonical_bytes()` a
 
 ## Bounds
 
-- Request envelope: 2 MiB
+- Request envelope: 4 MiB
 - Response envelope: 32 MiB
 - Canonical snapshot bytes: 12 MiB
 - Opaque consensus receipt: 1 MiB
@@ -48,6 +51,10 @@ The rollback-floor RPC wrapper transports `FloorCasRequest::canonical_bytes()` a
 - Ambiguity token: 16 to 256 bytes
 
 Length checks happen before JSON parsing. Nested Ledger, protocol, wire, floor, and keystore constructors enforce their own tighter bounds.
+The 12 MiB snapshot cap is paired with an 8 MiB pending-Invoice sub-budget and
+an 11 MiB cumulative retained-state budget in the protocol reducer. A maximum
+256-member Invoice request is 3,413,339 bytes, and the maximum-field event limit
+retains an explicit metadata reserve below the 4 MiB request ceiling.
 
 ## Pagination
 
@@ -65,3 +72,11 @@ Height one uses the zero application hash. Later heights require a non-zero pred
 A production server adapter must authenticate clients, set deadlines and body limits before allocation, preserve explicit ambiguity for potentially committed writes, and avoid retrying non-idempotent submissions as if they had failed cleanly.
 
 A production finality verifier must pin its trust root and verifier profile, validate the intended Ledger or floor chain, prove validator quorum or light-client continuity, bind the adjacent committing header and app hash, verify application-version-two inclusion for the exact claim, and persist trusted-header progress safely. Capability issuance first requires exact equality between the receipt's profile ID and the verifier's declared profile. These consensus details are deployment design, not claims made by the research paper or by this codec.
+
+Finalized entry bundles never carry or duplicate a full `ExecutedBlockV2`.
+They contain only its validated compact commitment, one exact entry, the entry's
+ordered Merkle proof, and the opaque receipt. Bundle construction and decode
+re-derive entry metadata from the signed proposal and verify inclusion. There is
+no raw full-block constructor or compatibility fallback. The external verifier
+must authenticate every commitment field, especially the application hash,
+against the receipt before a finality capability is issued.

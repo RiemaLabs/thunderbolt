@@ -3,7 +3,7 @@ use std::time::Duration;
 use bitcoin::Network;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use thunderbolt_ledger::LedgerChainIdV2;
+use thunderbolt_ledger::{LedgerChainIdV2, MAX_SIGNED_PROPOSAL_JSON_BYTES};
 use thunderbolt_wire::{ChannelBindingV2, ValidateWire as _};
 
 use crate::{HolderNodeError, Result};
@@ -13,7 +13,7 @@ pub const MAX_OUTBOX_ROWS: usize = 10_000;
 /// Maximum retained local command aliases.
 pub const MAX_COMMAND_ROWS: usize = 20_000;
 /// Maximum encoded signed proposal stored in one row.
-pub const MAX_PROPOSAL_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_PROPOSAL_BYTES: usize = MAX_SIGNED_PROPOSAL_JSON_BYTES;
 /// Maximum receipts accepted in one finality poll.
 pub const MAX_FINALITY_BATCH: usize = 128;
 const MAX_BUSY_TIMEOUT: Duration = Duration::from_secs(60);

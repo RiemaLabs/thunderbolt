@@ -1,0 +1,38 @@
+[package]
+name = "thunderbolt-paillier"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Isolated fixed-width Paillier-3072 backend for Bitcoin Thunderbolt"
+include = [
+    "src/**",
+    "tests/fixtures/**",
+    "README.md",
+    "CONSTANT_TIME.md",
+    "ASSEMBLY_REVIEW.md",
+    "LICENSE_BOUNDARY.md",
+    "LICENSE",
+    "NOTICE",
+]
+
+[lints]
+workspace = true
+
+[dependencies]
+chacha20 = { version = "=0.10.0", default-features = false, features = ["rng", "zeroize"] }
+crypto-bigint = { version = "=0.7.5", default-features = false, features = ["extra-sizes", "rand_core", "zeroize"] }
+crypto-primes = { version = "=0.7.2", default-features = false, features = ["alloc"] }
+getrandom = { version = "=0.4.3", features = ["sys_rng"] }
+rand_core = "=0.10.0"
+sha2 = "0.10.8"
+thiserror = "2.0.12"
+zeroize = { version = "1.8.2", features = ["derive"] }
+
+[dev-dependencies]
+hex = "0.4"
+num-bigint = "0.4"
+num-traits = "0.2"
+proptest = "1.9.0"
+static_assertions = "1.1.0"

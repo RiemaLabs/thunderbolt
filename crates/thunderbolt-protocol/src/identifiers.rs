@@ -529,6 +529,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn artifact_retains_the_version_one_bound() {
+        assert!(Artifact::new(vec![0x51; MAX_ARTIFACT_BYTES]).is_ok());
+        assert!(Artifact::new(vec![0x51; MAX_ARTIFACT_BYTES + 1]).is_err());
+    }
+
+    #[test]
     fn channel_id_requires_canonical_bitcoin_outpoint() {
         let txid = "01".repeat(32);
         let channel: ChannelId = format!("{txid}:4294967295").parse().unwrap();

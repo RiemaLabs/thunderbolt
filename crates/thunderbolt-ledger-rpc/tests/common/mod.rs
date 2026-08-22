@@ -13,8 +13,8 @@ use thunderbolt_ledger::{
     ActorKeyAlgorithmV2, ActorPublicKeyV2, ActorRoleV2, ActorSignatureV2, AppHashV2, CanonicalEventV2,
     ClientRequestNonceV2, ExecutedBlockV2, LedgerChainIdV2, PendingBlockV2, ProposalBodyV2, SignedProposalV2,
 };
-use thunderbolt_protocol::v2::{ChannelPhaseV2, ChannelSnapshotV2, PROTOCOL_VERSION_V2};
-use thunderbolt_protocol::Artifact;
+use thunderbolt_ledger_rpc::{FinalityVerifierProfileIdV2, FinalizedEntryBundleV2, OpaqueConsensusReceiptV2};
+use thunderbolt_protocol::v2::{ArtifactV2, ChannelPhaseV2, ChannelSnapshotV2, PROTOCOL_VERSION_V2};
 use thunderbolt_wire::{
     AnchorParameterSuiteIdV2, BitcoinGenesisHashV2, ChannelBindingV2, CommitteeDescriptorDigestV2, FundingOutpointV2,
     ProtocolSuiteIdV2,
@@ -76,6 +76,19 @@ pub fn executed_block(discriminator: u8) -> ExecutedBlockV2 {
     pending.execute().expect("execute")
 }
 
+pub fn finalized_bundle(discriminator: u8, profile_byte: u8, receipt: Vec<u8>) -> FinalizedEntryBundleV2 {
+    let block = executed_block(discriminator);
+    let commitment = block.commitment().expect("block commitment");
+    let entry = block.entries()[0].clone();
+    let proof = block.entry_proof(0).expect("entry proof");
+    let receipt = OpaqueConsensusReceiptV2::new(
+        FinalityVerifierProfileIdV2::from_bytes([profile_byte; 32]).expect("profile"),
+        receipt,
+    )
+    .expect("receipt");
+    FinalizedEntryBundleV2::new(commitment, entry, proof, receipt).expect("finalized bundle")
+}
+
 pub fn snapshot(discriminator: u8) -> ChannelSnapshotV2 {
     let proposal = signed_open(discriminator);
     let participant = proposal.body().participant_id().expect("participant");
@@ -88,10 +101,10 @@ pub fn snapshot(discriminator: u8) -> ChannelSnapshotV2 {
         capacity_sat: 50_000,
         committee_member_count: 3,
         committee_threshold: 2,
-        lock_key: Artifact::new([0x51; 33]).expect("lock key"),
+        lock_key: ArtifactV2::new([0x51; 33]).expect("lock key"),
         current_holder: participant,
-        current_holder_anchor: Artifact::new([0x52; 33]).expect("anchor"),
-        current_holder_ciphertext: Artifact::new([0x53; 64]).expect("ciphertext"),
+        current_holder_anchor: ArtifactV2::new([0x52; 33]).expect("anchor"),
+        current_holder_ciphertext: ArtifactV2::new([0x53; 64]).expect("ciphertext"),
         transfers_completed: 0,
         pending_invoices: BTreeMap::new(),
         last_consumed_invoice_id: None,
