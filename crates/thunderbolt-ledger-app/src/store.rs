@@ -177,6 +177,29 @@ pub struct BlockExecutionOutcomeV2 {
     replayed_entries: usize,
 }
 
+/// Bounded block input and exact outcome produced by rollback-only execution.
+///
+/// Values can only be created by [`LedgerApplication::preview_block`]. A later
+/// commit re-runs the normal transaction path and compares the deterministic
+/// block and disposition counts before allowing SQLite to commit.
+#[derive(Clone, Debug)]
+pub struct PreparedBlockV2 {
+    input: BlockInputV2,
+    outcome: BlockExecutionOutcomeV2,
+}
+
+impl PreparedBlockV2 {
+    /// Returns the exact consensus input validated by the preview.
+    pub const fn input(&self) -> &BlockInputV2 {
+        &self.input
+    }
+
+    /// Returns the exact rollback-only execution outcome.
+    pub const fn outcome(&self) -> &BlockExecutionOutcomeV2 {
+        &self.outcome
+    }
+}
+
 impl BlockExecutionOutcomeV2 {
     /// Returns deterministic execution output without promoting it to finality.
     pub const fn block(&self) -> &ExecutedBlockV2 {
@@ -337,6 +360,56 @@ impl LedgerApplication {
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let result = apply_block_locked(&transaction, &self.reducer, &self.chain_id, input, verifier);
+        finish_transaction(transaction, result)
+    }
+
+    /// Executes the exact normal block path inside a rollback-only transaction.
+    ///
+    /// This performs request reservation, signatures, external proof hooks,
+    /// reduction, every SQLite write, and deterministic block construction. It
+    /// always rolls the transaction back, including after success, and returns
+    /// a bounded prepared value that cannot be constructed by callers.
+    pub fn preview_block<V: LedgerApplicationVerifierV2>(
+        &self,
+        input: BlockInputV2,
+        verifier: &V,
+    ) -> Result<PreparedBlockV2> {
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let saved_input = input.clone();
+        let result = apply_block_locked(&transaction, &self.reducer, &self.chain_id, input, verifier).map(|outcome| {
+            PreparedBlockV2 {
+                input: saved_input,
+                outcome,
+            }
+        });
+        rollback_preview(transaction, result)
+    }
+
+    /// Re-executes and atomically commits one rollback-only prepared block.
+    ///
+    /// The transaction is committed only if its deterministic executed block,
+    /// application hash, and applied/replayed counts match the preview. Exact
+    /// replay of a block already committed before a lost response is accepted;
+    /// the replay marker itself is not application state.
+    pub fn commit_prepared_block<V: LedgerApplicationVerifierV2>(
+        &self,
+        prepared: PreparedBlockV2,
+        verifier: &V,
+    ) -> Result<BlockExecutionOutcomeV2> {
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let expected = prepared.outcome;
+        let result = apply_block_locked(&transaction, &self.reducer, &self.chain_id, prepared.input, verifier)
+            .and_then(|actual| {
+                if actual.block() != expected.block()
+                    || actual.applied_entries() != expected.applied_entries()
+                    || actual.replayed_entries() != expected.replayed_entries()
+                {
+                    return Err(ApplicationError::PreparedBlockMismatch);
+                }
+                Ok(actual)
+            });
         finish_transaction(transaction, result)
     }
 
@@ -1248,6 +1321,19 @@ fn finish_transaction<T>(transaction: Transaction<'_>, result: Result<T>) -> Res
                 rollback_error,
             }),
         },
+    }
+}
+
+fn rollback_preview<T>(transaction: Transaction<'_>, result: Result<T>) -> Result<T> {
+    match transaction.rollback() {
+        Ok(()) => result,
+        Err(rollback_error) => Err(ApplicationError::RollbackFailed {
+            operation_error: match result {
+                Ok(_) => "rollback-only preview succeeded".to_owned(),
+                Err(error) => error.to_string(),
+            },
+            rollback_error,
+        }),
     }
 }
 

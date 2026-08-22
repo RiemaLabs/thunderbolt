@@ -33,6 +33,8 @@ pub enum NodeError {
     NumericRange,
     #[error("stored committee node state is corrupt")]
     CorruptState,
+    #[error("schema-v1 database has pending records requiring offline verified migration")]
+    LegacyPendingRecords,
     #[error("injected crash after private commit")]
     InjectedCrash,
 }

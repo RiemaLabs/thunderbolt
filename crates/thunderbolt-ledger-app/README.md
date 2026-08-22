@@ -29,6 +29,14 @@ expensive verifier runs.
 `ExternalVerifierV2` hooks. Clients cannot submit verification evidence. A
 rejection or any later error rolls back the complete block transaction.
 
+`preview_block` runs that same request-reservation, verification, reduction,
+and storage path inside a rollback-only SQLite transaction. The resulting
+opaque `PreparedBlockV2` can be passed to `commit_prepared_block`, which
+re-executes the block and commits only after the executed block, application
+hash, and disposition counts match the preview. This is the intended
+`FinalizeBlock`/`Commit` boundary for an ABCI adapter; previewing never advances
+the durable application head.
+
 This crate is not a network, consensus engine, ABCI server, finality verifier,
 wallet, or role runtime. `ExecutedBlockV2`, its application hash, and its Merkle
 proofs establish deterministic execution only. A future consensus integration

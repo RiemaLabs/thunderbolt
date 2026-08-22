@@ -109,6 +109,10 @@ pub enum ApplicationError {
     #[error("actor-scoped request digest conflicts with a durable entry mapping")]
     RequestConflict,
 
+    /// Re-execution no longer matches the exact rollback-only preview.
+    #[error("prepared block execution differs from its rollback-only preview")]
+    PreparedBlockMismatch,
+
     /// A block mixes an exact replay and a new transition for one channel.
     #[error("one block cannot mix an exact replay with another proposal for the same channel")]
     MixedReplayChain,

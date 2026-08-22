@@ -23,7 +23,7 @@ pub use error::{ApplicationError, Result};
 pub use migrations::CURRENT_SCHEMA_VERSION;
 pub use store::{
     ApplicationOptions, ApplicationStatusV2, BlockExecutionOutcomeV2, BlockInputV2, IntegrityReportV2,
-    LedgerApplication, LedgerApplicationVerifierV2, StoredRequestV2,
+    LedgerApplication, LedgerApplicationVerifierV2, PreparedBlockV2, StoredRequestV2,
 };
 
 /// Application version reported by a future CometBFT ABCI `Info`/`InitChain`

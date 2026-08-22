@@ -11,8 +11,8 @@ use crate::{
 };
 
 const APPLICATION_ID: i64 = 0x5442_434e; // TBCN
-const SCHEMA_VERSION: i64 = 1;
-type SettingsRow = (Vec<u8>, i64, Vec<u8>, i64, String, i64, i64);
+const SCHEMA_VERSION: i64 = 2;
+type SettingsRow = (Vec<u8>, i64, Vec<u8>, i64, String, Vec<u8>, i64, i64);
 
 pub(crate) struct StoredInbox {
     pub id: [u8; 32],
@@ -61,6 +61,21 @@ impl SqliteQueue {
             return Err(NodeError::CorruptState);
         }
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if schema_version == 1 {
+            let pending: i64 =
+                transaction.query_row("SELECT count(*) FROM inbox WHERE status=0", [], |row| row.get(0))?;
+            if pending != 0 {
+                return Err(NodeError::LegacyPendingRecords);
+            }
+            transaction.execute_batch(
+                "ALTER TABLE node_settings ADD COLUMN finality_verifier_profile BLOB
+                   CHECK(finality_verifier_profile IS NULL OR length(finality_verifier_profile)=32);",
+            )?;
+            transaction.execute(
+                "UPDATE node_settings SET finality_verifier_profile=?1 WHERE singleton=1",
+                [config.finality_verifier_profile.as_bytes().as_slice()],
+            )?;
+        }
         transaction.execute_batch(
             "CREATE TABLE IF NOT EXISTS node_settings(
                  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
@@ -69,11 +84,14 @@ impl SqliteQueue {
                  descriptor_id BLOB NOT NULL CHECK(length(descriptor_id)=32),
                  member_id INTEGER NOT NULL CHECK(member_id>0),
                  ledger_chain_id TEXT NOT NULL,
+                 finality_verifier_profile BLOB NOT NULL CHECK(length(finality_verifier_profile)=32),
                  max_inbox INTEGER NOT NULL CHECK(max_inbox>0),
                  max_outbox INTEGER NOT NULL CHECK(max_outbox>0)
              ) STRICT;
              CREATE TABLE IF NOT EXISTS finalized_cursor(
                  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                 refresh_ordinal INTEGER NOT NULL CHECK(refresh_ordinal>0),
+                 previous_refresh_entry_hash BLOB NOT NULL CHECK(length(previous_refresh_entry_hash)=32),
                  block_height INTEGER NOT NULL CHECK(block_height>0),
                  block_index INTEGER NOT NULL CHECK(block_index>=0),
                  app_hash BLOB NOT NULL CHECK(length(app_hash)=32),
@@ -103,7 +121,7 @@ impl SqliteQueue {
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         let existing: Option<SettingsRow> = transaction
             .query_row(
-                "SELECT deployment_id,committee_epoch,descriptor_id,member_id,ledger_chain_id,max_inbox,max_outbox
+                "SELECT deployment_id,committee_epoch,descriptor_id,member_id,ledger_chain_id,finality_verifier_profile,max_inbox,max_outbox
                  FROM node_settings WHERE singleton=1",
                 [],
                 |row| {
@@ -115,6 +133,7 @@ impl SqliteQueue {
                         row.get(4)?,
                         row.get(5)?,
                         row.get(6)?,
+                        row.get(7)?,
                     ))
                 },
             )
@@ -125,6 +144,7 @@ impl SqliteQueue {
             descriptor_id.as_slice(),
             i64::from(member_id),
             config.ledger_chain_id.as_str(),
+            config.finality_verifier_profile.as_bytes().as_slice(),
             i64::from(config.max_inbox_rows),
             i64::from(config.max_outbox_rows),
         );
@@ -135,13 +155,16 @@ impl SqliteQueue {
                     && row.2.as_slice() == expected.2
                     && row.3 == expected.3
                     && row.4 == expected.4
-                    && row.5 == expected.5
-                    && row.6 == expected.6 => {}
+                    && row.5.as_slice() == expected.5
+                    && row.6 == expected.6
+                    && row.7 == expected.7 => {}
             Some(_) => return Err(NodeError::IdentityMismatch),
             None => {
                 transaction.execute(
-                    "INSERT INTO node_settings VALUES(1,?1,?2,?3,?4,?5,?6,?7)",
-                    params![expected.0, expected.1, expected.2, expected.3, expected.4, expected.5, expected.6],
+                    "INSERT INTO node_settings VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8)",
+                    params![
+                        expected.0, expected.1, expected.2, expected.3, expected.4, expected.5, expected.6, expected.7
+                    ],
                 )?;
             }
         }
@@ -209,12 +232,16 @@ impl SqliteQueue {
             ],
         )?;
         tx.execute(
-            "INSERT INTO finalized_cursor VALUES(1,?1,?2,?3,?4,?5)
+            "INSERT INTO finalized_cursor VALUES(1,?1,?2,?3,?4,?5,?6,?7)
              ON CONFLICT(singleton) DO UPDATE SET
+               refresh_ordinal=excluded.refresh_ordinal,
+               previous_refresh_entry_hash=excluded.previous_refresh_entry_hash,
                block_height=excluded.block_height,block_index=excluded.block_index,
                app_hash=excluded.app_hash,entry_hash=excluded.entry_hash,
                finality_digest=excluded.finality_digest",
             params![
+                to_i64(cursor.refresh_ordinal)?,
+                cursor.previous_refresh_entry_hash.as_bytes().as_slice(),
                 to_i64(cursor.block_height)?,
                 i64::from(cursor.block_index),
                 cursor.app_hash.as_bytes().as_slice(),
@@ -228,21 +255,32 @@ impl SqliteQueue {
 
     pub fn next_pending(&self) -> Result<Option<StoredInbox>> {
         let connection = self.lock()?;
-        connection
+        let stored = connection
             .query_row(
-                "SELECT item_id,bundle_json FROM inbox WHERE status=0 ORDER BY ordinal LIMIT 1",
+                "SELECT item_id,bundle_digest,bundle_json FROM inbox WHERE status=0 ORDER BY ordinal LIMIT 1",
                 [],
                 |row| {
                     let id: Vec<u8> = row.get(0)?;
                     let id = <[u8; 32]>::try_from(id.as_slice()).map_err(|_| rusqlite::Error::InvalidQuery)?;
                     Ok(StoredInbox {
                         id,
-                        bundle: row.get(1)?,
+                        bundle: row.get(2)?,
                     })
                 },
             )
             .optional()
-            .map_err(NodeError::from)
+            .map_err(NodeError::from)?;
+        if let Some(item) = &stored {
+            let expected: Vec<u8> = connection.query_row(
+                "SELECT bundle_digest FROM inbox WHERE item_id=?1",
+                [item.id.as_slice()],
+                |row| row.get(0),
+            )?;
+            if expected.as_slice() != Sha256::digest(&item.bundle).as_slice() {
+                return Err(NodeError::CorruptState);
+            }
+        }
+        Ok(stored)
     }
 
     pub fn mark_applied(&self, inbox_id: [u8; 32], acknowledgement: &AcknowledgementRecord) -> Result<()> {
@@ -261,6 +299,36 @@ impl SqliteQueue {
         .into();
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing_inbox: Option<(i64, Option<Vec<u8>>)> = tx
+            .query_row(
+                "SELECT status,ack_digest FROM inbox WHERE item_id=?1",
+                [inbox_id.as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((inbox_status, inbox_ack)) = existing_inbox else {
+            return Err(NodeError::CorruptState);
+        };
+        if inbox_ack
+            .as_ref()
+            .is_some_and(|digest| digest.as_slice() != acknowledgement.acknowledgement_digest)
+        {
+            return Err(NodeError::ReplayConflict);
+        }
+        if let Some((existing_id, existing_payload)) = tx
+            .query_row(
+                "SELECT item_id,payload_json FROM outbox WHERE inbox_id=?1",
+                [inbox_id.as_slice()],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()?
+        {
+            if existing_id.as_slice() != outbox_id || existing_payload != payload || inbox_status != 1 {
+                return Err(NodeError::ReplayConflict);
+            }
+            tx.commit()?;
+            return Ok(());
+        }
         let count: i64 = tx.query_row("SELECT count(*) FROM outbox", [], |row| row.get(0))?;
         if u32::try_from(count).map_err(|_| NodeError::CorruptState)? >= self.max_outbox
             && !tx.query_row(
@@ -272,8 +340,7 @@ impl SqliteQueue {
             return Err(NodeError::QueueFull);
         }
         tx.execute(
-            "INSERT INTO outbox(item_id,inbox_id,payload_json,status,attempts) VALUES(?1,?2,?3,0,0)
-             ON CONFLICT(inbox_id) DO NOTHING",
+            "INSERT INTO outbox(item_id,inbox_id,payload_json,status,attempts) VALUES(?1,?2,?3,0,0)",
             params![outbox_id.as_slice(), inbox_id.as_slice(), payload],
         )?;
         tx.execute(
@@ -287,7 +354,7 @@ impl SqliteQueue {
     pub fn cursor(&self) -> Result<Option<LedgerCursor>> {
         let connection = self.lock()?;
         connection.query_row(
-            "SELECT block_height,block_index,app_hash,entry_hash,finality_digest FROM finalized_cursor WHERE singleton=1",
+            "SELECT refresh_ordinal,previous_refresh_entry_hash,block_height,block_index,app_hash,entry_hash,finality_digest FROM finalized_cursor WHERE singleton=1",
             [], cursor_row,
         ).optional().map_err(NodeError::from)
     }
@@ -350,25 +417,36 @@ impl SqliteQueue {
 }
 
 fn validate_cursor(tx: &rusqlite::Transaction<'_>, next: &LedgerCursor) -> Result<()> {
-    let current=tx.query_row("SELECT block_height,block_index,app_hash,entry_hash,finality_digest FROM finalized_cursor WHERE singleton=1",[],cursor_row).optional()?;
+    let current=tx.query_row("SELECT refresh_ordinal,previous_refresh_entry_hash,block_height,block_index,app_hash,entry_hash,finality_digest FROM finalized_cursor WHERE singleton=1",[],cursor_row).optional()?;
     if let Some(current) = current {
-        if next.block_height < current.block_height
+        if next.refresh_ordinal != current.refresh_ordinal.checked_add(1).ok_or(NodeError::NumericRange)?
+            || next.previous_refresh_entry_hash != current.entry_hash
+            || next.block_height < current.block_height
             || (next.block_height == current.block_height
                 && (next.app_hash != current.app_hash || next.block_index <= current.block_index))
         {
             return Err(NodeError::CursorConflict);
         }
+    } else if next.refresh_ordinal != 1 || !next.previous_refresh_entry_hash.is_zero() {
+        return Err(NodeError::CursorConflict);
     }
     Ok(())
 }
 
 fn cursor_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LedgerCursor> {
-    let height: i64 = row.get(0)?;
-    let index: i64 = row.get(1)?;
-    let app: Vec<u8> = row.get(2)?;
-    let entry: Vec<u8> = row.get(3)?;
-    let finality: Vec<u8> = row.get(4)?;
+    let ordinal: i64 = row.get(0)?;
+    let previous: Vec<u8> = row.get(1)?;
+    let height: i64 = row.get(2)?;
+    let index: i64 = row.get(3)?;
+    let app: Vec<u8> = row.get(4)?;
+    let entry: Vec<u8> = row.get(5)?;
+    let finality: Vec<u8> = row.get(6)?;
     Ok(LedgerCursor {
+        refresh_ordinal: u64::try_from(ordinal).map_err(|_| rusqlite::Error::InvalidQuery)?,
+        previous_refresh_entry_hash: thunderbolt_ledger::EntryHashV2::from_bytes(
+            <[u8; 32]>::try_from(previous.as_slice()).map_err(|_| rusqlite::Error::InvalidQuery)?,
+        )
+        .map_err(|_| rusqlite::Error::InvalidQuery)?,
         block_height: u64::try_from(height).map_err(|_| rusqlite::Error::InvalidQuery)?,
         block_index: u32::try_from(index).map_err(|_| rusqlite::Error::InvalidQuery)?,
         app_hash: thunderbolt_ledger::AppHashV2::from_bytes(

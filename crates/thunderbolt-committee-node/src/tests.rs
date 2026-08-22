@@ -5,6 +5,7 @@ use bitcoin::Network;
 use libpaillier::{DecryptionKey, EncryptionKey};
 use secp::Scalar;
 use secp256k1::{Keypair, Secp256k1, SecretKey};
+use sha2::Digest as _;
 use tempfile::TempDir;
 use thunderbolt_committee::insecure_regtest::dealer_bootstrap;
 use thunderbolt_committee::{
@@ -41,6 +42,7 @@ use crate::*;
 fn config() -> Result<NodeConfig> {
     NodeConfig::new(
         LedgerChainIdV2::new("committee-node-regtest").map_err(|_| NodeError::InvalidLedgerArtifact)?,
+        FinalityVerifierProfileId::new([0x81; 32])?,
         32,
         32,
         8,
@@ -49,6 +51,8 @@ fn config() -> Result<NodeConfig> {
 
 fn cursor(height: u64, index: u32, byte: u8) -> Result<LedgerCursor> {
     Ok(LedgerCursor {
+        refresh_ordinal: 1,
+        previous_refresh_entry_hash: EntryHashV2::zero(),
         block_height: height,
         block_index: index,
         app_hash: AppHashV2::from_bytes([byte; 32]).map_err(|_| NodeError::InvalidLedgerArtifact)?,
@@ -94,6 +98,53 @@ fn sqlite_identity_binds_deployment_epoch_descriptor_and_member() -> std::result
             Err(NodeError::IdentityMismatch)
         ));
     }
+    let wrong_profile = NodeConfig::new(
+        LedgerChainIdV2::new("committee-node-regtest")?,
+        FinalityVerifierProfileId::new([0x82; 32])?,
+        32,
+        32,
+        8,
+    )?;
+    assert!(matches!(
+        SqliteQueue::open(&path, &wrong_profile, b"deployment", 7, &[0x41; 32], 1),
+        Err(NodeError::IdentityMismatch)
+    ));
+    Ok(())
+}
+
+#[test]
+fn schema_v1_pending_inbox_is_rejected_without_partial_migration() -> std::result::Result<(), Box<dyn Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("committee-node.sqlite");
+    let queue = open_queue(&directory)?;
+    queue.ingest(
+        [0x61; 32],
+        [0x62; 32],
+        b"legacy-pending-bundle".to_vec(),
+        &cursor(5, 0, 0x63)?,
+    )?;
+    drop(queue);
+    let connection = rusqlite::Connection::open(&path)?;
+    connection.execute_batch(
+        "ALTER TABLE node_settings DROP COLUMN finality_verifier_profile;
+         PRAGMA user_version=1;",
+    )?;
+    let before: Vec<u8> = connection.query_row("SELECT bundle_json FROM inbox WHERE status=0", [], |row| row.get(0))?;
+    drop(connection);
+
+    assert!(matches!(open_queue(&directory), Err(NodeError::LegacyPendingRecords)));
+
+    let connection = rusqlite::Connection::open(&path)?;
+    let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let profile_columns: i64 = connection.query_row(
+        "SELECT count(*) FROM pragma_table_info('node_settings') WHERE name='finality_verifier_profile'",
+        [],
+        |row| row.get(0),
+    )?;
+    let after: Vec<u8> = connection.query_row("SELECT bundle_json FROM inbox WHERE status=0", [], |row| row.get(0))?;
+    assert_eq!(version, 1);
+    assert_eq!(profile_columns, 0);
+    assert_eq!(after, before);
     Ok(())
 }
 
@@ -126,17 +177,34 @@ fn sqlite_inbox_duplicate_conflict_and_restart_are_deterministic() -> std::resul
 fn cursor_rejects_backward_and_same_height_forks() -> std::result::Result<(), Box<dyn Error>> {
     let directory = TempDir::new()?;
     let queue = open_queue(&directory)?;
-    queue.ingest([1; 32], [2; 32], b"one".to_vec(), &cursor(20, 2, 0x20)?)?;
+    let current = cursor(20, 2, 0x20)?;
+    queue.ingest([1; 32], [2; 32], b"one".to_vec(), &current)?;
+    let mut back = cursor(19, 0, 0x19)?;
+    back.refresh_ordinal = 2;
+    back.previous_refresh_entry_hash = current.entry_hash.clone();
     assert!(matches!(
-        queue.ingest([3; 32], [4; 32], b"back".to_vec(), &cursor(19, 0, 0x19)?),
+        queue.ingest([3; 32], [4; 32], b"back".to_vec(), &back),
         Err(NodeError::CursorConflict)
     ));
+    let mut fork = cursor(20, 3, 0x21)?;
+    fork.refresh_ordinal = 2;
+    fork.previous_refresh_entry_hash = current.entry_hash.clone();
     assert!(matches!(
-        queue.ingest([5; 32], [6; 32], b"fork".to_vec(), &cursor(20, 3, 0x21)?),
+        queue.ingest([5; 32], [6; 32], b"fork".to_vec(), &fork),
         Err(NodeError::CursorConflict)
     ));
+    let mut gap = cursor(21, 0, 0x22)?;
+    gap.refresh_ordinal = 3;
+    gap.previous_refresh_entry_hash = current.entry_hash.clone();
+    assert!(matches!(
+        queue.ingest([7; 32], [8; 32], b"gap".to_vec(), &gap),
+        Err(NodeError::CursorConflict)
+    ));
+    let mut next = cursor(21, 0, 0x22)?;
+    next.refresh_ordinal = 2;
+    next.previous_refresh_entry_hash = current.entry_hash;
     assert_eq!(
-        queue.ingest([7; 32], [8; 32], b"next".to_vec(), &cursor(21, 0, 0x22)?)?,
+        queue.ingest([9; 32], [10; 32], b"next".to_vec(), &next)?,
         IngestDisposition::Accepted
     );
     Ok(())
@@ -192,6 +260,12 @@ fn applied_ack_and_outbox_commit_atomically_and_idempotently() -> std::result::R
     };
     queue.mark_applied([0x51; 32], &ack)?;
     queue.mark_applied([0x51; 32], &ack)?;
+    let mut conflicting = ack.clone();
+    conflicting.acknowledgement_digest[0] ^= 1;
+    assert!(matches!(
+        queue.mark_applied([0x51; 32], &conflicting),
+        Err(NodeError::ReplayConflict)
+    ));
     assert!(queue.next_pending()?.is_none());
     let outbox = queue.list_outbox(10)?;
     assert_eq!(outbox.len(), 1);
@@ -265,16 +339,103 @@ struct TestReceipt([u8; 32]);
 struct AcceptFinality;
 impl LedgerFinalityVerifier<TestReceipt> for AcceptFinality {
     type Error = MemoryVaultError;
-    fn verify_finality(
+    fn profile_id(&self) -> FinalityVerifierProfileId {
+        FinalityVerifierProfileId::new([0x81; 32]).unwrap_or(FinalityVerifierProfileId::DISABLED)
+    }
+    fn verify_finalized_refresh(
         &self,
-        block: &thunderbolt_ledger::ExecutedBlockV2,
-        _entry: &thunderbolt_ledger::ExecutedEntryV2,
-        _inclusion: &thunderbolt_ledger::EntryMerkleProofV2,
-        receipt: &TestReceipt,
-    ) -> std::result::Result<FinalityDigest, Self::Error> {
-        let mut digest = receipt.0;
-        digest[0] ^= block.height() as u8;
-        Ok(FinalityDigest::new(digest))
+        invoice: &FinalizedEntryV2<TestReceipt>,
+        transfer: &FinalizedEntryV2<TestReceipt>,
+    ) -> std::result::Result<DurableFinalityCapability, Self::Error> {
+        let invoice_entry = invoice.entry().map_err(|_| MemoryVaultError)?;
+        let transfer_entry = transfer.entry().map_err(|_| MemoryVaultError)?;
+        DurableFinalityCapability::new(
+            self.profile_id(),
+            transfer.block.ledger_chain_id().clone(),
+            invoice_entry.metadata().block_height(),
+            invoice_entry.metadata().block_index(),
+            invoice_entry.metadata().entry_hash().clone(),
+            transfer_entry.metadata().block_height(),
+            transfer_entry.metadata().block_index(),
+            transfer_entry.metadata().entry_hash().clone(),
+            transfer.block.app_hash().clone(),
+            1,
+            EntryHashV2::zero(),
+            FinalityDigest::new([0x91; 32]),
+            b"stable-test-attestation".to_vec(),
+        )
+        .map_err(|_| MemoryVaultError)
+    }
+    fn verify_durable_capability(
+        &self,
+        capability: &DurableFinalityCapability,
+    ) -> std::result::Result<(), Self::Error> {
+        if capability.attestation() == b"stable-test-attestation"
+            && capability.verifier_digest() == FinalityDigest::new([0x91; 32])
+        {
+            Ok(())
+        } else {
+            Err(MemoryVaultError)
+        }
+    }
+}
+
+struct WrongPairFinality;
+impl LedgerFinalityVerifier<TestReceipt> for WrongPairFinality {
+    type Error = MemoryVaultError;
+    fn profile_id(&self) -> FinalityVerifierProfileId {
+        FinalityVerifierProfileId::new([0x81; 32]).unwrap_or(FinalityVerifierProfileId::DISABLED)
+    }
+    fn verify_finalized_refresh(
+        &self,
+        invoice: &FinalizedEntryV2<TestReceipt>,
+        transfer: &FinalizedEntryV2<TestReceipt>,
+    ) -> std::result::Result<DurableFinalityCapability, Self::Error> {
+        let invoice_entry = invoice.entry().map_err(|_| MemoryVaultError)?;
+        let transfer_entry = transfer.entry().map_err(|_| MemoryVaultError)?;
+        DurableFinalityCapability::new(
+            self.profile_id(),
+            transfer.block.ledger_chain_id().clone(),
+            invoice_entry.metadata().block_height(),
+            invoice_entry.metadata().block_index(),
+            EntryHashV2::from_bytes([0xee; 32]).map_err(|_| MemoryVaultError)?,
+            transfer_entry.metadata().block_height(),
+            transfer_entry.metadata().block_index(),
+            transfer_entry.metadata().entry_hash().clone(),
+            transfer.block.app_hash().clone(),
+            1,
+            EntryHashV2::zero(),
+            FinalityDigest::new([0x92; 32]),
+            b"wrong-pair".to_vec(),
+        )
+        .map_err(|_| MemoryVaultError)
+    }
+    fn verify_durable_capability(
+        &self,
+        _capability: &DurableFinalityCapability,
+    ) -> std::result::Result<(), Self::Error> {
+        Err(MemoryVaultError)
+    }
+}
+
+struct WrongProfileFinality;
+impl LedgerFinalityVerifier<TestReceipt> for WrongProfileFinality {
+    type Error = MemoryVaultError;
+    fn profile_id(&self) -> FinalityVerifierProfileId {
+        FinalityVerifierProfileId::new([0x82; 32]).unwrap_or(FinalityVerifierProfileId::DISABLED)
+    }
+    fn verify_finalized_refresh(
+        &self,
+        _invoice: &FinalizedEntryV2<TestReceipt>,
+        _transfer: &FinalizedEntryV2<TestReceipt>,
+    ) -> std::result::Result<DurableFinalityCapability, Self::Error> {
+        Err(MemoryVaultError)
+    }
+    fn verify_durable_capability(
+        &self,
+        _capability: &DurableFinalityCapability,
+    ) -> std::result::Result<(), Self::Error> {
+        Err(MemoryVaultError)
     }
 }
 
@@ -493,10 +654,42 @@ fn crash_after_private_update_replays_into_one_outbox_record() -> std::result::R
     };
     let db = directory.path().join("node.sqlite");
     let mut node = CommitteeNode::open(&db, engine, config()?)?;
+    assert!(matches!(
+        node.ingest(bundle.clone(), &WrongProfileFinality),
+        Err(NodeError::FinalityRejected)
+    ));
+    assert!(matches!(
+        node.ingest(bundle.clone(), &WrongPairFinality),
+        Err(NodeError::FinalityRejected)
+    ));
     assert_eq!(
         node.ingest(bundle.clone(), &AcceptFinality)?,
         IngestDisposition::Accepted
     );
+    assert!(matches!(
+        node.process_next::<TestReceipt, _>(&WrongProfileFinality),
+        Err(NodeError::FinalityRejected)
+    ));
+    let tamper = rusqlite::Connection::open(&db)?;
+    let original: Vec<u8> = tamper.query_row("SELECT bundle_json FROM inbox LIMIT 1", [], |row| row.get(0))?;
+    let mut value: serde_json::Value = serde_json::from_slice(&original)?;
+    value["finality"]["attestation"] = serde_json::json!([0, 1, 2]);
+    let tampered = serde_json::to_vec(&value)?;
+    let tampered_digest: [u8; 32] = sha2::Sha256::digest(&tampered).into();
+    tamper.execute(
+        "UPDATE inbox SET bundle_json=?1,bundle_digest=?2",
+        rusqlite::params![tampered, tampered_digest.as_slice()],
+    )?;
+    assert!(matches!(
+        node.process_next::<TestReceipt, _>(&AcceptFinality),
+        Err(NodeError::FinalityRejected)
+    ));
+    let original_digest: [u8; 32] = sha2::Sha256::digest(&original).into();
+    tamper.execute(
+        "UPDATE inbox SET bundle_json=?1,bundle_digest=?2",
+        rusqlite::params![original, original_digest.as_slice()],
+    )?;
+    drop(tamper);
     node.inject_crash_after_runtime_once();
     assert!(matches!(
         node.process_next::<TestReceipt, _>(&AcceptFinality),

@@ -29,8 +29,9 @@ pub use traits::{
     SignedV2ProposalSigner,
 };
 pub use types::{
-    AcknowledgementRecord, ControlRequest, ControlResponse, FinalityDigest, FinalizedEntryV2, FinalizedRefreshBundleV2,
-    IngestDisposition, LedgerCursor, NodeConfig, NodeStatus, OutboxItem, OutboxStatus, ProcessDisposition,
+    AcknowledgementRecord, ControlRequest, ControlResponse, DurableFinalityCapability, ExecutedEntryEvidenceV2,
+    FinalityDigest, FinalityVerifierProfileId, FinalizedEntryV2, FinalizedRefreshBundleV2, IngestDisposition,
+    LedgerCursor, NodeConfig, NodeStatus, OutboxItem, OutboxStatus, ProcessDisposition, VerifiedRefreshRecordV2,
 };
 
 #[cfg(test)]

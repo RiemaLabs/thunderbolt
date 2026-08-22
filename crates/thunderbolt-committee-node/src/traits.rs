@@ -5,26 +5,35 @@ use serde::Serialize;
 use thunderbolt_committee::{
     CommittedTransfer, CommitteeMemberEngine, CommitteeVault, LedgerCommitmentVerifier, UpdateAcknowledgement,
 };
-use thunderbolt_ledger::{
-    ActorSignatureV2, EntryMerkleProofV2, ExecutedBlockV2, ExecutedEntryV2, ProposalBodyV2, SignedProposalV2,
-};
+use thunderbolt_ledger::{ActorSignatureV2, ProposalBodyV2, SignedProposalV2};
 
-use crate::{FinalityDigest, FinalizedRefreshBundleV2, LedgerCursor, NodeError, Result};
+use crate::{
+    DurableFinalityCapability, FinalityVerifierProfileId, FinalizedEntryV2, FinalizedRefreshBundleV2, LedgerCursor,
+    NodeError, Result, VerifiedRefreshRecordV2,
+};
 
 /// Trusted consensus boundary for an otherwise deterministic execution entry.
 ///
-/// Implementations must bind the receipt to chain id, block height, exact app
-/// hash, entry metadata/hash, inclusion proof, and an authenticated trusted
-/// header or validator quorum. This crate provides no accepting implementation.
+/// Implementations must prove both entries share one finalized ancestry and
+/// bind the receipt to chain id, block positions, exact app hash, entry hashes,
+/// inclusion proofs, and an authenticated trusted header or validator quorum.
+/// The refresh ordinal and previous-refresh hash must come from application
+/// state committed by that app hash. This crate provides no accepting implementation.
 pub trait LedgerFinalityVerifier<R> {
     type Error: Error + Send + Sync + 'static;
-    fn verify_finality(
+    fn profile_id(&self) -> FinalityVerifierProfileId;
+    fn verify_finalized_refresh(
         &self,
-        block: &ExecutedBlockV2,
-        entry: &ExecutedEntryV2,
-        inclusion: &EntryMerkleProofV2,
-        receipt: &R,
-    ) -> std::result::Result<FinalityDigest, Self::Error>;
+        invoice: &FinalizedEntryV2<R>,
+        transfer: &FinalizedEntryV2<R>,
+    ) -> std::result::Result<DurableFinalityCapability, Self::Error>;
+    /// Verifies the bounded persisted attestation without consulting mutable
+    /// light-client state or requiring the original raw consensus receipt. The
+    /// authenticated attestation must cover every public capability field,
+    /// including both entry hashes/positions, transfer app hash, ordinal, and
+    /// prior-refresh hash; accepting shape-valid JSON alone is unsafe.
+    fn verify_durable_capability(&self, capability: &DurableFinalityCapability)
+        -> std::result::Result<(), Self::Error>;
     fn is_available(&self) -> bool {
         true
     }
@@ -35,13 +44,20 @@ pub struct DisabledFinalityVerifier;
 
 impl<R> LedgerFinalityVerifier<R> for DisabledFinalityVerifier {
     type Error = NodeError;
-    fn verify_finality(
+    fn profile_id(&self) -> FinalityVerifierProfileId {
+        FinalityVerifierProfileId::DISABLED
+    }
+    fn verify_finalized_refresh(
         &self,
-        _block: &ExecutedBlockV2,
-        _entry: &ExecutedEntryV2,
-        _inclusion: &EntryMerkleProofV2,
-        _receipt: &R,
-    ) -> std::result::Result<FinalityDigest, Self::Error> {
+        _invoice: &FinalizedEntryV2<R>,
+        _transfer: &FinalizedEntryV2<R>,
+    ) -> std::result::Result<DurableFinalityCapability, Self::Error> {
+        Err(NodeError::FinalityUnavailable)
+    }
+    fn verify_durable_capability(
+        &self,
+        _capability: &DurableFinalityCapability,
+    ) -> std::result::Result<(), Self::Error> {
         Err(NodeError::FinalityUnavailable)
     }
     fn is_available(&self) -> bool {
@@ -94,7 +110,7 @@ pub trait CommitteeRuntime {
     fn member_id(&self) -> thunderbolt_committee::CommitteeMemberId;
     fn apply_refresh(
         &mut self,
-        bundle: &FinalizedRefreshBundleV2<impl Serialize>,
+        bundle: &VerifiedRefreshRecordV2,
         commitment: CommittedTransfer,
     ) -> Result<UpdateAcknowledgement>;
 }
@@ -120,7 +136,7 @@ where
     }
     fn apply_refresh(
         &mut self,
-        bundle: &FinalizedRefreshBundleV2<impl Serialize>,
+        bundle: &VerifiedRefreshRecordV2,
         commitment: CommittedTransfer,
     ) -> Result<UpdateAcknowledgement> {
         self.apply_committed_refresh(

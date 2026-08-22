@@ -1,6 +1,8 @@
 mod common;
 
 use std::error::Error;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use common::*;
@@ -146,6 +148,94 @@ fn open_proposal(channel_byte: u8) -> thunderbolt_ledger::SignedProposalV2 {
     )
 }
 
+fn sqlite_bytes(path: &Path) -> Result<Vec<Vec<u8>>, Box<dyn Error>> {
+    let mut paths = vec![path.to_path_buf()];
+    let mut wal = OsString::from(path.as_os_str());
+    wal.push("-wal");
+    paths.push(PathBuf::from(wal));
+    paths
+        .into_iter()
+        .filter(|candidate| candidate.exists())
+        .map(|candidate| std::fs::read(candidate).map_err(Into::into))
+        .collect()
+}
+
+#[test]
+fn preview_is_byte_exact_until_prepared_commit() -> Result<(), Box<dyn Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("ledger-app.sqlite3");
+    let app = application(&directory)?;
+    let input = block(1, 1_000, zero_app_hash(), vec![open_proposal(21)])?;
+    let before = sqlite_bytes(&path)?;
+
+    let prepared = app.preview_block(input, &AcceptAll)?;
+    assert_eq!(prepared.outcome().block().height(), 1);
+    assert_eq!(sqlite_bytes(&path)?, before);
+    assert_eq!(app.status()?.last_height(), 0);
+    assert!(app.block(1)?.is_none());
+    assert!(app.channel(&binding(21))?.is_none());
+
+    let committed = app.commit_prepared_block(prepared, &AcceptAll)?;
+    assert_eq!(committed.block().height(), 1);
+    assert_eq!(app.status()?.last_app_hash(), committed.block().app_hash());
+    assert!(app.channel(&binding(21))?.is_some());
+    Ok(())
+}
+
+#[test]
+fn rejected_preview_and_rejected_commit_leave_no_state() -> Result<(), Box<dyn Error>> {
+    let directory = TempDir::new()?;
+    let app = application(&directory)?;
+    let input = block(1, 1_000, zero_app_hash(), vec![open_proposal(22)])?;
+    assert!(matches!(
+        app.preview_block(input.clone(), &RejectAll::default()),
+        Err(ApplicationError::Protocol(_))
+    ));
+    assert_eq!(app.status()?.last_height(), 0);
+
+    let prepared = app.preview_block(input, &AcceptAll)?;
+    assert!(matches!(
+        app.commit_prepared_block(prepared.clone(), &RejectAll::default()),
+        Err(ApplicationError::Protocol(_))
+    ));
+    assert_eq!(app.status()?.last_height(), 0);
+    let committed = app.commit_prepared_block(prepared, &AcceptAll)?;
+    assert_eq!(committed.block().height(), 1);
+    Ok(())
+}
+
+#[test]
+fn prepared_commit_rejects_a_concurrent_conflicting_tip() -> Result<(), Box<dyn Error>> {
+    let directory = TempDir::new()?;
+    let app = application(&directory)?;
+    let prepared = app.preview_block(block(1, 1_000, zero_app_hash(), vec![open_proposal(23)])?, &AcceptAll)?;
+    let competing = app.apply_block(block(1, 1_001, zero_app_hash(), vec![open_proposal(24)])?, &AcceptAll)?;
+    assert!(matches!(
+        app.commit_prepared_block(prepared, &AcceptAll),
+        Err(ApplicationError::BlockConflict { height: 1 })
+    ));
+    assert_eq!(app.status()?.last_app_hash(), competing.block().app_hash());
+    assert!(app.channel(&binding(23))?.is_none());
+    assert!(app.channel(&binding(24))?.is_some());
+    Ok(())
+}
+
+#[test]
+fn prepared_block_reexecutes_after_application_restart() -> Result<(), Box<dyn Error>> {
+    let directory = TempDir::new()?;
+    let prepared = {
+        let app = application(&directory)?;
+        app.preview_block(block(1, 1_000, zero_app_hash(), vec![open_proposal(25)])?, &AcceptAll)?
+    };
+    let reopened = application(&directory)?;
+    assert_eq!(reopened.status()?.last_height(), 0);
+    let committed = reopened.commit_prepared_block(prepared, &AcceptAll)?;
+    assert_eq!(committed.block().height(), 1);
+    drop(reopened);
+    assert_eq!(application(&directory)?.status()?.last_height(), 1);
+    Ok(())
+}
+
 #[test]
 fn committed_block_restarts_and_replays_exactly() -> Result<(), Box<dyn Error>> {
     let directory = TempDir::new()?;
@@ -206,6 +296,11 @@ fn late_sqlite_failure_rolls_back_request_and_channel_rows() -> Result<(), Box<d
          BEGIN SELECT RAISE(ABORT, 'injected block failure'); END;",
     )?;
     let open = open_proposal(8);
+    assert!(matches!(
+        app.preview_block(block(1, 1_000, zero_app_hash(), vec![open.clone()])?, &AcceptAll),
+        Err(ApplicationError::Database(_))
+    ));
+    assert_eq!(app.status()?.last_height(), 0);
     assert!(matches!(
         app.apply_block(block(1, 1_000, zero_app_hash(), vec![open.clone()])?, &AcceptAll),
         Err(ApplicationError::Database(_))
