@@ -1,10 +1,13 @@
 CARGO ?= cargo
 VERSION ?= v1.0.0-rc.1
 
-.PHONY: fmt lint test doc check audit deny semver sbom image regtest-up regtest-status regtest-down release verify
+.PHONY: fmt binary-graph lint test doc check audit deny semver sbom image regtest-up regtest-status regtest-down release verify
 
 fmt:
 	$(CARGO) fmt --all --check
+
+binary-graph:
+	python3 scripts/check-default-binary-graph.py
 
 lint:
 	$(CARGO) clippy --workspace --all-targets --all-features --locked -- -D warnings
@@ -15,7 +18,7 @@ test:
 doc:
 	$(CARGO) test --workspace --all-features --locked --doc
 
-check: fmt lint test doc
+check: fmt binary-graph lint test doc
 
 audit:
 	$(CARGO) audit --deny warnings
@@ -30,14 +33,14 @@ semver:
 sbom:
 	./scripts/generate-sbom.sh dist/sbom
 
-image:
+image: binary-graph
 	docker build --pull --build-arg VERSION="$(patsubst v%,%,$(VERSION))" --build-arg REVISION="$$(git rev-parse HEAD)" --tag bitcoin-thunderbolt:local .
 
 regtest-up:
 	docker compose --file deploy/regtest/compose.yaml up --build --detach
 
 regtest-status:
-	docker compose --file deploy/regtest/compose.yaml exec -T thunderboltd thunderbolt-cli --config /etc/bitcoin-thunderbolt/thunderbolt.toml health --ready
+	docker compose --file deploy/regtest/compose.yaml exec -T thunderboltd thunderbolt-cli --config /var/lib/thunderbolt/config/runtime.toml status
 
 regtest-down:
 	docker compose --file deploy/regtest/compose.yaml down

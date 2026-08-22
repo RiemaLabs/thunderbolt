@@ -5,7 +5,9 @@ pub mod bitcoin_scripts;
 #[cfg(feature = "legacy-research")]
 pub mod bitcoin_tx;
 pub mod errors;
+#[cfg(feature = "insecure-regression")]
 pub mod paillier;
+#[cfg(feature = "insecure-regression")]
 pub mod threshold;
 pub mod traits;
 #[cfg(feature = "legacy-research")]

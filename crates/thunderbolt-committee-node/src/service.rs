@@ -1,9 +1,6 @@
 use std::collections::BTreeMap;
-use std::io::Write as _;
 use std::path::Path;
 
-use serde::de::DeserializeOwned;
-use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use thunderbolt_committee::{CommittedTransfer, CommitteeMemberEngine, KeystoreCommitteeVault};
 use thunderbolt_ledger::{ActorRoleV2, AppHashV2, EntryHashV2, EventKindV2, ExecutedBlockCommitmentV2};
@@ -19,9 +16,9 @@ use crate::storage::{
 };
 use crate::traits::CommitteeRuntime;
 use crate::{
-    ControlRequest, ControlResponse, FinalizedExecutionSegmentV2, LedgerCursor, LedgerFinalityVerifier, NodeConfig,
+    ControlRequest, ControlResponse, FinalizedRangeCapabilityV2, LedgerCursor, LedgerFinalityVerifier, NodeConfig,
     NodeError, NodeStatus, ProcessDisposition, RefreshBlockCommitmentsV2, Result, SignedV2LedgerClient,
-    VerifiedV2Refresh,
+    StagedFinalityRangeCapabilityV2, VerifiedV2Refresh,
 };
 
 pub type FencedCommitteeNode<F> = CommitteeNode<CommitteeMemberEngine<KeystoreCommitteeVault<F>>>;
@@ -38,7 +35,46 @@ impl<R> CommitteeNode<R>
 where
     R: CommitteeRuntime,
 {
+    pub fn inspect_staged_finality_recovery(
+        path: impl AsRef<Path>,
+        runtime: &R,
+        config: &NodeConfig,
+    ) -> Result<Option<crate::StagedFinalityRecoveryV2>> {
+        let descriptor = runtime.descriptor();
+        NodeConfig::validate_network(descriptor.network())?;
+        let queue = SqliteQueue::open(
+            path,
+            config,
+            descriptor.deployment_id(),
+            descriptor.epoch().get(),
+            descriptor.id().as_bytes(),
+            runtime.member_id().get(),
+        )?;
+        Ok(queue
+            .staged_finality_range()?
+            .as_ref()
+            .map(crate::StagedFinalityRecoveryV2::from_staged))
+    }
+
     pub fn open(path: impl AsRef<Path>, runtime: R, config: NodeConfig) -> Result<Self> {
+        Self::open_inner(path, runtime, config, None)
+    }
+
+    pub fn open_with_staged_recovery(
+        path: impl AsRef<Path>,
+        runtime: R,
+        config: NodeConfig,
+        expected_recovery: &crate::StagedFinalityRecoveryV2,
+    ) -> Result<Self> {
+        Self::open_inner(path, runtime, config, Some(expected_recovery))
+    }
+
+    fn open_inner(
+        path: impl AsRef<Path>,
+        runtime: R,
+        config: NodeConfig,
+        expected_recovery: Option<&crate::StagedFinalityRecoveryV2>,
+    ) -> Result<Self> {
         let descriptor = runtime.descriptor();
         NodeConfig::validate_network(descriptor.network())?;
         let queue = SqliteQueue::open(
@@ -49,6 +85,13 @@ where
             descriptor.id().as_bytes(),
             runtime.member_id().get(),
         )?;
+        let actual_recovery = queue
+            .staged_finality_range()?
+            .as_ref()
+            .map(crate::StagedFinalityRecoveryV2::from_staged);
+        if actual_recovery.as_ref() != expected_recovery {
+            return Err(NodeError::CursorConflict);
+        }
         Ok(Self {
             runtime,
             queue,
@@ -62,33 +105,54 @@ where
         self.queue.path()
     }
 
-    pub fn poll<C, V>(&mut self, client: &mut C, finality: &V) -> Result<usize>
+    pub async fn poll<C, V>(&mut self, client: &mut C, finality: &mut V) -> Result<usize>
     where
         C: SignedV2LedgerClient,
-        V: LedgerFinalityVerifier<C::Receipt>,
+        V: LedgerFinalityVerifier,
     {
         require_runtime_available(&self.runtime)?;
         require_verifier_profile(&self.config, finality)?;
+        if !client.is_available() {
+            return Err(NodeError::FinalityUnavailable);
+        }
+        require_client_profile(&self.config, client)?;
         let cursor = self.queue.cursor()?;
-        validate_cursor_finality(cursor.as_ref(), &self.config, finality)?;
-        let Some(segment) = client
-            .fetch_contiguous_finalized_segment(cursor.as_ref(), self.config.fetch_batch_size)
-            .map_err(|_| NodeError::FinalityRejected)?
-        else {
-            return Ok(0);
+        validate_cursor_finality(cursor.as_ref(), &self.config, finality).await?;
+        let staged = if let Some(staged) = self.queue.staged_finality_range()? {
+            staged
+        } else {
+            let Some(intent) = client
+                .prepare_finalized_execution(cursor.as_ref(), self.config.fetch_batch_size)
+                .await
+                .map_err(|_| NodeError::FinalityRejected)?
+            else {
+                return Ok(0);
+            };
+            validate_intent_start(cursor.as_ref(), &self.config, &intent)?;
+            self.queue.stage_finality_range(&intent)?
         };
-        self.ingest_segment(segment, finality)
+        validate_intent_start(cursor.as_ref(), &self.config, staged.intent())?;
+        let finalized = finality
+            .finalize_staged_range(&staged)
+            .await
+            .map_err(|_| NodeError::FinalityRejected)?;
+        self.ingest_staged_range(&staged, finalized, finality).await
     }
 
-    pub fn ingest_segment<T, V>(&self, segment: FinalizedExecutionSegmentV2<T>, finality: &V) -> Result<usize>
+    async fn ingest_staged_range<V>(
+        &self,
+        staged: &StagedFinalityRangeCapabilityV2,
+        finalized: FinalizedRangeCapabilityV2,
+        finality: &V,
+    ) -> Result<usize>
     where
-        T: Clone + Serialize + DeserializeOwned,
-        V: LedgerFinalityVerifier<T>,
+        V: LedgerFinalityVerifier,
     {
         require_runtime_available(&self.runtime)?;
         require_verifier_profile(&self.config, finality)?;
         let current = self.queue.cursor()?;
-        validate_cursor_finality(current.as_ref(), &self.config, finality)?;
+        validate_cursor_finality(current.as_ref(), &self.config, finality).await?;
+        validate_intent_start(current.as_ref(), &self.config, staged.intent())?;
         let Some(prepared) = prepare_segment(
             &self.queue,
             &self.runtime,
@@ -96,15 +160,18 @@ where
             self.runtime.member_id(),
             &self.config,
             current.as_ref(),
-            &segment,
+            staged,
+            &finalized,
             finality,
-        )?
+        )
+        .await?
         else {
             return Ok(0);
         };
         match self.queue.commit_scan(ScanCommit {
             expected_cursor: current.as_ref(),
             next_cursor: &prepared.next_cursor,
+            staged,
             segment_digest: prepared.segment_digest,
             expire_through_ms: prepared.expire_through_ms,
             pending_writes: prepared.pending_writes,
@@ -116,10 +183,9 @@ where
         }
     }
 
-    pub fn process_next<T, V>(&mut self, finality: &V) -> Result<ProcessDisposition>
+    pub async fn process_next<V>(&mut self, finality: &V) -> Result<ProcessDisposition>
     where
-        T: Clone + Serialize + DeserializeOwned,
-        V: LedgerFinalityVerifier<T>,
+        V: LedgerFinalityVerifier,
     {
         require_runtime_available(&self.runtime)?;
         require_verifier_profile(&self.config, finality)?;
@@ -136,7 +202,8 @@ where
             &self.config,
             record,
             finality,
-        )?;
+        )
+        .await?;
         let runtime_outcome = self.runtime.apply_verified_refresh(&validated.refresh)?;
         validate_runtime_outcome(
             self.runtime.descriptor(),
@@ -209,34 +276,39 @@ struct CompactValidation {
 type SemanticLocation = ([u8; 32], (u64, u32));
 
 #[allow(clippy::too_many_arguments)]
-fn prepare_segment<T, V, R>(
+async fn prepare_segment<V, R>(
     queue: &SqliteQueue,
     runtime: &R,
     descriptor: &thunderbolt_committee::CommitteeDescriptor,
     member_id: thunderbolt_committee::CommitteeMemberId,
     config: &NodeConfig,
     current: Option<&LedgerCursor>,
-    segment: &FinalizedExecutionSegmentV2<T>,
+    staged: &StagedFinalityRangeCapabilityV2,
+    finalized_range: &FinalizedRangeCapabilityV2,
     finality: &V,
 ) -> Result<Option<PreparedSegment>>
 where
-    T: Clone + Serialize + DeserializeOwned,
-    V: LedgerFinalityVerifier<T>,
+    V: LedgerFinalityVerifier,
     R: CommitteeRuntime,
 {
-    if segment.blocks.len() > usize::from(config.fetch_batch_size)
-        || bounded_json_len(segment, crate::types::MAX_SCAN_SEGMENT_BYTES).is_err()
-        || segment.ledger_chain_id != config.ledger_chain_id
+    let intent = staged.intent();
+    if intent.blocks().len() > usize::from(config.fetch_batch_size)
+        || intent.ledger_chain_id() != &config.ledger_chain_id
+        || finalized_range.stage_digest() != staged.stage_digest()
+        || finalized_range.ledger_chain_id() != &config.ledger_chain_id
+        || finalized_range.start_height() != intent.start_height()
+        || finalized_range.expected_previous_app_hash() != intent.expected_previous_app_hash()
+        || finalized_range.next_height() != intent.next_height()
+        || finalized_range.next_expected_previous_app_hash() != intent.next_expected_previous_app_hash()
     {
         return Err(NodeError::InvalidLedgerArtifact);
     }
     let expected_start = current.map_or(1, |cursor| cursor.next_height);
     let expected_previous = current.map_or_else(AppHashV2::zero, |cursor| cursor.expected_previous_app_hash.clone());
-    if segment.start_height != expected_start || segment.expected_previous_app_hash != expected_previous {
+    if intent.start_height() != expected_start || intent.expected_previous_app_hash() != &expected_previous {
         return Err(NodeError::CursorConflict);
     }
-    validate_segment_head(segment)?;
-    if segment.blocks.is_empty() {
+    if finalized_range.blocks().is_empty() {
         return Err(NodeError::InvalidLedgerArtifact);
     }
 
@@ -245,16 +317,16 @@ where
     let mut processed_refresh_count = current.map_or(0, |cursor| cursor.processed_refresh_count);
     let mut last_refresh_entry_hash =
         current.map_or_else(EntryHashV2::zero, |cursor| cursor.last_refresh_entry_hash.clone());
-    let total_entries = segment.blocks.iter().try_fold(0_usize, |total, block| {
+    let total_entries = finalized_range.blocks().iter().try_fold(0_usize, |total, block| {
         total
             .checked_add(block.block.entries().len())
             .ok_or(NodeError::NumericRange)
     })?;
-    if segment.occurrences.len() > total_entries {
+    if finalized_range.occurrences().len() > total_entries {
         return Err(NodeError::InvalidLedgerArtifact);
     }
     let mut occurrences = BTreeMap::new();
-    for occurrence in &segment.occurrences {
+    for occurrence in finalized_range.occurrences() {
         if occurrences
             .insert((occurrence.observed_height, occurrence.observed_index), occurrence)
             .is_some()
@@ -270,7 +342,7 @@ where
     let mut last_finality = None;
     let mut expire_through_ms = 0_u64;
 
-    for finalized in &segment.blocks {
+    for finalized in finalized_range.blocks() {
         let block = &finalized.block;
         block
             .validate_chain_id(&config.ledger_chain_id)
@@ -278,9 +350,7 @@ where
         if block.height() != next_height || block.previous_app_hash() != &previous_app_hash {
             return Err(NodeError::CursorConflict);
         }
-        let block_finality = finality
-            .verify_finalized_block(finalized)
-            .map_err(|_| NodeError::FinalityRejected)?;
+        let block_finality = finalized.finality.clone();
         validate_block_finality(config, block, &block_finality)?;
         let commitment =
             ExecutedBlockCommitmentV2::from_executed_block(block).map_err(|_| NodeError::InvalidLedgerArtifact)?;
@@ -304,14 +374,13 @@ where
                     if body.actor_role() == ActorRoleV2::Recipient && body.event_kind() == EventKindV2::Invoice =>
                 {
                     let occurrence = verify_occurrence(
-                        finality,
                         occurrences
                             .remove(&(entry.metadata().block_height(), entry.metadata().block_index()))
                             .ok_or(NodeError::InvalidLedgerArtifact)?,
                         entry,
                         config,
-                        segment.next_height.saturating_sub(1),
-                        &segment.next_expected_previous_app_hash,
+                        finalized_range.next_height().saturating_sub(1),
+                        finalized_range.next_expected_previous_app_hash(),
                     )?;
                     let entry_hash = *entry.metadata().entry_hash().as_bytes();
                     let semantic_digest = entry_semantic_digest(entry)?;
@@ -328,7 +397,7 @@ where
                                 ),
                             ))
                         } else {
-                            stored_invoice_semantic(queue, entry_hash, descriptor, member_id, config, finality)?
+                            stored_invoice_semantic(queue, entry_hash, descriptor, member_id, config, finality).await?
                         };
                         if known.is_some_and(|known| known != (semantic_digest, first_position)) {
                             return Err(NodeError::ReplayConflict);
@@ -362,14 +431,13 @@ where
                     if body.actor_role() == ActorRoleV2::Holder && body.event_kind() == EventKindV2::Transfer =>
                 {
                     let occurrence = verify_occurrence(
-                        finality,
                         occurrences
                             .remove(&(entry.metadata().block_height(), entry.metadata().block_index()))
                             .ok_or(NodeError::InvalidLedgerArtifact)?,
                         entry,
                         config,
-                        segment.next_height.saturating_sub(1),
-                        &segment.next_expected_previous_app_hash,
+                        finalized_range.next_height().saturating_sub(1),
+                        finalized_range.next_expected_previous_app_hash(),
                     )?;
                     let transfer_hash = *entry.metadata().entry_hash().as_bytes();
                     let transfer_semantic_digest = entry_semantic_digest(entry)?;
@@ -378,7 +446,8 @@ where
                         let known = if let Some(known) = seen_transfer_semantics.get(&transfer_hash) {
                             Some(*known)
                         } else {
-                            stored_transfer_semantic(queue, transfer_hash, descriptor, member_id, config, finality)?
+                            stored_transfer_semantic(queue, transfer_hash, descriptor, member_id, config, finality)
+                                .await?
                         };
                         if known.is_some_and(|known| known != (transfer_semantic_digest, first_position)) {
                             return Err(NodeError::ReplayConflict);
@@ -404,6 +473,7 @@ where
                         }
                         finality
                             .verify_durable_capability(&pending.finality)
+                            .await
                             .map_err(|_| NodeError::FinalityRejected)?;
                         (pending, Some(stored.digest))
                     };
@@ -424,7 +494,8 @@ where
                         transfer_semantic_digest,
                         finality: finality_capability,
                     };
-                    let validated = validate_compact_record(descriptor, member_id, config, record.clone(), finality)?;
+                    let validated =
+                        validate_compact_record(descriptor, member_id, config, record.clone(), finality).await?;
                     runtime.validate_verified_refresh(&validated.refresh)?;
                     let encoded = serde_json::to_vec(&record)?;
                     if encoded.len() > crate::MAX_INBOX_RECORD_BYTES {
@@ -461,7 +532,11 @@ where
     if !occurrences.is_empty() {
         return Err(NodeError::InvalidLedgerArtifact);
     }
-    validate_segment_end(segment, next_height, &previous_app_hash)?;
+    if finalized_range.next_height() != next_height
+        || finalized_range.next_expected_previous_app_hash() != &previous_app_hash
+    {
+        return Err(NodeError::CursorConflict);
+    }
     let last_finality = last_finality.ok_or(NodeError::InvalidLedgerArtifact)?;
     let next_cursor = LedgerCursor {
         next_height,
@@ -478,8 +553,14 @@ where
             record,
         })
         .collect::<Vec<_>>();
-    let segment_digest =
-        prepared_segment_digest(current, &next_cursor, &pending_writes, &pending_removals, &inbox_writes);
+    let segment_digest = prepared_segment_digest(
+        staged.stage_digest(),
+        current,
+        &next_cursor,
+        &pending_writes,
+        &pending_removals,
+        &inbox_writes,
+    );
     Ok(Some(PreparedSegment {
         next_cursor,
         segment_digest,
@@ -490,57 +571,6 @@ where
     }))
 }
 
-struct BoundedJsonCounter {
-    length: usize,
-    maximum: usize,
-}
-
-impl std::io::Write for BoundedJsonCounter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        let next = self
-            .length
-            .checked_add(bytes.len())
-            .ok_or_else(|| std::io::Error::other("JSON length overflow"))?;
-        if next > self.maximum {
-            return Err(std::io::Error::other("JSON exceeds configured bound"));
-        }
-        self.length = next;
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-fn bounded_json_len<T: Serialize>(value: &T, maximum: usize) -> Result<usize> {
-    let mut counter = BoundedJsonCounter { length: 0, maximum };
-    serde_json::to_writer(&mut counter, value).map_err(|_| NodeError::InvalidLedgerArtifact)?;
-    counter.flush().map_err(|_| NodeError::InvalidLedgerArtifact)?;
-    Ok(counter.length)
-}
-
-fn validate_segment_head<T>(segment: &FinalizedExecutionSegmentV2<T>) -> Result<()> {
-    if segment.start_height == 0
-        || segment.blocks.is_empty()
-        || segment.blocks.len() > usize::from(crate::types::MAX_BATCH_ITEMS)
-    {
-        return Err(NodeError::InvalidLedgerArtifact);
-    }
-    Ok(())
-}
-
-fn validate_segment_end<T>(
-    segment: &FinalizedExecutionSegmentV2<T>,
-    next_height: u64,
-    previous: &AppHashV2,
-) -> Result<()> {
-    if segment.next_height != next_height || &segment.next_expected_previous_app_hash != previous {
-        return Err(NodeError::CursorConflict);
-    }
-    Ok(())
-}
-
 fn validate_block_finality(
     config: &NodeConfig,
     block: &thunderbolt_ledger::ExecutedBlockV2,
@@ -548,6 +578,7 @@ fn validate_block_finality(
 ) -> Result<()> {
     capability.validate_shape()?;
     if capability.verifier_profile() != config.finality_verifier_profile
+        || capability.coordinator_id() != config.finality_coordinator_id
         || capability.ledger_chain_id() != &config.ledger_chain_id
         || capability.block_height() != block.height()
         || capability.app_hash() != block.app_hash()
@@ -568,6 +599,7 @@ fn channel_matches_descriptor(
 }
 
 fn prepared_segment_digest(
+    stage_digest: &[u8; 32],
     current: Option<&LedgerCursor>,
     next: &LedgerCursor,
     pending_writes: &[PendingInvoiceWrite],
@@ -576,6 +608,7 @@ fn prepared_segment_digest(
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"bitcoin-thunderbolt/committee-node/prepared-segment/v2");
+    hasher.update(stage_digest);
     append_cursor_digest(&mut hasher, current);
     append_cursor_digest(&mut hasher, Some(next));
     for write in pending_writes {
@@ -604,6 +637,7 @@ fn append_cursor_digest(hasher: &mut Sha256, cursor: Option<&LedgerCursor>) {
             hasher.update(cursor.processed_refresh_count.to_be_bytes());
             hasher.update(cursor.last_refresh_entry_hash.as_bytes());
             hasher.update(cursor.last_finality.verifier_profile().as_bytes());
+            hasher.update(cursor.last_finality.coordinator_id().as_bytes());
             hasher.update(cursor.last_finality.ledger_chain_id().as_bytes());
             hasher.update(cursor.last_finality.block_height().to_be_bytes());
             hasher.update(cursor.last_finality.app_hash().as_bytes());
@@ -615,20 +649,13 @@ fn append_cursor_digest(hasher: &mut Sha256, cursor: Option<&LedgerCursor>) {
     }
 }
 
-fn verify_occurrence<T, V>(
-    finality: &V,
-    occurrence: &crate::FinalizedEntryOccurrenceV2<T>,
+fn verify_occurrence(
+    verified: &crate::VerifiedEntryOccurrenceV2,
     entry: &thunderbolt_ledger::ExecutedEntryV2,
     config: &NodeConfig,
     expected_through_height: u64,
     expected_through_app_hash: &AppHashV2,
-) -> Result<crate::VerifiedEntryOccurrenceV2>
-where
-    V: LedgerFinalityVerifier<T>,
-{
-    let verified = finality
-        .verify_entry_occurrence(occurrence)
-        .map_err(|_| NodeError::FinalityRejected)?;
+) -> Result<crate::VerifiedEntryOccurrenceV2> {
     let metadata = entry.metadata();
     let semantic_digest = entry_semantic_digest(entry)?;
     let first_position = (verified.first_height, verified.first_index);
@@ -638,6 +665,7 @@ where
         crate::EntryOccurrenceKindV2::Replay => first_position < observed_position,
     };
     if verified.verifier_profile != config.finality_verifier_profile
+        || verified.coordinator_id != config.finality_coordinator_id
         || verified.verifier_digest.as_bytes() == &[0; 32]
         || verified.ledger_chain_id != config.ledger_chain_id
         || verified.channel_context_id != *metadata.channel_context_id()
@@ -649,24 +677,13 @@ where
         || verified.through_height != expected_through_height
         || &verified.expected_through_app_hash != expected_through_app_hash
         || !kind_matches
-        || occurrence.kind != verified.kind
-        || occurrence.ledger_chain_id != verified.ledger_chain_id
-        || occurrence.channel_context_id != verified.channel_context_id
-        || occurrence.entry_hash != verified.entry_hash
-        || occurrence.semantic_digest != verified.semantic_digest
-        || occurrence.observed_height != verified.observed_height
-        || occurrence.observed_index != verified.observed_index
-        || occurrence.first_height != verified.first_height
-        || occurrence.first_index != verified.first_index
-        || occurrence.through_height != verified.through_height
-        || occurrence.expected_through_app_hash != verified.expected_through_app_hash
     {
         return Err(NodeError::FinalityRejected);
     }
-    Ok(verified)
+    Ok(verified.clone())
 }
 
-fn stored_invoice_semantic<T, V>(
+async fn stored_invoice_semantic<V>(
     queue: &SqliteQueue,
     entry_hash: [u8; 32],
     descriptor: &thunderbolt_committee::CommitteeDescriptor,
@@ -675,7 +692,7 @@ fn stored_invoice_semantic<T, V>(
     finality: &V,
 ) -> Result<Option<SemanticLocation>>
 where
-    V: LedgerFinalityVerifier<T>,
+    V: LedgerFinalityVerifier,
 {
     if let Some(stored) = queue.pending_invoice(entry_hash)? {
         let pending: crate::types::PendingInvoiceRecordV2 = serde_json::from_slice(&stored.record)?;
@@ -684,6 +701,7 @@ where
         }
         finality
             .verify_durable_capability(&pending.finality)
+            .await
             .map_err(|_| NodeError::FinalityRejected)?;
         validate_pending_invoice(descriptor, member_id, config, &pending)?;
         return Ok(Some((
@@ -706,11 +724,11 @@ where
         record.invoice.entry.metadata().block_height(),
         record.invoice.entry.metadata().block_index(),
     );
-    validate_compact_record(descriptor, member_id, config, record, finality)?;
+    validate_compact_record(descriptor, member_id, config, record, finality).await?;
     Ok(Some((semantic, position)))
 }
 
-fn stored_transfer_semantic<T, V>(
+async fn stored_transfer_semantic<V>(
     queue: &SqliteQueue,
     entry_hash: [u8; 32],
     descriptor: &thunderbolt_committee::CommitteeDescriptor,
@@ -719,7 +737,7 @@ fn stored_transfer_semantic<T, V>(
     finality: &V,
 ) -> Result<Option<SemanticLocation>>
 where
-    V: LedgerFinalityVerifier<T>,
+    V: LedgerFinalityVerifier,
 {
     let Some(stored) = queue.inbox_by_transfer(entry_hash)? else {
         return Ok(None);
@@ -733,7 +751,7 @@ where
         record.transfer.entry.metadata().block_height(),
         record.transfer.entry.metadata().block_index(),
     );
-    validate_compact_record(descriptor, member_id, config, record, finality)?;
+    validate_compact_record(descriptor, member_id, config, record, finality).await?;
     Ok(Some((semantic, position)))
 }
 
@@ -821,7 +839,7 @@ fn validate_pending_invoice(
     })
 }
 
-fn validate_compact_record<T, V>(
+async fn validate_compact_record<V>(
     descriptor: &thunderbolt_committee::CommitteeDescriptor,
     member_id: thunderbolt_committee::CommitteeMemberId,
     config: &NodeConfig,
@@ -829,16 +847,18 @@ fn validate_compact_record<T, V>(
     finality: &V,
 ) -> Result<CompactValidation>
 where
-    V: LedgerFinalityVerifier<T>,
+    V: LedgerFinalityVerifier,
 {
     record.blocks.validate_canonical()?;
     record.finality.validate_canonical(&record.blocks)?;
     finality
         .verify_durable_capability(record.finality.invoice())
+        .await
         .map_err(|_| NodeError::FinalityRejected)?;
     if record.finality.transfer() != record.finality.invoice() {
         finality
             .verify_durable_capability(record.finality.transfer())
+            .await
             .map_err(|_| NodeError::FinalityRejected)?;
     }
     validate_block_capability_commitment(config, record.finality.invoice(), record.blocks.invoice())?;
@@ -993,6 +1013,7 @@ fn validate_block_capability_commitment(
 ) -> Result<()> {
     capability.validate_shape()?;
     if capability.verifier_profile() != config.finality_verifier_profile
+        || capability.coordinator_id() != config.finality_coordinator_id
         || capability.ledger_chain_id() != &config.ledger_chain_id
         || capability.block_height() != commitment.height()
         || capability.app_hash() != commitment.app_hash()
@@ -1046,17 +1067,19 @@ fn require_runtime_available<R: CommitteeRuntime>(runtime: &R) -> Result<()> {
     }
 }
 
-fn validate_cursor_finality<T, V>(cursor: Option<&LedgerCursor>, config: &NodeConfig, finality: &V) -> Result<()>
+async fn validate_cursor_finality<V>(cursor: Option<&LedgerCursor>, config: &NodeConfig, finality: &V) -> Result<()>
 where
-    V: LedgerFinalityVerifier<T>,
+    V: LedgerFinalityVerifier,
 {
     let Some(cursor) = cursor else {
         return Ok(());
     };
     finality
         .verify_durable_capability(&cursor.last_finality)
+        .await
         .map_err(|_| NodeError::FinalityRejected)?;
     if cursor.last_finality.verifier_profile() != config.finality_verifier_profile
+        || cursor.last_finality.coordinator_id() != config.finality_coordinator_id
         || cursor.last_finality.ledger_chain_id() != &config.ledger_chain_id
         || cursor.last_finality.block_height() != cursor.next_height.saturating_sub(1)
         || cursor.last_finality.app_hash() != &cursor.expected_previous_app_hash
@@ -1066,13 +1089,50 @@ where
     Ok(())
 }
 
-fn require_verifier_profile<T, V>(config: &NodeConfig, verifier: &V) -> Result<()>
+fn require_verifier_profile<V>(config: &NodeConfig, verifier: &V) -> Result<()>
 where
-    V: LedgerFinalityVerifier<T>,
+    V: LedgerFinalityVerifier,
 {
-    if verifier.is_available() && verifier.profile_id() == config.finality_verifier_profile {
-        Ok(())
-    } else {
+    if !verifier.is_available() {
+        Err(NodeError::FinalityUnavailable)
+    } else if verifier.profile_id() != config.finality_verifier_profile
+        || verifier.coordinator_id() != config.finality_coordinator_id
+    {
         Err(NodeError::FinalityRejected)
+    } else {
+        Ok(())
+    }
+}
+
+fn require_client_profile<C>(config: &NodeConfig, client: &C) -> Result<()>
+where
+    C: SignedV2LedgerClient,
+{
+    if client.profile_id() != config.finality_verifier_profile
+        || client.coordinator_id() != config.finality_coordinator_id
+    {
+        Err(NodeError::FinalityRejected)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_intent_start(
+    cursor: Option<&LedgerCursor>,
+    config: &NodeConfig,
+    intent: &crate::FinalityRangeIntentV2,
+) -> Result<()> {
+    let expected_height = cursor.map_or(1, |value| value.next_height);
+    let expected_hash = cursor.map_or_else(AppHashV2::zero, |value| value.expected_previous_app_hash.clone());
+    if intent.verifier_profile() != config.finality_verifier_profile
+        || intent.coordinator_id() != config.finality_coordinator_id
+        || intent.ledger_chain_id() != &config.ledger_chain_id
+        || intent.start_height() != expected_height
+        || intent.expected_previous_app_hash() != &expected_hash
+        || intent.blocks().len() > usize::from(config.fetch_batch_size)
+    {
+        Err(NodeError::CursorConflict)
+    } else {
+        Ok(())
     }
 }

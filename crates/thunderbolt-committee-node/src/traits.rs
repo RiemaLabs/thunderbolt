@@ -1,14 +1,14 @@
 use std::error::Error;
+use std::future::Future;
+use std::pin::Pin;
 
-use serde::de::DeserializeOwned;
-use serde::Serialize;
 use thunderbolt_committee::{CommitteeMemberEngine, CommitteeVault};
 use thunderbolt_ledger::{ActorSignatureV2, ProposalBodyV2, SignedProposalV2};
 
 use crate::{
-    DurableBlockFinalityCapability, FinalityVerifierProfileId, FinalizedEntryOccurrenceV2, FinalizedExecutedBlockV2,
-    FinalizedExecutionSegmentV2, LedgerCursor, NodeError, Result, RuntimeRefreshOutcome, VerifiedEntryOccurrenceV2,
-    VerifiedV2Refresh,
+    DurableBlockFinalityCapability, FinalityCoordinatorId, FinalityRangeIntentV2, FinalityVerifierProfileId,
+    FinalizedRangeCapabilityV2, LedgerCursor, NodeError, Result, RuntimeRefreshOutcome,
+    StagedFinalityRangeCapabilityV2, SubmissionStatus, VerifiedV2Refresh,
 };
 
 /// Trusted consensus boundary for one complete deterministic executed block.
@@ -17,32 +17,32 @@ use crate::{
 /// complete executed block through a trusted header or validator quorum. They
 /// never assign refresh ordinals or claim filtered-result completeness. The
 /// service derives its local refresh chain only from whole-block continuity.
-/// This crate provides no accepting production implementation.
-pub trait LedgerFinalityVerifier<R> {
+/// Every method is asynchronous because historically repeatable verification
+/// may consult a crash-safe light-client store. Cancellation must not expose an
+/// unanchored capability. The service durably stages authority-free execution
+/// intent first, but performs no cursor, inbox, or private-runtime mutation
+/// until finalization has completed. This crate provides no accepting
+/// production implementation.
+pub trait LedgerFinalityVerifier: Send + Sync {
     type Error: Error + Send + Sync + 'static;
     fn profile_id(&self) -> FinalityVerifierProfileId;
-    fn verify_finalized_block(
-        &self,
-        block: &FinalizedExecutedBlockV2<R>,
-    ) -> std::result::Result<DurableBlockFinalityCapability, Self::Error>;
-    /// Authenticates an exact request-bound first-location lookup at the stated
-    /// finalized `(through_height, through_app_hash)` checkpoint. The returned
-    /// capability must bind every field, the canonical current-entry semantic
-    /// digest, and equality with the canonical entry at the authenticated first
-    /// location. It must distinguish first execution from an exact later
-    /// replay; a locator response alone is not sufficient.
-    fn verify_entry_occurrence(
-        &self,
-        occurrence: &FinalizedEntryOccurrenceV2<R>,
-    ) -> std::result::Result<VerifiedEntryOccurrenceV2, Self::Error>;
-    /// Verifies the bounded persisted attestation without consulting mutable
-    /// light-client state or requiring the original raw consensus receipt. The
-    /// authenticated attestation must cover the exact profile, chain, block
-    /// height, and application hash; accepting shape-valid JSON alone is unsafe.
-    fn verify_durable_capability(
-        &self,
-        capability: &DurableBlockFinalityCapability,
-    ) -> std::result::Result<(), Self::Error>;
+    fn coordinator_id(&self) -> FinalityCoordinatorId;
+    /// Finalizes only a role-store-issued staged range. Implementations must
+    /// replay an already finalized prefix exactly and must retain no provider
+    /// metadata in the returned capability.
+    fn finalize_staged_range<'a>(
+        &'a mut self,
+        staged: &'a StagedFinalityRangeCapabilityV2,
+    ) -> LedgerFuture<'a, FinalizedRangeCapabilityV2, Self::Error>;
+    /// Revalidates the bounded persisted attestation against historically
+    /// repeatable trusted state without requiring the original raw consensus
+    /// receipt. The authenticated attestation must cover the exact profile,
+    /// chain, block height, and application hash; accepting shape-valid JSON
+    /// alone is unsafe.
+    fn verify_durable_capability<'a>(
+        &'a self,
+        capability: &'a DurableBlockFinalityCapability,
+    ) -> LedgerFuture<'a, (), Self::Error>;
     fn is_available(&self) -> bool {
         true
     }
@@ -51,52 +51,92 @@ pub trait LedgerFinalityVerifier<R> {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DisabledFinalityVerifier;
 
-impl<R> LedgerFinalityVerifier<R> for DisabledFinalityVerifier {
+impl LedgerFinalityVerifier for DisabledFinalityVerifier {
     type Error = NodeError;
     fn profile_id(&self) -> FinalityVerifierProfileId {
         FinalityVerifierProfileId::DISABLED
     }
-    fn verify_finalized_block(
-        &self,
-        _block: &FinalizedExecutedBlockV2<R>,
-    ) -> std::result::Result<DurableBlockFinalityCapability, Self::Error> {
-        Err(NodeError::FinalityUnavailable)
+    fn coordinator_id(&self) -> FinalityCoordinatorId {
+        FinalityCoordinatorId::DISABLED
     }
-    fn verify_entry_occurrence(
-        &self,
-        _occurrence: &FinalizedEntryOccurrenceV2<R>,
-    ) -> std::result::Result<VerifiedEntryOccurrenceV2, Self::Error> {
-        Err(NodeError::FinalityUnavailable)
+    fn finalize_staged_range<'a>(
+        &'a mut self,
+        _staged: &'a StagedFinalityRangeCapabilityV2,
+    ) -> LedgerFuture<'a, FinalizedRangeCapabilityV2, Self::Error> {
+        Box::pin(async { Err(NodeError::FinalityUnavailable) })
     }
-    fn verify_durable_capability(
-        &self,
-        _capability: &DurableBlockFinalityCapability,
-    ) -> std::result::Result<(), Self::Error> {
-        Err(NodeError::FinalityUnavailable)
+    fn verify_durable_capability<'a>(
+        &'a self,
+        _capability: &'a DurableBlockFinalityCapability,
+    ) -> LedgerFuture<'a, (), Self::Error> {
+        Box::pin(async { Err(NodeError::FinalityUnavailable) })
     }
     fn is_available(&self) -> bool {
         false
     }
 }
 
-/// Transport for complete contiguous finalized whole-block pages.
+/// Transport for complete contiguous authority-free whole-block intents.
 ///
 /// `None` cursor means the exact genesis locator `(height=1, previous_app_hash=0)`.
-/// Returning `None` means no new complete finalized range is available. A
-/// returned segment must come from a request-correlated execution-range page;
-/// locators and filtered history responses are insufficient.
-pub trait SignedV2LedgerClient {
-    type Receipt: Clone + Serialize + DeserializeOwned;
+/// Returning `None` means no new complete execution range is available. A
+/// returned intent must come from a request-correlated execution-range page;
+/// locators and filtered history responses are insufficient. Preparing never
+/// grants finality or mutates coordinator trust state.
+pub trait SignedV2LedgerClient: Send {
     type Error: Error + Send + Sync + 'static;
-    fn fetch_contiguous_finalized_segment(
-        &mut self,
-        cursor: Option<&LedgerCursor>,
+    fn profile_id(&self) -> FinalityVerifierProfileId;
+    fn coordinator_id(&self) -> FinalityCoordinatorId;
+    fn prepare_finalized_execution<'a>(
+        &'a mut self,
+        cursor: Option<&'a LedgerCursor>,
         max_blocks: u16,
-    ) -> std::result::Result<Option<FinalizedExecutionSegmentV2<Self::Receipt>>, Self::Error>;
-    fn submit_signed_proposal(
-        &mut self,
-        proposal: &SignedProposalV2,
-    ) -> std::result::Result<Self::Receipt, Self::Error>;
+    ) -> LedgerFuture<'a, Option<FinalityRangeIntentV2>, Self::Error>;
+    fn submit_signed_proposal<'a>(
+        &'a mut self,
+        proposal: &'a SignedProposalV2,
+    ) -> LedgerFuture<'a, SubmissionStatus, Self::Error>;
+    fn is_available(&self) -> bool {
+        true
+    }
+}
+
+/// Boxed cancellable future returned by a Committee Ledger transport.
+pub type LedgerFuture<'a, T, E> = Pin<Box<dyn Future<Output = std::result::Result<T, E>> + Send + 'a>>;
+
+/// Signed-v2 Ledger client that always fails closed.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DisabledSignedV2LedgerClient;
+
+impl SignedV2LedgerClient for DisabledSignedV2LedgerClient {
+    type Error = NodeError;
+
+    fn profile_id(&self) -> FinalityVerifierProfileId {
+        FinalityVerifierProfileId::DISABLED
+    }
+
+    fn coordinator_id(&self) -> FinalityCoordinatorId {
+        FinalityCoordinatorId::DISABLED
+    }
+
+    fn prepare_finalized_execution<'a>(
+        &'a mut self,
+        _cursor: Option<&'a LedgerCursor>,
+        _max_blocks: u16,
+    ) -> LedgerFuture<'a, Option<FinalityRangeIntentV2>, Self::Error> {
+        Box::pin(async { Err(NodeError::FinalityUnavailable) })
+    }
+
+    fn submit_signed_proposal<'a>(
+        &'a mut self,
+        _proposal: &'a SignedProposalV2,
+    ) -> LedgerFuture<'a, SubmissionStatus, Self::Error> {
+        Box::pin(async { Err(NodeError::FinalityUnavailable) })
+    }
+
+    fn is_available(&self) -> bool {
+        false
+    }
 }
 
 /// External BIP340 signer boundary. The service never receives a secret key.

@@ -16,9 +16,15 @@ use thunderbolt_cometbft_client::{
 };
 use thunderbolt_cometbft_rpc::{RetryPolicy as CometRpcRetryPolicy, RpcLimits};
 use thunderbolt_committee::CommitteeMemberId;
-use thunderbolt_committee_node::{FinalityVerifierProfileId, NodeConfig as CommitteeNodeConfig};
+use thunderbolt_committee_node::{
+    FinalityCoordinatorId as CommitteeFinalityCoordinatorId,
+    FinalityVerifierProfileId as CommitteeFinalityVerifierProfileId, NodeConfig as CommitteeNodeConfig,
+};
 use thunderbolt_control::{ControlServerConfig, ABSOLUTE_MAX_FRAME_BYTES};
-use thunderbolt_holder_node::{HolderDeploymentPolicy, HolderNodeConfig, RetryPolicy};
+use thunderbolt_holder_node::{
+    FinalityCoordinatorId as HolderFinalityCoordinatorId, FinalityVerifierProfileId as HolderFinalityVerifierProfileId,
+    HolderDeploymentPolicy, HolderNodeConfig, RetryPolicy,
+};
 use thunderbolt_ledger::LedgerChainIdV2;
 use thunderbolt_ledger_abci::{
     ConsensusProfileV2, ProcessExitFatalHandler, StaticAdmissionRequestV2, StaticAdmissionVerifierV2,
@@ -160,6 +166,7 @@ fn map_holder(raw: RawHolderProcess) -> Result<HolderRuntimeConfig> {
         ));
     }
     validate_capabilities(&raw.capabilities)?;
+    let comet = map_comet(raw.comet, &identity, &paths)?;
     let channel = channel_template(&identity)?;
     let deployment = HolderDeploymentPolicy::from_channel(&channel).map_err(|_| ConfigError::PolicyRejected)?;
     let retry = RetryPolicy {
@@ -167,9 +174,15 @@ fn map_holder(raw: RawHolderProcess) -> Result<HolderRuntimeConfig> {
         maximum_delay_ms: raw.holder.retry_maximum_delay_ms,
         maximum_attempts: raw.holder.retry_maximum_attempts,
     };
+    let finality_profile = HolderFinalityVerifierProfileId::new(identity.finality_verifier_profile_id)
+        .map_err(|_| ConfigError::PolicyRejected)?;
+    let finality_coordinator = HolderFinalityCoordinatorId::new(*comet.coordinator().identity().as_bytes())
+        .map_err(|_| ConfigError::PolicyRejected)?;
     let node = HolderNodeConfig::new(
         identity.network,
         identity.ledger_chain_id.clone(),
+        finality_profile,
+        finality_coordinator,
         deployment,
         retry,
         raw.holder.submit_batch,
@@ -177,7 +190,6 @@ fn map_holder(raw: RawHolderProcess) -> Result<HolderRuntimeConfig> {
         duration_ms(raw.holder.busy_timeout_ms)?,
     )
     .map_err(|_| ConfigError::PolicyRejected)?;
-    let comet = map_comet(raw.comet, &identity, &paths)?;
     let bitcoin = map_bitcoin(raw.bitcoin, identity.network)?;
     let control = map_control(raw.control, &paths.control_socket)?;
     Ok(HolderRuntimeConfig {
@@ -201,19 +213,22 @@ fn map_committee(raw: RawCommitteeProcess) -> Result<CommitteeRuntimeConfig> {
         ));
     }
     validate_capabilities(&raw.capabilities)?;
+    let comet = map_comet(raw.comet, &identity, &paths)?;
     CommitteeNodeConfig::validate_network(identity.network).map_err(|_| ConfigError::PolicyRejected)?;
     let member_id = CommitteeMemberId::new(raw.committee.member_id).map_err(|_| ConfigError::PolicyRejected)?;
-    let finality = FinalityVerifierProfileId::new(identity.finality_verifier_profile_id)
+    let finality = CommitteeFinalityVerifierProfileId::new(identity.finality_verifier_profile_id)
+        .map_err(|_| ConfigError::PolicyRejected)?;
+    let coordinator = CommitteeFinalityCoordinatorId::new(*comet.coordinator().identity().as_bytes())
         .map_err(|_| ConfigError::PolicyRejected)?;
     let node = CommitteeNodeConfig::new(
         identity.ledger_chain_id.clone(),
         finality,
+        coordinator,
         raw.committee.max_inbox_rows,
         raw.committee.max_outbox_rows,
         raw.committee.fetch_batch_size,
     )
     .map_err(|_| ConfigError::PolicyRejected)?;
-    let comet = map_comet(raw.comet, &identity, &paths)?;
     let bitcoin = map_bitcoin(raw.bitcoin, identity.network)?;
     let control = map_control(raw.control, &paths.control_socket)?;
     Ok(CommitteeRuntimeConfig {

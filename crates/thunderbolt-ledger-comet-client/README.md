@@ -34,6 +34,16 @@ Merkle proof. Restart, history-epoch sealing, and source rotation preserve the
 same static profile because it binds the complete allowed RPC roster. Each
 reference separately binds its historical source version and proof digest.
 
+`HistoricalBlockReferenceV2` provides the same provider-free, authority-free
+handoff for a complete executed block, including a zero-entry block. Its sole
+binary form is 291 bytes and its Serde form is exactly 582 lowercase hexadecimal
+characters. It binds the client profile, coordinator identity, chain, source
+configuration and application versions, execution height/time/application and
+header hashes, adjacent committing height/header hash, and proof digest. It has
+no entry index or raw receipt. `revalidate_block_reference` reloads the exact
+block, summary, and proof from externally anchored coordinator history before
+returning a private `FinalizedBlockCapabilityV2`.
+
 An authenticated `broadcast_tx_sync` result is only CheckTx admission. Writes
 are attempted once. `AmbiguousWrite` is never retried automatically; callers
 reconcile only through `reconcile_submission`, which performs the complete

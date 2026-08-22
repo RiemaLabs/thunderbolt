@@ -15,6 +15,11 @@ gas policy, application version 2, Ed25519 validator policy, and disabled vote
 extensions. `Info` rechecks the durable Floor profile before reporting its
 head.
 
+The app state is canonical compact JSON because CometBFT carries genesis
+`app_state` as JSON `RawMessage`. It binds the format, application version,
+consensus profile, Floor genesis, authorization registry, and validator-set
+digests. Raw binary and alternate JSON encodings are rejected.
+
 The adapter never emits validator updates and provides no validator rotation or
 governance mechanism.
 
@@ -68,7 +73,26 @@ extension is accepted. Mainnet identities remain disabled by the Floor genesis.
 
 This crate does not start CometBFT, provide validator governance, authenticate
 network transport, verify quorum finality, or expose a local finality shortcut.
-The upstream `tendermint-abci` socket codec does not enforce the exported frame
-bound before allocation; production deployment requires a reviewed bounded
-dispatcher on an authenticated local boundary. A four-validator live CometBFT
-gate remains separate from this transport-neutral adapter package.
+Production deployment requires `thunderbolt-abci-server` on an authenticated
+local boundary.
+
+## Opt-in interoperability gate
+
+The `insecure-live-test` feature builds a dedicated process with one fixed
+test-only Floor authorization registry. Cargo does not build that binary or its
+ignored test by default. It must never be enabled in deployment.
+
+Run the isolated gate explicitly:
+
+```sh
+THUNDERBOLT_COMETBFT_FLOOR_LIVE=1 cargo test -p thunderbolt-floor-abci \
+  --features insecure-live-test --test live_cometbft -- --ignored --nocapture
+```
+
+The wrapper reuses the signed-source CometBFT v0.38.25 harness and its pinned
+tag object, commit, signer fingerprint, and source-archive digest. It runs four
+validators against four independent Floor databases, checks raw oversize-frame
+rejection, invalid transaction admission, pre-Commit crash replay, validator
+and application restart, deterministic replica heads, H-to-H+1 app-hash
+binding, and complete process/file cleanup. This is interoperability and crash
+recovery evidence, not a finality or production-authorization claim.

@@ -19,7 +19,7 @@ pub enum LocalControlRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "result", content = "data", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LocalControlResponse {
-    Status(ServiceStatus),
+    Status(Box<ServiceStatus>),
     Queued(QueuedProposal),
     Run(RunReport),
     Accepted,

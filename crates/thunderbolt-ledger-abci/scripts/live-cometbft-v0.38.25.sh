@@ -8,11 +8,38 @@ COMET_SIGNER_FINGERPRINT="34E07D0C95A4643DB9937263E2B366778DC37650"
 COMET_ARCHIVE_SHA256="4557439c9af26e4bf44008bf196c6437b37e637ab4a957a0071e83823def34d3"
 COMET_ARCHIVE_URL="https://github.com/cometbft/cometbft/archive/refs/tags/${COMET_VERSION}.tar.gz"
 COMET_GIT_URL="https://github.com/cometbft/cometbft.git"
-CHAIN_ID="thunderbolt-live-v2"
+LIVE_APP="${THUNDERBOLT_COMETBFT_APP:-ledger}"
+case "${LIVE_APP}" in
+    ledger)
+        CHAIN_ID="thunderbolt-live-v2"
+        APP_MANIFEST_REL="crates/thunderbolt-ledger-abci/Cargo.toml"
+        APP_BIN_NAME="thunderbolt-ledger-abci-live-test"
+        ABCI_MAX_FRAME_BYTES=$((26 * 1024 * 1024))
+        ;;
+    floor)
+        CHAIN_ID="thunderbolt-floor-live-v2"
+        APP_MANIFEST_REL="crates/thunderbolt-floor-abci/Cargo.toml"
+        APP_BIN_NAME="thunderbolt-floor-abci-live-test"
+        ABCI_MAX_FRAME_BYTES=$((3 * 1024 * 1024))
+        ;;
+    *)
+        echo "unknown CometBFT interoperability application: ${LIVE_APP}" >&2
+        exit 2
+        ;;
+esac
+if [[ -n "${THUNDERBOLT_EXPECTED_COMETBFT_APP:-}" \
+    && "${THUNDERBOLT_EXPECTED_COMETBFT_APP}" != "${LIVE_APP}" ]]; then
+    echo "selected CometBFT application ${LIVE_APP} differs from expected ${THUNDERBOLT_EXPECTED_COMETBFT_APP}" >&2
+    exit 2
+fi
 CRASH_HEIGHT=2
 
-if [[ "${THUNDERBOLT_COMETBFT_LIVE:-}" != "1" ]]; then
-    echo "set THUNDERBOLT_COMETBFT_LIVE=1 to authorize the opt-in live gate" >&2
+if [[ "${LIVE_APP}" == "ledger" && "${THUNDERBOLT_COMETBFT_LIVE:-}" != "1" ]]; then
+    echo "set THUNDERBOLT_COMETBFT_LIVE=1 to authorize the opt-in Ledger gate" >&2
+    exit 2
+fi
+if [[ "${LIVE_APP}" == "floor" && "${THUNDERBOLT_COMETBFT_FLOOR_LIVE:-}" != "1" ]]; then
+    echo "set THUNDERBOLT_COMETBFT_FLOOR_LIVE=1 to authorize the opt-in Floor gate" >&2
     exit 2
 fi
 
@@ -159,12 +186,12 @@ if [[ "${COMET_REPORTED_VERSION}" != "0.38.25" && "${COMET_REPORTED_VERSION}" !=
     exit 1
 fi
 
-echo "building feature-gated insecure ABCI test process"
+echo "building feature-gated ${LIVE_APP} ABCI interoperability process"
 export CARGO_TARGET_DIR="${RUN_ROOT}/cargo-target"
 cargo build --quiet --locked --release --manifest-path \
-    "${REPO_ROOT}/crates/thunderbolt-ledger-abci/Cargo.toml" \
-    --features insecure-live-test --bin thunderbolt-ledger-abci-live-test
-APP_BIN="${CARGO_TARGET_DIR}/release/thunderbolt-ledger-abci-live-test"
+    "${REPO_ROOT}/${APP_MANIFEST_REL}" \
+    --features insecure-live-test --bin "${APP_BIN_NAME}"
+APP_BIN="${CARGO_TARGET_DIR}/release/${APP_BIN_NAME}"
 
 PORTS=( $(python3 - <<'PY'
 import socket
@@ -271,20 +298,49 @@ path.write_text("\n".join(lines) + "\n")
 PY
 done
 
-GENESIS_PROFILE="$("${APP_BIN}" profile --chain-id "${CHAIN_ID}")"
-python3 - "${NETWORK_DIR}" "${CHAIN_ID}" "${GENESIS_PROFILE}" <<'PY'
+python3 - "${NETWORK_DIR}" "${CHAIN_ID}" <<'PY'
 import json
 import pathlib
 import sys
 
 network = pathlib.Path(sys.argv[1])
 chain_id = sys.argv[2]
-profile = json.loads(sys.argv[3])
 for path in sorted(network.glob("node*/config/genesis.json")):
     genesis = json.loads(path.read_text())
     genesis["chain_id"] = chain_id
+    genesis["initial_height"] = "1"
     genesis["app_hash"] = ""
+    path.write_text(json.dumps(genesis, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+
+PROFILE_COMMAND=("${APP_BIN}" profile --chain-id "${CHAIN_ID}")
+if [[ "${LIVE_APP}" == "floor" ]]; then
+    PROFILE_COMMAND+=(--comet-genesis "${NETWORK_DIR}/node0/config/genesis.json")
+fi
+GENESIS_PROFILE="$("${PROFILE_COMMAND[@]}")"
+python3 - "${NETWORK_DIR}" "${GENESIS_PROFILE}" "${LIVE_APP}" <<'PY'
+import json
+import pathlib
+import sys
+
+network = pathlib.Path(sys.argv[1])
+profile = json.loads(sys.argv[2])
+application = sys.argv[3]
+for path in sorted(network.glob("node*/config/genesis.json")):
+    genesis = json.loads(path.read_text())
     genesis["app_state"] = profile
+    if application == "floor":
+        genesis["consensus_params"] = {
+            "abci": {"vote_extensions_enable_height": "0"},
+            "block": {"max_bytes": "1048576", "max_gas": "-1"},
+            "evidence": {
+                "max_age_duration": "172800000000000",
+                "max_age_num_blocks": "100000",
+                "max_bytes": "65536",
+            },
+            "validator": {"pub_key_types": ["ed25519"]},
+            "version": {"app": "2"},
+        }
     path.write_text(json.dumps(genesis, sort_keys=True, separators=(",", ":")) + "\n")
 PY
 
@@ -314,6 +370,9 @@ start_app() {
     local port="${PORTS[$((index * 3 + 2))]}"
     local command=("${APP_BIN}" serve --listen "127.0.0.1:${port}" \
         --db "${RUN_ROOT}/apps/node${index}.sqlite3" --chain-id "${CHAIN_ID}")
+    if [[ "${LIVE_APP}" == "floor" ]]; then
+        command+=(--comet-genesis "${NETWORK_DIR}/node${index}/config/genesis.json")
+    fi
     case "${fault}" in
         before)
             command+=(--crash-before-commit-height "${CRASH_HEIGHT}" \
@@ -343,6 +402,50 @@ start_node() {
         >"${RUN_ROOT}/logs/node${index}.log" 2>&1 &
     NODE_PIDS[${index}]=$!
     wait_for_port "${PORTS[$((index * 3 + 1))]}"
+}
+
+application_status() {
+    local index="$1"
+    local command=("${APP_BIN}" status --db "${RUN_ROOT}/apps/node${index}.sqlite3" \
+        --chain-id "${CHAIN_ID}")
+    if [[ "${LIVE_APP}" == "floor" ]]; then
+        command+=(--comet-genesis "${NETWORK_DIR}/node${index}/config/genesis.json")
+    fi
+    "${command[@]}"
+}
+
+verify_oversized_frame_rejection() {
+    local index="$1"
+    local port="${PORTS[$((index * 3 + 2))]}"
+    python3 - "${port}" "${ABCI_MAX_FRAME_BYTES}" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+length = int(sys.argv[2]) + 1
+prefix = bytearray()
+while True:
+    low = length & 0x7f
+    length >>= 7
+    prefix.append(low if length == 0 else low | 0x80)
+    if length == 0:
+        break
+
+with socket.create_connection(("127.0.0.1", port), timeout=2) as stream:
+    stream.settimeout(2)
+    stream.sendall(prefix)
+    try:
+        value = stream.recv(1)
+    except (ConnectionResetError, BrokenPipeError):
+        value = b""
+    if value != b"":
+        raise SystemExit("oversized ABCI frame produced output instead of closing")
+PY
+    if ! kill -0 "${APP_PIDS[${index}]}" 2>/dev/null; then
+        echo "ABCI process exited after rejecting an oversized frame" >&2
+        return 1
+    fi
+    wait_for_port "${port}"
 }
 
 rpc_url() {
@@ -423,6 +526,7 @@ start_app 0 before
 start_app 1
 start_app 2
 start_app 3
+verify_oversized_frame_rejection 0
 start_node 0
 start_node 1
 start_node 2
@@ -448,8 +552,7 @@ if [[ ${CRASH_STATUS} -ne 86 ]]; then
     exit 1
 fi
 
-PRECOMMIT_STATUS="$("${APP_BIN}" status --db "${RUN_ROOT}/apps/node0.sqlite3" \
-    --chain-id "${CHAIN_ID}")"
+PRECOMMIT_STATUS="$(application_status 0)"
 PRECOMMIT_HEIGHT="$(printf '%s' "${PRECOMMIT_STATUS}" \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["last_height"])')"
 if [[ "${PRECOMMIT_HEIGHT}" != "$((CRASH_HEIGHT - 1))" ]]; then
@@ -524,8 +627,7 @@ for index in 0 1 2 3; do
 done
 
 for index in 0 1 2 3; do
-    DURABLE_STATUS="$("${APP_BIN}" status --db "${RUN_ROOT}/apps/node${index}.sqlite3" \
-        --chain-id "${CHAIN_ID}")"
+    DURABLE_STATUS="$(application_status "${index}")"
     DURABLE_HEIGHT="$(printf '%s' "${DURABLE_STATUS}" \
         | python3 -c 'import json,sys; print(json.load(sys.stdin)["last_height"])')"
     DURABLE_HASH="$(printf '%s' "${DURABLE_STATUS}" \
@@ -536,5 +638,5 @@ for index in 0 1 2 3; do
     fi
 done
 
-echo "live CometBFT gate passed: version=${COMET_REPORTED_VERSION} replicas=4 height=${FINAL_HEIGHT} app_version=2"
-echo "verified: signed tag, archive checksum, H-to-H+1 app hash, invalid tx rejection, crash replay, restarts, deterministic replicas"
+echo "${LIVE_APP} CometBFT interoperability gate passed: version=${COMET_REPORTED_VERSION} replicas=4 height=${FINAL_HEIGHT} app_version=2"
+echo "verified: signed tag, archive checksum, bounded oversize rejection, H-to-H+1 app hash, invalid tx rejection, crash replay, restarts, deterministic replicas"

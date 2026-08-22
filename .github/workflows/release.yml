@@ -33,6 +33,19 @@ jobs:
           ./scripts/package-release.sh "$version" dist
           ./scripts/verify-release.sh --checksums-only dist
           test -s dist/SIGNING-INSTRUCTIONS.txt
+          archive="$(find dist -maxdepth 1 -type f -name '*.tar.gz' ! -name '*-source.tar.gz' -print)"
+          install -d "$RUNNER_TEMP/release-smoke"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/release-smoke"
+          root="$(find "$RUNNER_TEMP/release-smoke" -mindepth 1 -maxdepth 1 -type d -print)"
+          while read -r package binary extra; do
+            if [[ -z "$package" || "$package" == \#* ]]; then
+              continue
+            fi
+            "$root/bin/$binary" --help >/dev/null
+            test -s "dist/$binary.cdx.json"
+          done < release/default-binaries.txt
+          grep -Fxq 'operator_runtime_capability=live-not-ready' "$root/BUILD-METADATA"
+          test ! -e "$root/config"
 
   archive:
     name: archives (${{ matrix.os }})
@@ -58,6 +71,19 @@ jobs:
           fi
           ./scripts/package-release.sh "$version" dist
           ./scripts/verify-release.sh --checksums-only dist
+          archive="$(find dist -maxdepth 1 -type f -name '*.tar.gz' ! -name '*-source.tar.gz' -print)"
+          install -d "$RUNNER_TEMP/release-smoke"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/release-smoke"
+          root="$(find "$RUNNER_TEMP/release-smoke" -mindepth 1 -maxdepth 1 -type d -print)"
+          while read -r package binary extra; do
+            if [[ -z "$package" || "$package" == \#* ]]; then
+              continue
+            fi
+            "$root/bin/$binary" --help >/dev/null
+            test -s "dist/$binary.cdx.json"
+          done < release/default-binaries.txt
+          grep -Fxq 'operator_runtime_capability=live-not-ready' "$root/BUILD-METADATA"
+          test ! -e "$root/config"
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: unsigned-release-${{ matrix.os }}-${{ github.sha }}

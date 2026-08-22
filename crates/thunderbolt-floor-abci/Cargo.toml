@@ -9,6 +9,22 @@ description = "Bounded CometBFT ABCI adapter for the Bitcoin Thunderbolt rollbac
 keywords = ["bitcoin", "cometbft", "abci", "thunderbolt"]
 categories = ["cryptography::cryptocurrencies", "database"]
 
+[features]
+default = []
+# Deterministic test authorization and process wiring exist only for the
+# isolated CometBFT interoperability gate. Never enable in deployment.
+insecure-live-test = ["dep:thunderbolt-abci-server"]
+
+[[bin]]
+name = "thunderbolt-floor-abci-live-test"
+path = "src/bin/live_test.rs"
+required-features = ["insecure-live-test"]
+
+[[test]]
+name = "live_cometbft"
+path = "tests/live_cometbft.rs"
+required-features = ["insecure-live-test"]
+
 [lints]
 workspace = true
 
@@ -21,6 +37,7 @@ tendermint-abci = "0.40.4"
 tendermint = "0.40.4"
 tendermint-proto = "0.40.4"
 thiserror = "2.0.16"
+thunderbolt-abci-server = { path = "../thunderbolt-abci-server", optional = true }
 thunderbolt-floor = { path = "../thunderbolt-floor" }
 thunderbolt-floor-app = { path = "../thunderbolt-floor-app" }
 thunderbolt-keystore = { path = "../thunderbolt-keystore" }

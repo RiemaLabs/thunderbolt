@@ -1,14 +1,15 @@
 use serde::{Deserialize, Serialize};
-use thunderbolt_core::paillier::PaillierModulusProfile;
-use thunderbolt_core::zkp::{verify_invoice_with_profile, InvoiceProof, InvoiceStatement};
+use thunderbolt_core::zkp::{
+    verify_invoice_3072, CertifiedKeyResolver3072, CertifiedKeyRole3072, InvoiceProof3072, InvoiceStatement3072,
+};
 
 use crate::codec::{CanonicalDigest, CanonicalHasher, ValidateWire};
 use crate::error::core_error;
 use crate::v2_values::{
-    decode_ciphertext_v2, decode_key_v2, decode_nonce_v2, decode_point_v2, decode_response_v2, derive_proof_context_v2,
+    decode_ciphertext_v2, decode_nonce_v2, decode_point_v2, decode_response_v2, derive_proof_context_v2,
     encode_ciphertext_v2, encode_key_v2, encode_nonce_v2, encode_point_v2, encode_response_v2,
-    require_matching_context, validate_modulus, validate_nonzero_fixed, validate_point_v2, validate_response,
-    PaillierCiphertextBytesV2Input, PaillierModulusBytesV2Input, PaillierModulusProfileV2Input,
+    require_matching_context, resolve_key_v2, validate_modulus, validate_nonzero_fixed, validate_point_v2,
+    validate_response, PaillierCiphertextBytesV2Input, PaillierModulusBytesV2Input, PaillierModulusProfileV2Input,
     PaillierNonceBytesV2Input, ProofResponseBytesV2Input,
 };
 use crate::{
@@ -70,12 +71,12 @@ impl InvoiceStatementV2 {
         Ok(value)
     }
 
-    pub fn from_core(statement: &InvoiceStatement) -> Result<Self> {
-        let recipient_key = encode_key_v2(&statement.bob_key)?;
+    pub fn from_core(statement: &InvoiceStatement3072) -> Result<Self> {
+        let recipient_key = encode_key_v2(&statement.recipient_key)?;
         let committee_key = encode_key_v2(&statement.committee_key)?;
         let value = Self {
             anchor_base: encode_point_v2("invoice_v2.statement.anchor_base", &statement.anchor_base)?,
-            recipient_ciphertext: encode_ciphertext_v2(&statement.bob_key, &statement.bob_ciphertext)?,
+            recipient_ciphertext: encode_ciphertext_v2(&statement.recipient_key, &statement.recipient_ciphertext)?,
             committee_ciphertext: encode_ciphertext_v2(&statement.committee_key, &statement.committee_ciphertext)?,
             recipient_key,
             committee_key,
@@ -161,15 +162,15 @@ impl InvoiceProofV2 {
         Ok(value)
     }
 
-    pub fn from_core(statement: &InvoiceStatement, proof: &InvoiceProof) -> Result<Self> {
-        let _ = encode_key_v2(&statement.bob_key)?;
+    pub fn from_core(statement: &InvoiceStatement3072, proof: &InvoiceProof3072) -> Result<Self> {
+        let _ = encode_key_v2(&statement.recipient_key)?;
         let _ = encode_key_v2(&statement.committee_key)?;
         let value = Self {
             a_delta: encode_point_v2("invoice_v2.proof.a_delta", &proof.a_delta)?,
-            a_recipient: encode_ciphertext_v2(&statement.bob_key, &proof.a_bob)?,
+            a_recipient: encode_ciphertext_v2(&statement.recipient_key, &proof.a_recipient)?,
             a_committee: encode_ciphertext_v2(&statement.committee_key, &proof.a_committee)?,
             z: encode_response_v2(&proof.z)?,
-            tau_recipient: encode_nonce_v2(&statement.bob_key, &proof.tau_bob)?,
+            tau_recipient: encode_nonce_v2(&statement.recipient_key, &proof.tau_recipient)?,
             tau_committee: encode_nonce_v2(&statement.committee_key, &proof.tau_committee)?,
         };
         value.validate_wire()?;
@@ -234,8 +235,8 @@ impl InvoiceEnvelopeV2 {
     pub fn from_core(
         binding: OperationBindingV2,
         expected_transfer_step: u64,
-        statement: &InvoiceStatement,
-        proof: &InvoiceProof,
+        statement: &InvoiceStatement3072,
+        proof: &InvoiceProof3072,
     ) -> Result<Self> {
         binding.validate_wire()?;
         if !matches!(binding, OperationBindingV2::Invoice { .. }) {
@@ -281,42 +282,57 @@ impl InvoiceEnvelopeV2 {
         Self::proof_context_for(&self.binding, self.expected_transfer_step)
     }
 
-    /// Converts through the core's raw profile ingress. With the current
-    /// backend this returns before constructing a 3072-bit key or ciphertext.
-    pub fn to_core(&self) -> Result<(InvoiceStatement, InvoiceProof)> {
+    /// Converts only after both raw moduli resolve through an authenticated
+    /// exact-match certified-key registry.
+    pub fn to_core_with_keys<R>(&self, resolver: &R) -> Result<(InvoiceStatement3072, InvoiceProof3072)>
+    where
+        R: CertifiedKeyResolver3072 + ?Sized,
+    {
         self.validate_wire()?;
         let context = self.proof_context()?;
-        let recipient_key = decode_key_v2("invoice_v2.statement.recipient_key", &self.statement.recipient_key)?;
-        let committee_key = decode_key_v2("invoice_v2.statement.committee_key", &self.statement.committee_key)?;
-        let statement = InvoiceStatement {
+        let recipient_key = resolve_key_v2(
+            "invoice_v2.statement.recipient_key",
+            &self.statement.recipient_key,
+            CertifiedKeyRole3072::Recipient,
+            resolver,
+        )?;
+        let committee_key = resolve_key_v2(
+            "invoice_v2.statement.committee_key",
+            &self.statement.committee_key,
+            CertifiedKeyRole3072::Committee,
+            resolver,
+        )?;
+        let statement = InvoiceStatement3072 {
             context,
             anchor_base: decode_point_v2("invoice_v2.statement.anchor_base", &self.statement.anchor_base)?,
-            bob_ciphertext: decode_ciphertext_v2(&recipient_key, &self.statement.recipient_ciphertext)?,
+            recipient_ciphertext: decode_ciphertext_v2(&recipient_key, &self.statement.recipient_ciphertext)?,
             committee_ciphertext: decode_ciphertext_v2(&committee_key, &self.statement.committee_ciphertext)?,
-            bob_key: recipient_key.clone(),
+            recipient_key: recipient_key.clone(),
             committee_key: committee_key.clone(),
             delta: decode_point_v2("invoice_v2.statement.delta", &self.statement.delta)?,
         };
-        let proof = InvoiceProof {
+        let proof = InvoiceProof3072 {
             a_delta: decode_point_v2("invoice_v2.proof.a_delta", &self.proof.a_delta)?,
-            a_bob: decode_ciphertext_v2(&recipient_key, &self.proof.a_recipient)?,
+            a_recipient: decode_ciphertext_v2(&recipient_key, &self.proof.a_recipient)?,
             a_committee: decode_ciphertext_v2(&committee_key, &self.proof.a_committee)?,
-            z: decode_response_v2(&self.proof.z),
-            tau_bob: decode_nonce_v2(&recipient_key, &self.proof.tau_recipient)?,
+            z: decode_response_v2(&self.proof.z)?,
+            tau_recipient: decode_nonce_v2(&recipient_key, &self.proof.tau_recipient)?,
             tau_committee: decode_nonce_v2(&committee_key, &self.proof.tau_committee)?,
         };
         Ok((statement, proof))
     }
 
-    pub fn verify(&self) -> Result<()> {
-        let (statement, proof) = self.to_core()?;
-        verify_invoice_with_profile(PaillierModulusProfile::ProtocolV2Production3072, &statement, &proof)
-            .map_err(|source| core_error("protocol v2 invoice verification", source))
+    pub fn verify_with_keys<R>(&self, resolver: &R) -> Result<()>
+    where
+        R: CertifiedKeyResolver3072 + ?Sized,
+    {
+        let (statement, proof) = self.to_core_with_keys(resolver)?;
+        verify_invoice_3072(&statement, &proof).map_err(|source| core_error("protocol v2 invoice verification", source))
     }
 
     fn append_canonical(&self, hasher: &mut CanonicalHasher) {
         self.binding.append_canonical(hasher);
-        hasher.u8(self.paillier_profile.core() as u8);
+        hasher.u8(self.paillier_profile.profile_id());
         hasher.u64(self.expected_transfer_step);
         self.statement.append_canonical(hasher);
         self.proof.append_canonical(hasher);

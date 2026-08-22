@@ -1,12 +1,15 @@
 use std::convert::TryFrom;
 
+#[cfg(feature = "insecure-regression")]
 use libpaillier::unknown_order::BigNumber;
+#[cfg(feature = "insecure-regression")]
 use libpaillier::EncryptionKey;
 use secp::Point;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+#[cfg(feature = "insecure-regression")]
 use crate::error::core_error;
 use crate::hex::{CanonicalInteger, HexBytes};
 use crate::{Result, WireError};
@@ -95,10 +98,12 @@ pub(crate) fn point_from_wire(field: &'static str, encoded: &PointHex) -> Result
     Ok(point)
 }
 
+#[cfg(feature = "insecure-regression")]
 pub(crate) fn key_to_wire(field: &'static str, key: &EncryptionKey) -> Result<PaillierPublicKeyHex> {
     PaillierPublicKeyHex::from_bytes(field, key.to_bytes())
 }
 
+#[cfg(feature = "insecure-regression")]
 pub(crate) fn key_from_wire(field: &'static str, encoded: &PaillierPublicKeyHex) -> Result<EncryptionKey> {
     let bytes = encoded.as_bytes();
     if bytes.first() == Some(&0) || bytes.last().map(|byte| byte & 1) != Some(1) {
@@ -111,6 +116,7 @@ pub(crate) fn key_from_wire(field: &'static str, encoded: &PaillierPublicKeyHex)
     Ok(key)
 }
 
+#[cfg(feature = "insecure-regression")]
 pub(crate) fn integer_to_wire<const MAX: usize>(
     field: &'static str,
     value: &BigNumber,
@@ -122,6 +128,7 @@ pub(crate) fn integer_to_wire<const MAX: usize>(
     CanonicalInteger::from_bytes(field, bytes)
 }
 
+#[cfg(feature = "insecure-regression")]
 pub(crate) fn integer_from_wire<const MAX: usize>(
     field: &'static str,
     encoded: &CanonicalInteger<MAX>,
@@ -134,10 +141,12 @@ pub(crate) fn integer_from_wire<const MAX: usize>(
     Ok(value)
 }
 
+#[cfg(feature = "insecure-regression")]
 pub(crate) fn validate_ciphertext(field: &'static str, key: &EncryptionKey, ciphertext: &BigNumber) -> Result<()> {
     thunderbolt_core::paillier::validate_ciphertext(key, ciphertext).map_err(|error| core_error(field, error))
 }
 
+#[cfg(feature = "insecure-regression")]
 pub(crate) fn validate_nonce(field: &'static str, key: &EncryptionKey, nonce: &BigNumber) -> Result<()> {
     thunderbolt_core::paillier::validate_nonce(key, nonce).map_err(|error| core_error(field, error))
 }

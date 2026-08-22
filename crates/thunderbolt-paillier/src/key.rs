@@ -17,7 +17,10 @@ use crate::types::{
     EncryptionNonce3072, Modulus, Prime, ProofNonce3072, PublicExponent3072, SecretKeyBytes3072, SecretPlaintext3072,
     SecretPlaintextBytes3072, Wide, MODULUS_BYTES, PRIME_BYTES, SECRET_KEY_BYTES,
 };
-use crate::{PaillierError, Result};
+use crate::{
+    CertifiedPublicKeyRecord3072, ExpectedPublicKeyCertificate3072, PaillierError, Result,
+    TrustedProvisioningAuthority3072,
+};
 
 const SECRET_KEY_MAGIC: &[u8; 8] = b"TBP3SK01";
 const SECRET_KEY_VERSION: u16 = 1;
@@ -114,6 +117,24 @@ impl PublicKey3072 {
         })
     }
 
+    /// Reconstructs a remote public key from a persisted, signed provisioning
+    /// certificate without loading either prime factor.
+    ///
+    /// The trusted authority attests that offline provisioning validated the
+    /// two distinct 1536-bit factors, exact product width, factor-distance
+    /// policy, and fixed `g = N + 1` suite. Signature verification and every
+    /// expected deployment/epoch/role/subject/policy/serial comparison happen
+    /// before the raw modulus reaches arithmetic construction.
+    pub fn from_certificate(
+        record: &CertifiedPublicKeyRecord3072,
+        authority: &TrustedProvisioningAuthority3072,
+        expected: &ExpectedPublicKeyCertificate3072,
+    ) -> Result<Self> {
+        authority.verify(record, expected)?;
+        let modulus = parse_modulus_exact(&record.body().modulus().to_bytes())?;
+        Self::from_modulus(modulus)
+    }
+
     /// Returns the exact public modulus.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; MODULUS_BYTES] {
@@ -142,6 +163,13 @@ impl PublicKey3072 {
         })
     }
 
+    /// Revalidates a public ciphertext's exact-key binding and group
+    /// membership before transport or protocol use.
+    pub fn validate_ciphertext(&self, ciphertext: &Ciphertext3072) -> Result<()> {
+        self.ensure_ciphertext_key(ciphertext, "ciphertext")?;
+        self.validate_ciphertext_value(&ciphertext.value)
+    }
+
     /// Parses and validates a public proof nonce under this certified key.
     pub fn proof_nonce_from_bytes(&self, bytes: impl AsRef<[u8]>) -> Result<ProofNonce3072> {
         let nonce = parse_modulus_exact(bytes.as_ref())?;
@@ -150,6 +178,13 @@ impl PublicKey3072 {
             value: nonce,
             key_modulus: self.to_bytes(),
         })
+    }
+
+    /// Revalidates a public proof nonce's exact-key binding and membership in
+    /// `Z_N*` before transport or protocol use.
+    pub fn validate_proof_nonce(&self, nonce: &ProofNonce3072) -> Result<()> {
+        self.ensure_proof_nonce_key(nonce)?;
+        self.validate_nonce_value(&nonce.value)
     }
 
     /// Consumes and validates an exact-width secret plaintext under this key.

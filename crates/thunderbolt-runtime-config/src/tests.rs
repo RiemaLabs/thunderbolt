@@ -7,6 +7,7 @@ use thunderbolt_ledger::LedgerChainIdV2;
 use thunderbolt_ledger_abci::{ConsensusProfileV2, StaticAdmissionRequestV2, StaticAdmissionVerifierV2};
 use thunderbolt_protocol::v2::ProtocolLimitsV2;
 
+use crate::types::CandidateConfig;
 use crate::*;
 
 const LEDGER: &str = include_str!("../examples/ledger-regtest.toml");
@@ -62,6 +63,28 @@ fn three_regtest_samples_map_and_cross_check() -> std::result::Result<(), Box<dy
     assert_eq!(ledger.role(), RuntimeRole::Ledger);
     assert_eq!(holder.role(), RuntimeRole::Holder);
     assert_eq!(committee.role(), RuntimeRole::Committee);
+    let CandidateConfig::Holder(holder_config) = &holder.candidate else {
+        return Err("holder config".into());
+    };
+    assert_eq!(
+        holder_config.node.finality_verifier_profile().as_bytes(),
+        &holder_config.identity.finality_verifier_profile_id
+    );
+    assert_eq!(
+        holder_config.node.finality_coordinator_id().as_bytes(),
+        holder_config.comet.coordinator().identity().as_bytes()
+    );
+    let CandidateConfig::Committee(committee_config) = &committee.candidate else {
+        return Err("committee config".into());
+    };
+    assert_eq!(
+        committee_config.node.finality_verifier_profile().as_bytes(),
+        &committee_config.identity.finality_verifier_profile_id
+    );
+    assert_eq!(
+        committee_config.node.finality_coordinator_id().as_bytes(),
+        committee_config.comet.coordinator().identity().as_bytes()
+    );
     let consistent = check_deployment_consistency(&[&ledger, &holder, &committee])?;
     assert_eq!(consistent.config_count(), 3);
     assert_eq!(consistent.committee_member_count(), 1);

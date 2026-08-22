@@ -17,7 +17,7 @@ bitcoin = "0.32.5"
 libc = "0.2.177"
 rustix = { version = "1.1.2", features = ["process"] }
 rustls = { version = "0.23.43", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
-rustls-pemfile = "2.2.0"
+rustls-pki-types = { version = "1.15.1", features = ["std"] }
 serde = { version = "1.0.217", features = ["derive"] }
 sha2 = "0.10.9"
 tendermint = "0.40.4"
@@ -33,6 +33,7 @@ thunderbolt-holder-node = { path = "../thunderbolt-holder-node" }
 thunderbolt-ledger = { path = "../thunderbolt-ledger" }
 thunderbolt-ledger-abci = { path = "../thunderbolt-ledger-abci" }
 thunderbolt-ledger-app = { path = "../thunderbolt-ledger-app" }
+thunderbolt-ledger-comet-client = { path = "../thunderbolt-ledger-comet-client" }
 thunderbolt-protocol = { path = "../thunderbolt-protocol" }
 thunderbolt-wire = { path = "../thunderbolt-wire" }
 toml = "0.8.19"

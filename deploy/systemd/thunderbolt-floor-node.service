@@ -1,0 +1,53 @@
+[Unit]
+Description=Bitcoin Thunderbolt rollback-floor node
+Documentation=https://github.com/RiemaLabs/thunderbolt-lib/tree/release/open_source/crates/thunderbolt-floor-node
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60s
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=thunderbolt-floor
+Group=thunderbolt-floor
+UMask=0077
+WorkingDirectory=/var/lib/thunderbolt-floor
+ExecStartPre=/usr/local/bin/thunderbolt-floor-node --config /var/lib/thunderbolt-floor/config/node.toml check
+ExecStart=/usr/local/bin/thunderbolt-floor-node --config /var/lib/thunderbolt-floor/config/node.toml start
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=30s
+TimeoutStopSec=90s
+WatchdogSec=0
+
+StateDirectory=thunderbolt-floor
+StateDirectoryMode=0700
+RuntimeDirectory=thunderbolt-floor
+RuntimeDirectoryMode=0700
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

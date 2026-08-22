@@ -4,7 +4,7 @@ use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use rustls::pki_types::CertificateDer;
+use rustls::pki_types::{pem::PemObject as _, CertificateDer};
 use sha2::{Digest, Sha256};
 use thunderbolt_cometbft_rpc::OwnerOnlyPemClientIdentity;
 use zeroize::Zeroizing;
@@ -131,8 +131,7 @@ pub(crate) fn load_comet_tls(
     let mut certificates = Vec::new();
     for reference in &tls.ca_certificates {
         let bytes = read_public_reference(reference, MAX_CA_PEM_BYTES)?;
-        let mut reader = std::io::Cursor::new(bytes);
-        let parsed = rustls_pemfile::certs(&mut reader)
+        let parsed = CertificateDer::pem_slice_iter(&bytes)
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|_| ConfigError::ReferenceMismatch)?;
         for certificate in parsed {

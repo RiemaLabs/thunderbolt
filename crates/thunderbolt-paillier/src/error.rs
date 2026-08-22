@@ -25,6 +25,9 @@ pub enum PaillierError {
     #[error("invalid Paillier-3072 secret key: {reason}")]
     InvalidSecretKey { reason: &'static str },
 
+    #[error("invalid Paillier-3072 public-key certificate: {reason}")]
+    InvalidCertificate { reason: &'static str },
+
     #[error("{field} belongs to a different Paillier-3072 public key")]
     WrongPublicKey { field: &'static str },
 

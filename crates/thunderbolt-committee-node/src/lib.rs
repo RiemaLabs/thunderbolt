@@ -25,15 +25,16 @@ mod types;
 pub use error::{NodeError, Result};
 pub use service::{CommitteeNode, FencedCommitteeNode};
 pub use traits::{
-    CommitteeRuntime, DisabledFinalityVerifier, DisabledProposalSigner, LedgerFinalityVerifier, SignedV2LedgerClient,
-    SignedV2ProposalSigner,
+    CommitteeRuntime, DisabledFinalityVerifier, DisabledProposalSigner, DisabledSignedV2LedgerClient,
+    LedgerFinalityVerifier, LedgerFuture, SignedV2LedgerClient, SignedV2ProposalSigner,
 };
 pub use types::{
     AcknowledgementRecord, ControlRequest, ControlResponse, DurableBlockFinalityCapability, DurableFinalityCapability,
-    EntryOccurrenceKindV2, ExecutedEntryEvidenceV2, FinalityDigest, FinalityVerifierProfileId,
-    FinalizedEntryOccurrenceV2, FinalizedExecutedBlockV2, FinalizedExecutionSegmentV2, LedgerCursor, NodeConfig,
-    NodeStatus, OutboxItem, OutboxStatus, ProcessDisposition, RefreshBlockCommitmentsV2, RuntimeRefreshOutcome,
-    VerifiedEntryOccurrenceV2, VerifiedRefreshRecordV2, VerifiedV2Refresh, MAX_INBOX_RECORD_BYTES,
+    EntryOccurrenceKindV2, ExecutedEntryEvidenceV2, FinalityCoordinatorId, FinalityDigest, FinalityRangeIntentV2,
+    FinalityVerifierProfileId, FinalizedBlockV2, FinalizedRangeCapabilityV2, LedgerCursor, NodeConfig, NodeStatus,
+    OutboxItem, OutboxStatus, ProcessDisposition, RefreshBlockCommitmentsV2, RuntimeRefreshOutcome,
+    StagedFinalityRangeCapabilityV2, StagedFinalityRecoveryV2, SubmissionStatus, VerifiedEntryOccurrenceV2,
+    VerifiedRefreshRecordV2, VerifiedV2Refresh, MAX_FINALITY_INTENT_BYTES, MAX_INBOX_RECORD_BYTES,
     MAX_SCAN_SEGMENT_BYTES,
 };
 

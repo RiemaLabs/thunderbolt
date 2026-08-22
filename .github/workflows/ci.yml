@@ -53,3 +53,11 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
       - run: cargo test --workspace --all-features --locked --doc
+
+  default-binaries:
+    name: default operator binary graph
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - run: python3 scripts/check-default-binary-graph.py

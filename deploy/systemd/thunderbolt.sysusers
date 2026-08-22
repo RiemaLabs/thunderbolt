@@ -1,1 +1,2 @@
 u thunderbolt - "Bitcoin Thunderbolt daemon" /var/lib/thunderbolt /usr/sbin/nologin
+u thunderbolt-floor - "Bitcoin Thunderbolt Floor node" /var/lib/thunderbolt-floor /usr/sbin/nologin

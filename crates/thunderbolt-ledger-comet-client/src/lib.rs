@@ -25,10 +25,11 @@ pub use client::LedgerCometClient;
 pub use error::{ClientError, Result};
 pub use types::{
     ClientProfileIdV2, FinalityAdvanceIntentV2, FinalizedAbsenceCapabilityV2, FinalizedBlockCapabilityV2,
-    FinalizedExecutionSummaryV2, FinalizedFirstLocationV2, FinalizedRangeV2, HistoricalEntryReferenceV2,
-    HolderFinalityCapabilityV2, LedgerCometClientConfig, LedgerCometClientLimits, LedgerCoordinatorPolicyV2,
-    PreparedExecutionRangeV2, ReconciledSubmissionV2, MAX_FINALITY_ADVANCE_INTENT_BYTES,
-    MAX_HISTORICAL_REFERENCE_BYTES, MAX_LOCATOR_SCAN_BLOCKS, MAX_LOCATOR_SCAN_BYTES,
+    FinalizedExecutionSummaryV2, FinalizedFirstLocationV2, FinalizedRangeV2, HistoricalBlockReferenceV2,
+    HistoricalEntryReferenceV2, HolderFinalityCapabilityV2, LedgerCometClientConfig, LedgerCometClientLimits,
+    LedgerCoordinatorPolicyV2, PreparedExecutionRangeV2, ReconciledSubmissionV2, MAX_FINALITY_ADVANCE_INTENT_BYTES,
+    MAX_HISTORICAL_BLOCK_REFERENCE_BYTES, MAX_HISTORICAL_REFERENCE_BYTES, MAX_LOCATOR_SCAN_BLOCKS,
+    MAX_LOCATOR_SCAN_BYTES,
 };
 
 pub use thunderbolt_cometbft_client::TrustCoordinator;

@@ -77,9 +77,11 @@ value. Query JSON is written through a bounded writer. Operators must set
 CometBFT's consensus block limit within those bounds. The upstream
 `tendermint-abci` socket codec does not cap a length-delimited frame before
 allocation, so a production process must use a reviewed bounded dispatcher and
-authenticated local boundary. The feature-gated live process includes a
-26 MiB pre-allocation cap on a loopback-only listener, but is not a production
-server.
+authenticated local boundary. The feature-gated live process uses
+`thunderbolt-abci-server` with a 26 MiB frame cap, the exact Ledger repeated-item
+profile, bounded deadlines and aggregate reservations on a loopback-only
+listener. The process remains test-only because its proof verifier is
+deliberately insecure.
 
 The consensus profile also commits the 2 MiB `ArtifactV2` ceiling, the event/JSON
 expansion reserve, the 8 MiB pending-Invoice budget, the 11 MiB retained-state
@@ -106,6 +108,7 @@ temporary cache, runs four validators against four independent application
 databases on random loopback ports, injects a crash after `FinalizeBlock` and
 before `Commit`, restarts validator and application processes, checks replica
 hashes and the `H` to `H + 1` binding, rejects an invalid transaction, and
-removes every process and temporary file. This is compatibility and recovery
-evidence only. Empty blocks do not exercise production Open, Invoice, Transfer,
-or Finalize proof verification.
+rejects an oversized raw ABCI frame before payload allocation while keeping the
+server alive. It removes every process and temporary file. This is compatibility
+and recovery evidence only. Empty blocks do not exercise production Open,
+Invoice, Transfer, or Finalize proof verification.

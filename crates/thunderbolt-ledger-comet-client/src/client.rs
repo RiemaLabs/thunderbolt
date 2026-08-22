@@ -16,7 +16,7 @@ use thunderbolt_ledger::{
 use thunderbolt_ledger_rpc::{EntryLocationRequestV2, ExecutionRangeRequestV2, RpcRequestV2, RpcResponseV2};
 
 use crate::types::{
-    FinalityAdvanceIntentV2, FinalizedAbsenceCapabilityV2, HistoricalEntryReferenceV2, PreparedExecutionRangeV2,
+    FinalizedAbsenceCapabilityV2, HistoricalBlockReferenceV2, HistoricalEntryReferenceV2, PreparedExecutionRangeV2,
 };
 use crate::{
     ClientError, FinalizedBlockCapabilityV2, FinalizedExecutionSummaryV2, FinalizedFirstLocationV2, FinalizedRangeV2,
@@ -183,6 +183,22 @@ where
         }
     }
 
+    pub(crate) const fn profile_id(&self) -> crate::ClientProfileIdV2 {
+        self.profile_id
+    }
+
+    pub(crate) const fn coordinator_identity(&self) -> thunderbolt_cometbft_client::TrustCoordinatorIdentity {
+        self.coordinator_identity
+    }
+
+    pub(crate) const fn ledger_chain_id(&self) -> &LedgerChainIdV2 {
+        &self.ledger_chain_id
+    }
+
+    pub(crate) const fn max_execution_encoded_bytes(&self) -> usize {
+        self.max_execution_encoded_bytes
+    }
+
     /// Returns the exact current durable light-client root.
     pub fn current_trust_root(&self) -> Result<CurrentTrustRoot> {
         Ok(self.coordinator()?.current_trust_root()?)
@@ -197,7 +213,7 @@ where
     /// Callers must durably retain every returned intent before finalization.
     pub async fn prepare_range(&self, request: &ExecutionRangeRequestV2) -> Result<PreparedExecutionRangeV2> {
         if request.block_count() > self.limits.max_range_blocks()
-            || request.cursor().ledger_chain_id() != &self.ledger_chain_id
+            || request.cursor().ledger_chain_id() != self.ledger_chain_id()
         {
             return Err(ClientError::Capacity);
         }
@@ -217,23 +233,13 @@ where
         let RpcResponseV2::ExecutionRange(range) = decoded.response() else {
             return Err(ClientError::BindingMismatch);
         };
-        let intents = range
-            .blocks()
-            .iter()
-            .cloned()
-            .map(|block| {
-                FinalityAdvanceIntentV2::new(
-                    self.profile_id,
-                    self.coordinator_identity,
-                    block,
-                    self.max_execution_encoded_bytes,
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(PreparedExecutionRangeV2 {
-            intents,
-            next_cursor: range.next_cursor().clone(),
-        })
+        PreparedExecutionRangeV2::from_staged_blocks(
+            self.profile_id(),
+            self.coordinator_identity(),
+            range.blocks().to_vec(),
+            range.next_cursor().clone(),
+            self.max_execution_encoded_bytes(),
+        )
     }
 
     /// Finalizes a prepared range after its authority-free intents have been durably retained.
@@ -253,17 +259,53 @@ where
                 AdvanceOutcome::Applied(historical) | AdvanceOutcome::Replayed(historical) => historical,
             };
             validate_historical(&historical, &intent.execution, &self.ledger_chain_id)?;
-            finalized.push(FinalizedBlockCapabilityV2 {
-                profile_id: self.profile_id,
-                summary: FinalizedExecutionSummaryV2::from_finality(historical.summary()),
-                block: intent.execution.clone(),
-                proof_digest: *historical.proof_digest(),
-            });
+            finalized.push(block_capability(
+                self.profile_id,
+                self.coordinator_identity,
+                &self.ledger_chain_id,
+                historical,
+            )?);
         }
         Ok(FinalizedRangeV2 {
             blocks: finalized,
             next_cursor: prepared.next_cursor.clone(),
         })
+    }
+
+    /// Returns a freshly revalidated private capability for one complete finalized block.
+    ///
+    /// Empty executed blocks are first-class and return a capability with an
+    /// empty ordered entry list.
+    pub fn finalized_block(&self, execution_height: u64) -> Result<FinalizedBlockCapabilityV2> {
+        let historical = self
+            .coordinator()?
+            .historical_by_height(execution_height)?
+            .ok_or(ClientError::HistoryUnavailable)?;
+        block_capability(
+            self.profile_id,
+            self.coordinator_identity,
+            &self.ledger_chain_id,
+            historical,
+        )
+    }
+
+    /// Revalidates an authority-free whole-block reference against externally
+    /// anchored coordinator history on every invocation.
+    pub fn revalidate_block_reference(
+        &self,
+        reference: &HistoricalBlockReferenceV2,
+    ) -> Result<FinalizedBlockCapabilityV2> {
+        if reference.profile_id != self.profile_id
+            || reference.coordinator_identity != self.coordinator_identity
+            || reference.ledger_chain_id != self.ledger_chain_id
+        {
+            return Err(ClientError::BindingMismatch);
+        }
+        let capability = self.finalized_block(reference.execution_height)?;
+        if capability.reference != *reference {
+            return Err(ClientError::BindingMismatch);
+        }
+        Ok(capability)
     }
 
     /// Returns a revalidated private capability for one finalized block entry.
@@ -579,6 +621,26 @@ fn validate_historical(
         return Err(ClientError::BindingMismatch);
     }
     Ok(())
+}
+
+fn block_capability(
+    profile_id: crate::ClientProfileIdV2,
+    coordinator_identity: thunderbolt_cometbft_client::TrustCoordinatorIdentity,
+    expected_chain: &LedgerChainIdV2,
+    historical: HistoricalFinality,
+) -> Result<FinalizedBlockCapabilityV2> {
+    validate_historical(&historical, historical.proof().execution(), expected_chain)?;
+    let reference = HistoricalBlockReferenceV2::from_finality(
+        profile_id,
+        coordinator_identity,
+        historical.summary(),
+        *historical.proof_digest(),
+    )?;
+    Ok(FinalizedBlockCapabilityV2 {
+        reference,
+        summary: FinalizedExecutionSummaryV2::from_finality(historical.summary()),
+        block: historical.proof().execution().clone(),
+    })
 }
 
 fn entry_capability<S>(

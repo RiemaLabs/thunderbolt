@@ -19,9 +19,11 @@ jobs:
   build:
     name: non-root image build
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Verify default binary graph
+        run: python3 scripts/check-default-binary-graph.py
       - name: Build without publishing
         run: |
           docker build \
@@ -33,5 +35,39 @@ jobs:
       - name: Inspect and smoke test
         run: |
           test "$(docker image inspect --format '{{.Config.User}}' bitcoin-thunderbolt:ci)" = "10001:10001"
-          docker run --rm bitcoin-thunderbolt:ci --version
+          test "$(docker image inspect --format '{{json .Config.Entrypoint}}' bitcoin-thunderbolt:ci)" = '["/usr/local/bin/thunderboltd"]'
+          test "$(docker image inspect --format '{{json .Config.Cmd}}' bitcoin-thunderbolt:ci)" = '["--help"]'
+          test "$(docker image inspect --format '{{.Config.WorkingDir}}' bitcoin-thunderbolt:ci)" = '/'
+          test "$(docker image inspect --format '{{json .Config.Healthcheck}}' bitcoin-thunderbolt:ci)" = 'null'
+          docker run --rm bitcoin-thunderbolt:ci
           docker run --rm --entrypoint /usr/local/bin/thunderbolt-cli bitcoin-thunderbolt:ci --version
+          docker run --rm --entrypoint /usr/local/bin/thunderbolt-cli bitcoin-thunderbolt:ci --help
+          docker run --rm --entrypoint /usr/local/bin/thunderbolt-floor-node bitcoin-thunderbolt:ci --version
+          docker run --rm --entrypoint /usr/local/bin/thunderbolt-floor-node bitcoin-thunderbolt:ci --help
+          docker run --rm --user 0:0 --entrypoint /bin/sh bitcoin-thunderbolt:ci -eu -c '
+            test ! -e /usr/local/bin/thunderboltd-legacy-v1
+            test ! -e /usr/local/bin/thunderbolt-cli-legacy-v1
+            test ! -e /usr/local/bin/thunderbolt-floor-abci-live-test
+            test ! -e /var/lib/thunderbolt/config
+            test ! -e /var/lib/thunderbolt-floor/config
+            test ! -e /etc/bitcoin-thunderbolt
+            test "$(stat -c %u:%g:%a /var/lib/thunderbolt)" = 10001:10001:700
+            test "$(stat -c %u:%g:%a /var/lib/thunderbolt-floor)" = 10002:10002:700
+          '
+      - name: Verify operator-provisioned Compose contract
+        run: |
+          if env -u THUNDERBOLT_CONFIG_DIR -u THUNDERBOLT_DATA_DIR \
+            docker compose --file deploy/regtest/compose.yaml config >/dev/null 2>&1; then
+            echo "Compose unexpectedly accepted missing operator directories" >&2
+            exit 1
+          fi
+          mkdir "$RUNNER_TEMP/thunderbolt-config" "$RUNNER_TEMP/thunderbolt-data"
+          rendered="$(
+            THUNDERBOLT_CONFIG_DIR="$RUNNER_TEMP/thunderbolt-config" \
+            THUNDERBOLT_DATA_DIR="$RUNNER_TEMP/thunderbolt-data" \
+            docker compose --file deploy/regtest/compose.yaml config
+          )"
+          grep -Fq '/var/lib/thunderbolt/config/runtime.toml' <<<"$rendered"
+          grep -Fq '/var/lib/thunderbolt/data' <<<"$rendered"
+          grep -Fq '/run/thunderbolt' <<<"$rendered"
+          grep -Fq 'status' <<<"$rendered"

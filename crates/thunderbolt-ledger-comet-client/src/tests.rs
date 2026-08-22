@@ -55,10 +55,52 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpListener;
 
 use crate::{
-    ClientError, ClientProfileIdV2, FinalizedFirstLocationV2, HistoricalEntryReferenceV2, LedgerCometClient,
-    LedgerCometClientConfig, LedgerCometClientLimits, LedgerCoordinatorPolicyV2, ReconciledSubmissionV2,
-    MAX_HISTORICAL_REFERENCE_BYTES,
+    ClientError, ClientProfileIdV2, FinalizedFirstLocationV2, HistoricalBlockReferenceV2, HistoricalEntryReferenceV2,
+    LedgerCometClient, LedgerCometClientConfig, LedgerCometClientLimits, LedgerCoordinatorPolicyV2,
+    ReconciledSubmissionV2, MAX_HISTORICAL_BLOCK_REFERENCE_BYTES, MAX_HISTORICAL_REFERENCE_BYTES,
 };
+
+fn block_reference_fixture() -> HistoricalBlockReferenceV2 {
+    HistoricalBlockReferenceV2 {
+        profile_id: ClientProfileIdV2([0x11; 32]),
+        coordinator_identity: TrustCoordinatorIdentity::new([0x22; 32]).expect("identity"),
+        ledger_chain_id: LedgerChainIdV2::new("block-reference-regtest-2").expect("chain"),
+        source_config_version: 1,
+        application_version: 2,
+        execution_height: 7,
+        execution_block_time_ms: 1_700_000_000_000,
+        application_hash: AppHashV2::from_bytes([0x33; 32]).expect("app hash"),
+        execution_header_hash: [0x44; 32],
+        committing_height: 8,
+        committing_header_hash: [0x55; 32],
+        proof_digest: [0xaa; 32],
+    }
+}
+
+#[test]
+fn authority_free_block_reference_has_golden_fixed_width_roundtrip() {
+    let reference = block_reference_fixture();
+    let bytes = reference.canonical_bytes();
+    assert_eq!(bytes.len(), MAX_HISTORICAL_BLOCK_REFERENCE_BYTES);
+    assert_eq!(
+        hex::encode(Sha256::digest(&bytes)),
+        "9e801d4e0ceaa3931556c32797e4c3afd6800f3d4c4adb599983e038771713f9"
+    );
+    assert_eq!(
+        HistoricalBlockReferenceV2::from_canonical_bytes(&bytes).expect("decode"),
+        reference
+    );
+    let json = serde_json::to_vec(&reference).expect("serialize");
+    assert_eq!(
+        serde_json::from_slice::<HistoricalBlockReferenceV2>(&json).expect("deserialize"),
+        reference
+    );
+    assert!(!json.windows(8).any(|window| window == b"receipt"));
+    assert!(!json.windows(8).any(|window| window == b"provider"));
+    let debug = format!("{reference:?}");
+    assert!(!debug.contains(&hex::encode(reference.proof_digest())));
+    assert!(!debug.contains(&hex::encode(reference.execution_header_hash())));
+}
 
 fn reference_fixture() -> HistoricalEntryReferenceV2 {
     HistoricalEntryReferenceV2 {
@@ -112,6 +154,19 @@ proptest! {
         let mut bytes = reference.canonical_bytes();
         bytes[offset] ^= 1_u8 << bit;
         if let Ok(changed) = HistoricalEntryReferenceV2::from_canonical_bytes(&bytes) {
+            prop_assert_ne!(changed, reference);
+        }
+    }
+
+    #[test]
+    fn every_block_reference_byte_tamper_is_rejected_or_changes_identity(
+        offset in 0_usize..MAX_HISTORICAL_BLOCK_REFERENCE_BYTES,
+        bit in 0_u8..8,
+    ) {
+        let reference = block_reference_fixture();
+        let mut bytes = reference.canonical_bytes();
+        bytes[offset] ^= 1_u8 << bit;
+        if let Ok(changed) = HistoricalBlockReferenceV2::from_canonical_bytes(&bytes) {
             prop_assert_ne!(changed, reference);
         }
     }
@@ -930,7 +985,20 @@ async fn prepare_and_finalize(
         assert!(!bytes.windows(8).any(|window| window == b"provider"));
         assert_eq!(crate::FinalityAdvanceIntentV2::from_canonical_bytes(&bytes)?, *intent);
     }
-    client.finalize_prepared_range(&prepared).await
+    let retained_blocks = prepared
+        .intents()
+        .iter()
+        .map(|intent| intent.execution().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(client.ledger_chain_id(), &test_chain());
+    let rebuilt = crate::PreparedExecutionRangeV2::from_staged_blocks(
+        client.profile_id(),
+        client.coordinator_identity(),
+        retained_blocks,
+        prepared.next_cursor().clone(),
+        client.max_execution_encoded_bytes(),
+    )?;
+    client.finalize_prepared_range(&rebuilt).await
 }
 
 #[tokio::test]
@@ -968,6 +1036,9 @@ async fn contiguous_empty_and_replay_blocks_finalize_restart_and_revalidate_refe
         .expect("finalize range");
     assert_eq!(finalized.blocks().len(), 3);
     assert!(finalized.blocks()[1].block().entries().is_empty());
+    let empty_block_reference = finalized.blocks()[1].reference().clone();
+    assert_eq!(empty_block_reference.execution_height(), 2);
+    assert_eq!(empty_block_reference.source_config_version(), 1);
     assert_eq!(finalized.next_cursor().next_height(), 4);
     assert_eq!(client.current_trust_root().expect("root").height(), 4);
 
@@ -1028,12 +1099,39 @@ async fn contiguous_empty_and_replay_blocks_finalize_restart_and_revalidate_refe
         .revalidate_reference(&reference)
         .expect("offline historical revalidation");
     assert_eq!(revalidated.entry().metadata().entry_hash(), metadata.entry_hash());
+    assert!(reopened
+        .revalidate_block_reference(&empty_block_reference)
+        .expect("offline empty-block revalidation")
+        .block()
+        .entries()
+        .is_empty());
+
+    let mut wrong_profile_bytes = empty_block_reference.canonical_bytes();
+    wrong_profile_bytes[8] ^= 1;
+    let wrong_profile =
+        HistoricalBlockReferenceV2::from_canonical_bytes(&wrong_profile_bytes).expect("shape-valid wrong profile");
+    assert!(reopened.revalidate_block_reference(&wrong_profile).is_err());
+    let mut wrong_source_bytes = empty_block_reference.canonical_bytes();
+    wrong_source_bytes[130] = 2;
+    let wrong_source = HistoricalBlockReferenceV2::from_canonical_bytes(&wrong_source_bytes)
+        .expect("shape-valid wrong source version");
+    assert!(reopened.revalidate_block_reference(&wrong_source).is_err());
     let mut tampered_bytes = reference.canonical_bytes();
     let last = tampered_bytes.len() - 1;
     tampered_bytes[last] ^= 1;
     let tampered =
         HistoricalEntryReferenceV2::from_canonical_bytes(&tampered_bytes).expect("shape-valid tampered reference");
     assert!(reopened.revalidate_reference(&tampered).is_err());
+
+    let connection = rusqlite::Connection::open(&path).expect("tamper connection");
+    connection
+        .execute(
+            "UPDATE finality_updates SET proof_digest=?1 WHERE execution_height=2",
+            [[0x7f_u8; 32].as_slice()],
+        )
+        .expect("history tamper");
+    drop(connection);
+    assert!(reopened.revalidate_block_reference(&empty_block_reference).is_err());
 }
 
 #[tokio::test]
@@ -1291,6 +1389,7 @@ async fn source_rotation_preserves_profile_and_historical_references() {
         .await
         .expect("first finality");
     let old_reference = client.finalized_entry(1, 0).expect("old entry").reference().clone();
+    let old_block_reference = client.finalized_block(1).expect("old block").reference().clone();
     checkpoint.block_next();
     let mut rotation = Box::pin(client.rotate_sources(1, next_sources));
     tokio::select! {
@@ -1307,6 +1406,9 @@ async fn source_rotation_preserves_profile_and_historical_references() {
     client
         .revalidate_reference(&old_reference)
         .expect("old reference after rotation");
+    client
+        .revalidate_block_reference(&old_block_reference)
+        .expect("old block after rotation");
     let tail = ExecutionRangeRequestV2::new(
         ExecutionRangeCursorV2::new(test_chain(), 2, fixture.executions[0].app_hash().clone()).expect("tail cursor"),
         2,
@@ -1315,8 +1417,11 @@ async fn source_rotation_preserves_profile_and_historical_references() {
     .expect("tail range");
     prepare_and_finalize(&mut client, &tail).await.expect("tail finality");
     let new_reference = client.finalized_entry(3, 0).expect("new entry").reference().clone();
+    let new_block_reference = client.finalized_block(3).expect("new block").reference().clone();
     assert_eq!(old_reference.source_config_version(), 1);
     assert_eq!(new_reference.source_config_version(), 2);
+    assert_eq!(old_block_reference.source_config_version(), 1);
+    assert_eq!(new_block_reference.source_config_version(), 2);
 
     let unauthorized = source_configuration(
         3,
@@ -1339,6 +1444,12 @@ async fn source_rotation_preserves_profile_and_historical_references() {
     reopened
         .revalidate_reference(&new_reference)
         .expect("new reference restart");
+    reopened
+        .revalidate_block_reference(&old_block_reference)
+        .expect("old block reference restart");
+    reopened
+        .revalidate_block_reference(&new_block_reference)
+        .expect("new block reference restart");
 }
 
 fn deterministic_rpc_config() -> RpcTransportConfig {

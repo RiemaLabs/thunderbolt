@@ -23,13 +23,16 @@ thunderbolt-cometbft-client = { path = "../thunderbolt-cometbft-client" }
 thunderbolt-cometbft-rpc = { path = "../thunderbolt-cometbft-rpc" }
 thunderbolt-ledger = { path = "../thunderbolt-ledger" }
 thunderbolt-ledger-rpc = { path = "../thunderbolt-ledger-rpc" }
-tokio = { version = "1.48.0", features = ["rt"] }
+thunderbolt-holder-node = { path = "../thunderbolt-holder-node" }
+thunderbolt-committee-node = { path = "../thunderbolt-committee-node" }
+tokio = { version = "1.48.0", features = ["rt", "sync"] }
 
 [dev-dependencies]
 base64 = "0.22.1"
 bitcoin = { version = "0.32.5", features = ["serde"] }
 ed25519-consensus = "2.1.0"
 proptest = "1.7.0"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 secp256k1 = { version = "0.31.1", features = ["rand"] }
 tempfile = "3.27.0"
 tendermint = "0.40.4"

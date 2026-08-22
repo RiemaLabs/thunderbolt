@@ -6,7 +6,7 @@ use sha2::{Digest as _, Sha256};
 use thunderbolt_ledger::{LedgerChainIdV2, MAX_SIGNED_PROPOSAL_JSON_BYTES};
 use thunderbolt_wire::{ChannelBindingV2, ValidateWire as _};
 
-use crate::{HolderNodeError, Result};
+use crate::{FinalityCoordinatorId, FinalityVerifierProfileId, HolderNodeError, Result};
 
 /// Maximum retained outbox rows, including finalized rows.
 pub const MAX_OUTBOX_ROWS: usize = 10_000;
@@ -15,7 +15,11 @@ pub const MAX_COMMAND_ROWS: usize = 20_000;
 /// Maximum encoded signed proposal stored in one row.
 pub const MAX_PROPOSAL_BYTES: usize = MAX_SIGNED_PROPOSAL_JSON_BYTES;
 /// Maximum receipts accepted in one finality poll.
-pub const MAX_FINALITY_BATCH: usize = 128;
+pub const MAX_FINALITY_BATCH: usize = 64;
+/// Maximum aggregate canonical executed-block bytes in one finality segment.
+pub const MAX_FINALITY_SEGMENT_BYTES: usize = 23 * 1024 * 1024;
+/// Maximum persisted authority-free finality attestation bytes per block.
+pub const MAX_FINALITY_ATTESTATION_BYTES: usize = 64 * 1024;
 const MAX_BUSY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Bounded exponential retry policy for Ledger submission.
@@ -65,6 +69,8 @@ impl Default for RetryPolicy {
 pub struct HolderNodeConfig {
     network: Network,
     ledger_chain_id: LedgerChainIdV2,
+    finality_verifier_profile: FinalityVerifierProfileId,
+    finality_coordinator_id: FinalityCoordinatorId,
     deployment: HolderDeploymentPolicy,
     retry: RetryPolicy,
     submit_batch: usize,
@@ -77,6 +83,8 @@ impl HolderNodeConfig {
     pub fn new(
         network: Network,
         ledger_chain_id: LedgerChainIdV2,
+        finality_verifier_profile: FinalityVerifierProfileId,
+        finality_coordinator_id: FinalityCoordinatorId,
         deployment: HolderDeploymentPolicy,
         retry: RetryPolicy,
         submit_batch: usize,
@@ -86,6 +94,13 @@ impl HolderNodeConfig {
         if matches!(network, Network::Bitcoin | Network::Testnet4) {
             return Err(HolderNodeError::InvalidConfiguration(
                 "mainnet and Testnet4 Holder services are disabled",
+            ));
+        }
+        if finality_verifier_profile == FinalityVerifierProfileId::DISABLED
+            || finality_coordinator_id == FinalityCoordinatorId::DISABLED
+        {
+            return Err(HolderNodeError::InvalidConfiguration(
+                "disabled finality profile cannot identify a Holder service",
             ));
         }
         if deployment.network != network {
@@ -110,6 +125,8 @@ impl HolderNodeConfig {
         Ok(Self {
             network,
             ledger_chain_id,
+            finality_verifier_profile,
+            finality_coordinator_id,
             deployment,
             retry: retry.validate()?,
             submit_batch,
@@ -124,6 +141,14 @@ impl HolderNodeConfig {
 
     pub const fn ledger_chain_id(&self) -> &LedgerChainIdV2 {
         &self.ledger_chain_id
+    }
+
+    pub const fn finality_verifier_profile(&self) -> FinalityVerifierProfileId {
+        self.finality_verifier_profile
+    }
+
+    pub const fn finality_coordinator_id(&self) -> FinalityCoordinatorId {
+        self.finality_coordinator_id
     }
 
     pub const fn deployment(&self) -> &HolderDeploymentPolicy {

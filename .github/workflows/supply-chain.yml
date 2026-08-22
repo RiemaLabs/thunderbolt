@@ -41,13 +41,11 @@ jobs:
       - run: cargo deny --locked check advisories bans licenses sources
 
   gitleaks:
-    name: gitleaks (full history)
+    name: gitleaks (current source)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
-        with:
-          fetch-depth: 0
       - name: Install checksum-verified Gitleaks
         shell: bash
         run: |
@@ -60,7 +58,7 @@ jobs:
           echo "79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e  $archive" | sha256sum --check --strict
           tar -xzf "$archive" -C "$install_dir" gitleaks
           echo "$install_dir" >> "$GITHUB_PATH"
-      - run: gitleaks git --redact=100 --no-banner --verbose .
+      - run: gitleaks dir --redact=100 --no-banner --verbose .
 
   semver:
     name: cargo-semver-checks

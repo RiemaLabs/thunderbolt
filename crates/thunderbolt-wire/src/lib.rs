@@ -3,18 +3,28 @@
 //! This crate intentionally has no wire representations for witnesses,
 //! decryption keys, holder secrets, refresh scalars, or committee shares.
 
+/// Maximum supported committee topology for bounded public messages.
+pub const MAX_COMMITTEE_MEMBERS: usize = 256;
+/// Reserved member identifier for the recipient's own VEDL statement.
+pub const RECIPIENT_SHARE_MEMBER_ID: u32 = u32::MAX;
+
 mod binding;
 mod binding_v2;
 mod codec;
 mod error;
 mod hex;
+#[cfg(feature = "insecure-regression")]
 mod invoice;
 mod invoice_v2;
+#[cfg(feature = "insecure-regression")]
 mod message;
 mod message_v2;
+#[cfg(feature = "insecure-regression")]
 mod share;
+#[cfg(feature = "insecure-regression")]
 mod threshold;
 mod threshold_v2;
+#[cfg(feature = "insecure-regression")]
 mod transfer;
 mod transfer_v2;
 mod v2_values;
@@ -34,20 +44,24 @@ pub use codec::{
 };
 pub use error::{Result, WireError};
 pub use hex::{CanonicalInteger, HexBytes};
+#[cfg(feature = "insecure-regression")]
 pub use invoice::{InvoiceEnvelopeV1, InvoiceProofV1, InvoiceStatementV1};
 pub use invoice_v2::{InvoiceEnvelopeV2, InvoiceProofV2, InvoiceStatementV2};
+#[cfg(feature = "insecure-regression")]
 pub use message::PublicMessageV1;
 pub use message_v2::{decode_public_message_v2, PublicMessageV2};
+#[cfg(feature = "insecure-regression")]
 pub use share::{ShareEnvelopeV1, ShareProofV1, ShareStatementV1};
+#[cfg(feature = "insecure-regression")]
 pub use threshold::{
     threshold_invoice_package_digest, ThresholdDistributionV1, ThresholdEncryptedShareV1, ThresholdEnvelopeV1,
-    MAX_COMMITTEE_MEMBERS, RECIPIENT_SHARE_MEMBER_ID,
 };
 pub use threshold_v2::{
     threshold_invoice_package_digest_v2, validate_threshold_package_v2, RecipientShareEnvelopeV2,
     RecipientShareStatementV2, ShareProofV2, ThresholdDistributionV2, ThresholdEncryptedShareV2, ThresholdEnvelopeV2,
     ThresholdPackageBindingV2, ThresholdPackageIdV2, ThresholdRosterMemberV2, ThresholdRosterV2,
 };
+#[cfg(feature = "insecure-regression")]
 pub use transfer::{AnchorTransitionV1, TransferEnvelopeV1, TransferProofV1, TransferStatementV1};
 pub use transfer_v2::{AnchorTransitionV2, TransferEnvelopeV2, TransferProofV2, TransferStatementV2};
 pub use v2_values::{

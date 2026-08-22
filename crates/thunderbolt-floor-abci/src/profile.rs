@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tendermint_proto::v0_38::abci::ValidatorUpdate;
 use tendermint_proto::v0_38::crypto::public_key;
@@ -10,7 +11,7 @@ use crate::{compiled_resource_profile_values, FloorAbciError, Result, APPLICATIO
 
 const VALIDATOR_DOMAIN: &[u8] = b"bitcoin-thunderbolt/floor-abci/validator-genesis/v2";
 const PROFILE_DOMAIN: &[u8] = b"bitcoin-thunderbolt/floor-abci/consensus-profile/v2";
-const GENESIS_MAGIC: &[u8; 8] = b"TBFLGEN2";
+const GENESIS_STATE_FORMAT: &str = "bitcoin-thunderbolt-floor-genesis-v2";
 const MAX_TOTAL_VOTING_POWER: u64 = (i64::MAX / 8) as u64;
 
 /// Exact bounded ordered validator set admitted by InitChain.
@@ -100,6 +101,7 @@ impl FloorConsensusProfileV2 {
         let chain = chain_id.as_bytes();
         let mut hasher = Sha256::new();
         hasher.update(PROFILE_DOMAIN);
+        hasher.update(GENESIS_STATE_FORMAT.as_bytes());
         hasher.update(
             u64::try_from(chain.len())
                 .map_err(|_| FloorAbciError::InvalidRequest("floor chain length exceeds u64"))?
@@ -126,26 +128,29 @@ impl FloorConsensusProfileV2 {
         &self.validator_digest
     }
 
-    /// Returns canonical fixed-width InitChain app-state bytes.
+    /// Returns canonical JSON bytes delivered by CometBFT in `InitChain`.
     pub fn genesis_app_state_bytes(&self, genesis: &FloorGenesis) -> Result<Vec<u8>> {
         if genesis.profile_digest() != self.as_bytes() {
             return Err(FloorAbciError::InvalidRequest("Floor genesis profile differs"));
         }
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(144)
-            .map_err(|_| FloorAbciError::InvalidRequest("genesis app-state allocation failed"))?;
-        bytes.extend_from_slice(GENESIS_MAGIC);
-        bytes.extend_from_slice(&APPLICATION_VERSION.to_be_bytes());
-        bytes.extend_from_slice(self.as_bytes());
-        bytes.extend_from_slice(genesis.genesis_digest().as_bytes());
-        bytes.extend_from_slice(genesis.registry_digest().as_bytes());
-        bytes.extend_from_slice(self.validator_digest());
-        if bytes.len() != 144 {
-            return Err(FloorAbciError::InvalidRequest(
-                "genesis app-state width invariant failed",
-            ));
-        }
-        Ok(bytes)
+        serde_json::to_vec(&GenesisAppStateV2 {
+            application_version: APPLICATION_VERSION,
+            consensus_profile_digest: *self.as_bytes(),
+            floor_genesis_digest: *genesis.genesis_digest().as_bytes(),
+            format: GENESIS_STATE_FORMAT,
+            registry_digest: *genesis.registry_digest().as_bytes(),
+            validator_digest: *self.validator_digest(),
+        })
+        .map_err(|_| FloorAbciError::InvalidRequest("genesis app-state JSON encoding failed"))
     }
+}
+
+#[derive(Serialize)]
+struct GenesisAppStateV2 {
+    application_version: u64,
+    consensus_profile_digest: [u8; 32],
+    floor_genesis_digest: [u8; 32],
+    format: &'static str,
+    registry_digest: [u8; 32],
+    validator_digest: [u8; 32],
 }

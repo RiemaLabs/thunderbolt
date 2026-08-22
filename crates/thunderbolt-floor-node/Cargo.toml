@@ -1,0 +1,36 @@
+[package]
+name = "thunderbolt-floor-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Production rollback-floor node for Bitcoin Thunderbolt"
+keywords = ["bitcoin", "cometbft", "operator", "thunderbolt"]
+categories = ["cryptography::cryptocurrencies", "network-programming"]
+default-run = "thunderbolt-floor-node"
+
+[lints]
+workspace = true
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+hex = "0.4"
+rustix = { version = "1.1.4", features = ["fs", "process"] }
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.145"
+sha2 = "0.10.9"
+tendermint = "0.40.4"
+tendermint-proto = "0.40.4"
+thiserror = "2.0.16"
+thunderbolt-abci-server = { path = "../thunderbolt-abci-server" }
+thunderbolt-floor = { path = "../thunderbolt-floor" }
+thunderbolt-floor-abci = { path = "../thunderbolt-floor-abci" }
+thunderbolt-floor-app = { path = "../thunderbolt-floor-app" }
+thunderbolt-keystore = { path = "../thunderbolt-keystore" }
+tokio = { version = "1.47", features = ["macros", "rt-multi-thread", "signal"] }
+toml = "0.8"
+
+[dev-dependencies]
+proptest = "1.9.0"
+tempfile = "3.27.0"

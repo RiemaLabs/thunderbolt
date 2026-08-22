@@ -1,6 +1,6 @@
 [Unit]
 Description=Bitcoin Thunderbolt node daemon
-Documentation=https://github.com/RiemaLabs/thunderbolt-lib/tree/release/1.0/docs
+Documentation=https://github.com/RiemaLabs/thunderbolt-lib/tree/release/open_source/docs
 Wants=network-online.target
 After=network-online.target
 StartLimitIntervalSec=60
@@ -11,17 +11,19 @@ Type=simple
 User=thunderbolt
 Group=thunderbolt
 UMask=0077
-ExecStartPre=/usr/local/bin/thunderboltd --config /etc/bitcoin-thunderbolt/thunderbolt.toml check
-ExecStart=/usr/local/bin/thunderboltd --config /etc/bitcoin-thunderbolt/thunderbolt.toml start --log-format json
+WorkingDirectory=/var/lib/thunderbolt
+ExecStartPre=/usr/local/bin/thunderboltd --config /var/lib/thunderbolt/runtime.toml check
+ExecStart=/usr/local/bin/thunderboltd --config /var/lib/thunderbolt/runtime.toml start --log-format json
 Restart=on-failure
 RestartSec=5s
 TimeoutStartSec=30s
 TimeoutStopSec=45s
 WatchdogSec=0
-LoadCredential=admin.token:/etc/bitcoin-thunderbolt/admin.token
 
 StateDirectory=thunderbolt
 StateDirectoryMode=0700
+RuntimeDirectory=thunderbolt
+RuntimeDirectoryMode=0700
 
 NoNewPrivileges=true
 PrivateDevices=true

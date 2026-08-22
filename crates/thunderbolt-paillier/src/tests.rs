@@ -445,17 +445,42 @@ proptest! {
     })]
 
     #[test]
-    fn randomized_encryption_matches_num_bigint(plaintext_value in any::<u16>(), nonce_value in 1_u16..=u16::MAX) {
+    fn randomized_encryption_inverse_and_homomorphic_laws_match_oracle(
+        left_value in any::<u16>(),
+        right_value in any::<u16>(),
+        left_nonce in 1_u16..=u16::MAX,
+        right_nonce in 1_u16..=u16::MAX,
+    ) {
         let public_key = secret_key().public_key();
         let n = BigUint::from_bytes_be(&public_key.to_bytes());
         let nn = &n * &n;
         let generator = &n + BigUint::one();
-        let plaintext = small_plaintext(public_key, u64::from(plaintext_value));
-        let nonce = local_nonce(public_key, u64::from(nonce_value));
-        let ciphertext = public_key.compose_with_nonce_for_test(&plaintext, &nonce)?;
-        let expected = (generator.modpow(&BigUint::from(plaintext_value), &nn)
-            * BigUint::from(nonce_value).modpow(&n, &nn)) % &nn;
-        prop_assert_eq!(BigUint::from_bytes_be(&ciphertext.to_bytes()), expected);
+        let left_plaintext = small_plaintext(public_key, u64::from(left_value));
+        let right_plaintext = small_plaintext(public_key, u64::from(right_value));
+        let left = public_key.compose_with_nonce_for_test(
+            &left_plaintext,
+            &local_nonce(public_key, u64::from(left_nonce)),
+        )?;
+        let right = public_key.compose_with_nonce_for_test(
+            &right_plaintext,
+            &local_nonce(public_key, u64::from(right_nonce)),
+        )?;
+        let expected = (generator.modpow(&BigUint::from(left_value), &nn)
+            * BigUint::from(left_nonce).modpow(&n, &nn)) % &nn;
+        prop_assert_eq!(BigUint::from_bytes_be(&left.to_bytes()), expected);
+        let decrypted_left = secret_key().decrypt(&left)?.to_secret_bytes();
+        let expected_left = left_plaintext.to_secret_bytes();
+        prop_assert_eq!(decrypted_left.as_ref(), expected_left.as_ref());
+        prop_assert_eq!(public_key.ciphertext_from_bytes(left.to_bytes())?, left.clone());
+
+        let sum_lr = public_key.add(&left, &right)?;
+        let sum_rl = public_key.add(&right, &left)?;
+        prop_assert_eq!(&sum_lr, &sum_rl);
+        let expected_sum = u64::from(left_value) + u64::from(right_value);
+        let decrypted_sum = secret_key().decrypt(&sum_lr)?.to_secret_bytes();
+        let expected_sum = small_plaintext(public_key, expected_sum).to_secret_bytes();
+        prop_assert_eq!(decrypted_sum.as_ref(), expected_sum.as_ref());
+        prop_assert_eq!(public_key.subtract(&sum_lr, &right)?, left);
     }
 }
 

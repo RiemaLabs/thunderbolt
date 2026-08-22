@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use thunderbolt_core::zkp::CertifiedKeyResolver3072;
 
 use crate::codec::{require_canonical_json, CanonicalDigest, ValidateWire};
 use crate::invoice_v2::InvoiceEnvelopeV2Input;
@@ -76,13 +77,16 @@ impl PublicMessageV2 {
         decode_public_message_v2(encoded)
     }
 
-    /// Runs the profile-aware core verifier. The current backend fails closed
-    /// at raw 3072-bit key ingress before constructing an unsupported key.
-    pub fn verify(&self) -> Result<()> {
+    /// Verifies a message through the deployment's authenticated exact-match
+    /// certified-key resolver. Aggregate threshold VESS remains unavailable.
+    pub fn verify_with_keys<R>(&self, resolver: &R) -> Result<()>
+    where
+        R: CertifiedKeyResolver3072 + ?Sized,
+    {
         match self {
-            Self::Invoice(message) => message.verify(),
-            Self::Transfer(message) => message.verify(),
-            Self::RecipientShare(message) => message.verify(),
+            Self::Invoice(message) => message.verify_with_keys(resolver),
+            Self::Transfer(message) => message.verify_with_keys(resolver),
+            Self::RecipientShare(message) => message.verify_with_keys(resolver),
             Self::ThresholdRefresh(message) => message.verify(),
         }
     }

@@ -1,5 +1,6 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
@@ -182,6 +183,36 @@ fn default_help_exposes_only_fixed_owner_control_commands() {
 }
 
 #[test]
+fn default_operator_schema_is_exact_and_visible() {
+    let mut root = Cli::command();
+    root.build();
+    assert_visible_without_aliases(&root);
+    assert_eq!(
+        command_names(&root),
+        strings(&["status", "blockers", "redacted-config", "drain", "stop", "help"])
+    );
+    assert_eq!(
+        argument_schema(&root),
+        arguments(&[
+            ("config", Some("config"), None),
+            ("help", Some("help"), Some('h')),
+            ("version", Some("version"), Some('V')),
+        ])
+    );
+
+    let common = arguments(&[("config", Some("config"), None), ("help", Some("help"), Some('h'))]);
+    for name in ["status", "blockers", "redacted-config", "drain", "stop"] {
+        let command = root.find_subcommand(name).unwrap();
+        assert_eq!(argument_schema(command), common, "schema changed for {name}");
+        assert!(command.get_subcommands().next().is_none());
+    }
+    assert_generated_help_tree(
+        root.find_subcommand("help").unwrap(),
+        &["status", "blockers", "redacted-config", "drain", "stop", "help"],
+    );
+}
+
+#[test]
 fn manifest_keeps_http_cli_and_dependencies_feature_gated() {
     let manifest: toml::Value = toml::from_str(include_str!("../Cargo.toml")).unwrap();
     assert_eq!(manifest["package"]["default-run"].as_str(), Some("thunderbolt-cli"));
@@ -329,6 +360,115 @@ fn daemon_failures_are_correlated_and_nonlive_status_fails() {
     ));
     assert!(!status_is_live(&serde_json::json!({"liveness": "not_live"})));
     assert!(!status_is_live(&serde_json::json!({"readiness": "not_ready"})));
+}
+
+type ArgumentSchema = (String, Option<String>, Option<char>);
+
+fn strings(values: &[&str]) -> BTreeSet<String> {
+    values.iter().map(|value| (*value).to_owned()).collect()
+}
+
+fn arguments(values: &[(&str, Option<&str>, Option<char>)]) -> BTreeSet<ArgumentSchema> {
+    values
+        .iter()
+        .map(|(id, long, short)| ((*id).to_owned(), long.map(str::to_owned), *short))
+        .collect()
+}
+
+fn command_names(command: &clap::Command) -> BTreeSet<String> {
+    command
+        .get_subcommands()
+        .map(|child| child.get_name().to_owned())
+        .collect()
+}
+
+fn argument_schema(command: &clap::Command) -> BTreeSet<ArgumentSchema> {
+    command
+        .get_arguments()
+        .map(|argument| {
+            (
+                argument.get_id().to_string(),
+                argument.get_long().map(str::to_owned),
+                argument.get_short(),
+            )
+        })
+        .collect()
+}
+
+fn assert_visible_without_aliases(command: &clap::Command) {
+    assert!(!command.is_hide_set(), "hidden command: {}", command.get_name());
+    assert!(
+        !command.is_allow_external_subcommands_set(),
+        "external subcommands enabled for {}",
+        command.get_name()
+    );
+    assert!(
+        !command.is_multicall_set(),
+        "multicall enabled for {}",
+        command.get_name()
+    );
+    assert!(
+        command.get_short_flag().is_none(),
+        "short command flag: {}",
+        command.get_name()
+    );
+    assert!(
+        command.get_long_flag().is_none(),
+        "long command flag: {}",
+        command.get_name()
+    );
+    assert!(
+        command.get_all_aliases().next().is_none(),
+        "command alias: {}",
+        command.get_name()
+    );
+    assert!(
+        command.get_all_short_flag_aliases().next().is_none(),
+        "short command alias: {}",
+        command.get_name()
+    );
+    assert!(
+        command.get_all_long_flag_aliases().next().is_none(),
+        "long command alias: {}",
+        command.get_name()
+    );
+    for argument in command.get_arguments() {
+        assert!(!argument.is_hide_set(), "hidden argument: {}", argument.get_id());
+        assert!(
+            !argument.is_hide_short_help_set() && !argument.is_hide_long_help_set(),
+            "partially hidden argument: {}",
+            argument.get_id()
+        );
+        assert!(
+            !argument.is_hide_default_value_set() && !argument.is_hide_possible_values_set(),
+            "argument metadata hidden: {}",
+            argument.get_id()
+        );
+        assert!(
+            argument.get_all_aliases().is_none_or(|aliases| aliases.is_empty()),
+            "argument alias: {}",
+            argument.get_id()
+        );
+        assert!(
+            argument
+                .get_all_short_aliases()
+                .is_none_or(|aliases| aliases.is_empty()),
+            "short argument alias: {}",
+            argument.get_id()
+        );
+    }
+    for child in command.get_subcommands() {
+        assert_visible_without_aliases(child);
+    }
+}
+
+fn assert_generated_help_tree(help: &clap::Command, names: &[&str]) {
+    assert!(argument_schema(help).is_empty());
+    assert_eq!(command_names(help), strings(names));
+    for command in help.get_subcommands() {
+        assert!(argument_schema(command).is_empty());
+        assert!(command.get_subcommands().next().is_none());
+    }
 }
 
 fn owner_file(root: &Path, name: &str, bytes: &[u8]) -> TestResult<PathBuf> {

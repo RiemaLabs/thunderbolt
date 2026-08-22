@@ -1,0 +1,5 @@
+# Package and exact default binary included in release archives and SBOMs.
+# Required-feature compatibility and live-test targets must never appear here.
+thunderboltd thunderboltd
+thunderbolt-cli thunderbolt-cli
+thunderbolt-floor-node thunderbolt-floor-node

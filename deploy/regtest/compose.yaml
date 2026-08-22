@@ -1,30 +1,6 @@
 name: bitcoin-thunderbolt-regtest
 
 services:
-  initialize:
-    build:
-      context: ../..
-      args:
-        VERSION: 1.0.0-rc.1
-    image: bitcoin-thunderbolt:1.0.0-rc.1
-    entrypoint: ["/bin/sh", "-eu", "-c"]
-    command:
-      - |
-        install -d -m 0700 /var/lib/thunderbolt/auth /var/lib/thunderbolt/backups /var/lib/thunderbolt/logs
-        token_file=/var/lib/thunderbolt/auth/admin.token
-        if [ ! -e "$${token_file}" ]; then
-          umask 077
-          set -C
-          od -An -N32 -tx1 /dev/urandom | tr -d ' \n' > "$${token_file}"
-        fi
-        test "$$(wc -c < "$${token_file}")" -eq 64
-        chmod 0400 "$${token_file}"
-    read_only: true
-    cap_drop: ["ALL"]
-    security_opt: ["no-new-privileges:true"]
-    volumes:
-      - thunderbolt-data:/var/lib/thunderbolt
-
   thunderboltd:
     build:
       context: ../..
@@ -33,12 +9,8 @@ services:
     image: bitcoin-thunderbolt:1.0.0-rc.1
     command:
       - --config
-      - /etc/bitcoin-thunderbolt/thunderbolt.toml
+      - /var/lib/thunderbolt/config/runtime.toml
       - start
-      - --development-allow-unverified-demo-events
-    depends_on:
-      initialize:
-        condition: service_completed_successfully
     restart: unless-stopped
     read_only: true
     init: true
@@ -46,23 +18,30 @@ services:
     security_opt: ["no-new-privileges:true"]
     pids_limit: 256
     healthcheck:
-      test: ["CMD", "/usr/local/bin/thunderbolt-cli", "--config", "/etc/bitcoin-thunderbolt/thunderbolt.toml", "health"]
+      test:
+        [
+          "CMD",
+          "/usr/local/bin/thunderbolt-cli",
+          "--config",
+          "/var/lib/thunderbolt/config/runtime.toml",
+          "status",
+        ]
       interval: 15s
       timeout: 5s
       retries: 4
       start_period: 10s
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=16m
-    configs:
-      - source: thunderbolt-regtest-config
-        target: /etc/bitcoin-thunderbolt/thunderbolt.toml
-        mode: 0444
+      - /run/thunderbolt:rw,noexec,nosuid,nodev,mode=0700,uid=10001,gid=10001,size=16m
     volumes:
-      - thunderbolt-data:/var/lib/thunderbolt
-
-configs:
-  thunderbolt-regtest-config:
-    file: ./thunderbolt.toml
-
-volumes:
-  thunderbolt-data:
+      - type: bind
+        source: ${THUNDERBOLT_CONFIG_DIR:?set THUNDERBOLT_CONFIG_DIR to the absolute owner-only configuration directory}
+        target: /var/lib/thunderbolt/config
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${THUNDERBOLT_DATA_DIR:?set THUNDERBOLT_DATA_DIR to the absolute owner-only data directory}
+        target: /var/lib/thunderbolt/data
+        bind:
+          create_host_path: false

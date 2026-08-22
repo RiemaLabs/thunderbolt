@@ -1,12 +1,18 @@
-use thunderbolt_ledger::{
-    ActorPublicKeyV2, ActorSignatureV2, ChannelContextIdV2, EventDigestV2, LedgerChainIdV2, ProposalDigestV2,
-    RequestDigestV2, SignedProposalV2,
+use std::future::Future;
+use std::pin::Pin;
+
+use thunderbolt_ledger::{ActorPublicKeyV2, ActorSignatureV2, ProposalDigestV2, SignedProposalV2};
+
+use crate::{
+    CapabilityError, DurableBlockFinalityCapabilityV2, FinalityCoordinatorId, FinalityRangeIntentV2,
+    FinalityVerifierProfileId, FinalizedBlockCursor, FinalizedRangeCapabilityV2, StagedFinalityRangeCapabilityV2,
 };
 
-use crate::FinalizedCursor;
+/// Boxed cancellable future returned by a Holder Ledger capability.
+pub type LedgerFuture<'a, T, E> = Pin<Box<dyn Future<Output = std::result::Result<T, E>> + Send + 'a>>;
 
 /// External actor-signing boundary. Secret keys never enter this crate.
-pub trait ActorSigner {
+pub trait ActorSigner: Send {
     type Error: std::error::Error + Send + Sync + 'static;
 
     fn public_key(&self) -> std::result::Result<&ActorPublicKeyV2, Self::Error>;
@@ -18,66 +24,134 @@ pub trait ActorSigner {
 pub struct UnavailableActorSigner;
 
 impl ActorSigner for UnavailableActorSigner {
-    type Error = crate::CapabilityError;
+    type Error = CapabilityError;
 
     fn public_key(&self) -> std::result::Result<&ActorPublicKeyV2, Self::Error> {
-        Err(crate::CapabilityError::Unavailable)
+        Err(CapabilityError::Unavailable)
     }
 
     fn sign(&mut self, _digest: &ProposalDigestV2) -> std::result::Result<ActorSignatureV2, Self::Error> {
-        Err(crate::CapabilityError::Unavailable)
+        Err(CapabilityError::Unavailable)
     }
 }
 
-/// Submission result from a signed-v2 Ledger client.
+/// Admission result from a signed-v2 Ledger client. This never claims finality.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubmissionStatus {
     Accepted,
     AlreadyKnown,
 }
 
-/// Raw signed-v2 Ledger transport. Poll results are not final until the
-/// separately supplied finality verifier issues a trusted receipt.
+/// Transport for proposal admission and authority-free finalized execution intents.
 ///
-/// `finalized_history` must be historically repeatable after crashes. If the
-/// client advances a monotonic light-client root while fetching candidates,
-/// that root must be durable before return and must continue to verify the same
-/// historical page until the Holder cursor commits.
-pub trait SignedV2LedgerClient {
+/// `prepare_finalized_execution` must not mutate a finality coordinator. It
+/// returns a bounded canonical range that the Holder durably stages before a
+/// separate verifier receives store-issued authority to finalize it. `None`
+/// means no new finalized block and never advances a cursor.
+pub trait SignedV2LedgerClient: Send {
     type Error: std::error::Error + Send + Sync + 'static;
-    type FinalityCandidate: Send + 'static;
 
-    fn submit(&mut self, proposal: &SignedProposalV2) -> std::result::Result<SubmissionStatus, Self::Error>;
+    fn submit<'a>(&'a mut self, proposal: &'a SignedProposalV2) -> LedgerFuture<'a, SubmissionStatus, Self::Error>;
 
-    fn finalized_history(
-        &mut self,
-        channel: &ChannelContextIdV2,
-        after: Option<&FinalizedCursor>,
-        limit: usize,
-    ) -> std::result::Result<Vec<Self::FinalityCandidate>, Self::Error>;
+    fn prepare_finalized_execution<'a>(
+        &'a mut self,
+        cursor: &'a FinalizedBlockCursor,
+        max_blocks: usize,
+        verifier_profile: FinalityVerifierProfileId,
+        coordinator_id: FinalityCoordinatorId,
+    ) -> LedgerFuture<'a, Option<FinalityRangeIntentV2>, Self::Error>;
+
+    fn is_available(&self) -> bool {
+        true
+    }
 }
 
-/// Trusted finality capability produced by a quorum/light-client verifier.
+/// Crash-safe finality coordinator boundary.
 ///
-/// Implementations are a security boundary. The acknowledgement must be
-/// derived from the finalized, application-verified statement; it must never
-/// be synthesized from an HTTP acceptance response or execution-only block.
-pub trait TrustedLedgerReceipt: Clone + Send + Sync + 'static {
-    fn cursor(&self) -> FinalizedCursor;
-    fn signed_proposal(&self) -> &SignedProposalV2;
-    fn finality_digest(&self) -> &[u8; 32];
-    fn request_digest(&self) -> &RequestDigestV2;
-    fn event_digest(&self) -> &EventDigestV2;
+/// `finalize_staged_range` may mutate coordinator trust state only after it
+/// receives the private-constructor capability issued by committed Holder
+/// storage. It must commit and read back every transition before returning the
+/// exact durable range capabilities. If cancellation makes the coordinator
+/// transition ambiguous, retry/recovery with the same staged intent must be
+/// historically repeatable. `revalidate_durable_capability` authenticates a
+/// persisted authority-free attestation without raw provider metadata.
+pub trait FinalityVerifier: Send + Sync {
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    fn profile_id(&self) -> FinalityVerifierProfileId;
+    fn coordinator_id(&self) -> FinalityCoordinatorId;
+
+    fn finalize_staged_range<'a>(
+        &'a mut self,
+        staged: &'a StagedFinalityRangeCapabilityV2,
+    ) -> LedgerFuture<'a, FinalizedRangeCapabilityV2, Self::Error>;
+
+    fn revalidate_durable_capability<'a>(
+        &'a self,
+        capability: &'a DurableBlockFinalityCapabilityV2,
+    ) -> LedgerFuture<'a, (), Self::Error>;
+
+    fn is_available(&self) -> bool {
+        true
+    }
 }
 
-/// Converts an untrusted Ledger candidate into a typed finality capability.
-pub trait FinalityVerifier<C> {
-    type Error: std::error::Error + Send + Sync + 'static;
-    type Receipt: TrustedLedgerReceipt;
+/// Signed-v2 Ledger capability that always fails closed.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UnavailableSignedV2LedgerClient;
 
-    /// Pure, historically repeatable verification. Implementations must not
-    /// advance or persist a trust root here; any monotonic light-client update
-    /// must already be durable before the candidate is exposed.
-    fn verify(&self, expected_chain: &LedgerChainIdV2, candidate: C)
-        -> std::result::Result<Self::Receipt, Self::Error>;
+impl SignedV2LedgerClient for UnavailableSignedV2LedgerClient {
+    type Error = CapabilityError;
+
+    fn submit<'a>(&'a mut self, _proposal: &'a SignedProposalV2) -> LedgerFuture<'a, SubmissionStatus, Self::Error> {
+        Box::pin(async { Err(CapabilityError::Unavailable) })
+    }
+
+    fn prepare_finalized_execution<'a>(
+        &'a mut self,
+        _cursor: &'a FinalizedBlockCursor,
+        _max_blocks: usize,
+        _verifier_profile: FinalityVerifierProfileId,
+        _coordinator_id: FinalityCoordinatorId,
+    ) -> LedgerFuture<'a, Option<FinalityRangeIntentV2>, Self::Error> {
+        Box::pin(async { Err(CapabilityError::Unavailable) })
+    }
+
+    fn is_available(&self) -> bool {
+        false
+    }
+}
+
+/// Finality coordinator capability that always fails closed.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UnavailableFinalityVerifier;
+
+impl FinalityVerifier for UnavailableFinalityVerifier {
+    type Error = CapabilityError;
+
+    fn profile_id(&self) -> FinalityVerifierProfileId {
+        FinalityVerifierProfileId::DISABLED
+    }
+
+    fn coordinator_id(&self) -> FinalityCoordinatorId {
+        FinalityCoordinatorId::DISABLED
+    }
+
+    fn finalize_staged_range<'a>(
+        &'a mut self,
+        _staged: &'a StagedFinalityRangeCapabilityV2,
+    ) -> LedgerFuture<'a, FinalizedRangeCapabilityV2, Self::Error> {
+        Box::pin(async { Err(CapabilityError::Unavailable) })
+    }
+
+    fn revalidate_durable_capability<'a>(
+        &'a self,
+        _capability: &'a DurableBlockFinalityCapabilityV2,
+    ) -> LedgerFuture<'a, (), Self::Error> {
+        Box::pin(async { Err(CapabilityError::Unavailable) })
+    }
+
+    fn is_available(&self) -> bool {
+        false
+    }
 }

@@ -1,22 +1,19 @@
-use libpaillier::unknown_order::BigNumber;
-use libpaillier::{Ciphertext, EncryptionKey, Nonce};
 use serde::{Deserialize, Serialize, Serializer};
 use sha2::{Digest as _, Sha256};
-use thunderbolt_core::paillier::{
-    decode_ciphertext_with_profile, decode_encryption_key_with_profile, decode_nonce_with_profile,
-    encode_ciphertext_with_profile, encode_encryption_key_with_profile, encode_nonce_with_profile,
-    PaillierModulusProfile,
+use thunderbolt_core::zkp::production::{
+    CertifiedKeyResolver3072, CertifiedKeyRole3072, Ciphertext3072, ProofNonce3072, ProofResponse3072, PublicKey3072,
+    RawPublicKey3072, PAILLIER_CIPHERTEXT_BYTES, PAILLIER_MODULUS_BYTES, PROOF_RESPONSE_3072_BYTES,
 };
 
 use crate::codec::{point_from_wire, point_to_wire, ValidateWire};
 use crate::{HexBytes, OperationBindingV2, PointHex, Result, WireError};
 
 /// Exact protocol-v2 Paillier modulus and nonce width.
-pub const PAILLIER_V2_MODULUS_BYTES: usize = 384;
+pub const PAILLIER_V2_MODULUS_BYTES: usize = PAILLIER_MODULUS_BYTES;
 /// Exact protocol-v2 Paillier ciphertext width.
-pub const PAILLIER_V2_CIPHERTEXT_BYTES: usize = 768;
+pub const PAILLIER_V2_CIPHERTEXT_BYTES: usize = PAILLIER_CIPHERTEXT_BYTES;
 /// Fixed-width protocol-v2 integer-response encoding.
-pub const PROOF_RESPONSE_V2_BYTES: usize = 81;
+pub const PROOF_RESPONSE_V2_BYTES: usize = PROOF_RESPONSE_3072_BYTES;
 
 macro_rules! fixed_v2_bytes {
     ($(#[$meta:meta])* $name:ident, $width:expr) => {
@@ -106,9 +103,9 @@ pub(crate) enum PaillierModulusProfileV2Input {
 }
 
 impl PaillierModulusProfileV2 {
-    pub(crate) const fn core(self) -> PaillierModulusProfile {
+    pub(crate) const fn profile_id(self) -> u8 {
         match self {
-            Self::ProtocolV2Production3072 => PaillierModulusProfile::ProtocolV2Production3072,
+            Self::ProtocolV2Production3072 => 2,
         }
     }
 
@@ -121,12 +118,12 @@ impl PaillierModulusProfileV2 {
 
 pub(crate) fn validate_modulus(_field: &'static str, value: &PaillierModulusBytesV2) -> Result<()> {
     let bytes = value.as_bytes();
-    let has_profile_bit_length = bytes.first().is_some_and(|first| *first >= 0x40);
+    let has_profile_bit_length = bytes.first().is_some_and(|first| first & 0x80 != 0);
     let is_odd = bytes.last().is_some_and(|last| last & 1 == 1);
     if !has_profile_bit_length || !is_odd {
         return Err(WireError::InvalidMessage {
             message: "protocol v2 Paillier modulus",
-            reason: "modulus must be an odd 3071-bit or 3072-bit fixed-width integer",
+            reason: "modulus must be an odd integer with exact 3072-bit width",
         });
     }
     Ok(())
@@ -143,74 +140,76 @@ pub(crate) fn validate_nonzero_fixed(field: &'static str, value: &[u8]) -> Resul
 }
 
 pub(crate) fn validate_response(field: &'static str, value: &ProofResponseBytesV2) -> Result<()> {
-    if value.as_bytes().first().is_some_and(|first| *first > 1) {
-        return Err(WireError::InvalidMessage {
+    ProofResponse3072::from_bytes(value.as_bytes())
+        .map(|_| ())
+        .map_err(|_| WireError::InvalidMessage {
             message: "protocol v2 proof",
             reason: field,
-        });
-    }
-    Ok(())
+        })
 }
 
-/// Calls the core raw-profile ingress. The current backend returns before
-/// constructing `BigNumber` or `EncryptionKey` for this profile.
-pub(crate) fn decode_key_v2(field: &'static str, value: &PaillierModulusBytesV2) -> Result<EncryptionKey> {
+/// Resolves a raw modulus only through the deployment's authenticated
+/// certified-key boundary, then rechecks the exact 384-byte identity.
+pub(crate) fn resolve_key_v2<R>(
+    field: &'static str,
+    value: &PaillierModulusBytesV2,
+    expected_role: CertifiedKeyRole3072,
+    resolver: &R,
+) -> Result<PublicKey3072>
+where
+    R: CertifiedKeyResolver3072 + ?Sized,
+{
     validate_modulus(field, value)?;
-    decode_encryption_key_with_profile(PaillierModulusProfile::ProtocolV2Production3072, value.as_bytes())
-        .map_err(|source| crate::error::core_error("protocol v2 Paillier key ingress", source))
-}
-
-pub(crate) fn decode_ciphertext_v2(key: &EncryptionKey, value: &PaillierCiphertextBytesV2) -> Result<Ciphertext> {
-    decode_ciphertext_with_profile(PaillierModulusProfile::ProtocolV2Production3072, key, value.as_bytes())
-        .map_err(|source| crate::error::core_error("protocol v2 Paillier ciphertext ingress", source))
-}
-
-pub(crate) fn decode_nonce_v2(key: &EncryptionKey, value: &PaillierNonceBytesV2) -> Result<Nonce> {
-    decode_nonce_with_profile(PaillierModulusProfile::ProtocolV2Production3072, key, value.as_bytes())
-        .map_err(|source| crate::error::core_error("protocol v2 Paillier nonce ingress", source))
-}
-
-pub(crate) fn decode_response_v2(value: &ProofResponseBytesV2) -> BigNumber {
-    BigNumber::from_slice(value.as_bytes())
-}
-
-pub(crate) fn encode_key_v2(key: &EncryptionKey) -> Result<PaillierModulusBytesV2> {
-    let encoded = encode_encryption_key_with_profile(PaillierModulusProfile::ProtocolV2Production3072, key)
-        .map_err(|source| crate::error::core_error("protocol v2 Paillier key egress", source))?;
-    PaillierModulusBytesV2::from_bytes("protocol v2 Paillier modulus", encoded)
-}
-
-pub(crate) fn encode_ciphertext_v2(key: &EncryptionKey, ciphertext: &Ciphertext) -> Result<PaillierCiphertextBytesV2> {
-    let encoded = encode_ciphertext_with_profile(PaillierModulusProfile::ProtocolV2Production3072, key, ciphertext)
-        .map_err(|source| crate::error::core_error("protocol v2 Paillier ciphertext egress", source))?;
-    PaillierCiphertextBytesV2::from_bytes("protocol v2 Paillier ciphertext", encoded)
-}
-
-pub(crate) fn encode_nonce_v2(key: &EncryptionKey, nonce: &Nonce) -> Result<PaillierNonceBytesV2> {
-    let encoded = encode_nonce_with_profile(PaillierModulusProfile::ProtocolV2Production3072, key, nonce)
-        .map_err(|source| crate::error::core_error("protocol v2 Paillier nonce egress", source))?;
-    PaillierNonceBytesV2::from_bytes("protocol v2 Paillier nonce", encoded)
-}
-
-pub(crate) fn encode_response_v2(value: &BigNumber) -> Result<ProofResponseBytesV2> {
-    if value < &BigNumber::zero() {
-        return Err(WireError::NonCanonicalInteger {
-            field: "protocol v2 proof response",
+    let raw = RawPublicKey3072::from_bytes(value.as_bytes())
+        .map_err(|source| paillier_error("protocol v2 raw Paillier key ingress", source))?;
+    let key = resolver
+        .resolve_certified_key(&raw, expected_role)
+        .map_err(|source| crate::error::core_error("protocol v2 certified Paillier key resolution", source))?;
+    if key.to_bytes().as_slice() != value.as_bytes() {
+        return Err(WireError::InvalidMessage {
+            message: "protocol v2 Paillier modulus",
+            reason: "certified-key resolver returned a different modulus",
         });
     }
-    let bytes = thunderbolt_core::zkp::types::canonical_big_number_bytes(value);
-    if bytes.len() > PROOF_RESPONSE_V2_BYTES {
-        return Err(WireError::InvalidLength {
-            field: "protocol v2 proof response",
-            min: PROOF_RESPONSE_V2_BYTES,
-            max: PROOF_RESPONSE_V2_BYTES,
-            actual: bytes.len(),
-        });
-    }
-    let mut padded = vec![0_u8; PROOF_RESPONSE_V2_BYTES];
-    let offset = PROOF_RESPONSE_V2_BYTES - bytes.len();
-    padded[offset..].copy_from_slice(&bytes);
-    ProofResponseBytesV2::from_bytes("protocol v2 proof response", padded)
+    Ok(key)
+}
+
+pub(crate) fn decode_ciphertext_v2(key: &PublicKey3072, value: &PaillierCiphertextBytesV2) -> Result<Ciphertext3072> {
+    key.ciphertext_from_bytes(value.as_bytes())
+        .map_err(|source| paillier_error("protocol v2 Paillier ciphertext ingress", source))
+}
+
+pub(crate) fn decode_nonce_v2(key: &PublicKey3072, value: &PaillierNonceBytesV2) -> Result<ProofNonce3072> {
+    key.proof_nonce_from_bytes(value.as_bytes())
+        .map_err(|source| paillier_error("protocol v2 Paillier nonce ingress", source))
+}
+
+pub(crate) fn decode_response_v2(value: &ProofResponseBytesV2) -> Result<ProofResponse3072> {
+    ProofResponse3072::from_bytes(value.as_bytes())
+        .map_err(|source| crate::error::core_error("protocol v2 proof response ingress", source))
+}
+
+pub(crate) fn encode_key_v2(key: &PublicKey3072) -> Result<PaillierModulusBytesV2> {
+    PaillierModulusBytesV2::from_bytes("protocol v2 Paillier modulus", key.to_bytes())
+}
+
+pub(crate) fn encode_ciphertext_v2(
+    key: &PublicKey3072,
+    ciphertext: &Ciphertext3072,
+) -> Result<PaillierCiphertextBytesV2> {
+    key.validate_ciphertext(ciphertext)
+        .map_err(|source| paillier_error("protocol v2 Paillier ciphertext egress", source))?;
+    PaillierCiphertextBytesV2::from_bytes("protocol v2 Paillier ciphertext", ciphertext.to_bytes())
+}
+
+pub(crate) fn encode_nonce_v2(key: &PublicKey3072, nonce: &ProofNonce3072) -> Result<PaillierNonceBytesV2> {
+    key.validate_proof_nonce(nonce)
+        .map_err(|source| paillier_error("protocol v2 Paillier nonce egress", source))?;
+    PaillierNonceBytesV2::from_bytes("protocol v2 Paillier nonce", nonce.to_bytes())
+}
+
+pub(crate) fn encode_response_v2(value: &ProofResponse3072) -> Result<ProofResponseBytesV2> {
+    ProofResponseBytesV2::from_bytes("protocol v2 proof response", value.to_bytes())
 }
 
 pub(crate) fn validate_point_v2(field: &'static str, point: &PointHex) -> Result<()> {
@@ -230,6 +229,13 @@ pub(crate) fn encode_point_v2(field: &'static str, point: &secp::Point) -> Resul
     point_to_wire(field, point)
 }
 
+fn paillier_error(operation: &'static str, source: thunderbolt_core::zkp::production::PaillierError) -> WireError {
+    crate::error::core_error(
+        operation,
+        thunderbolt_core::ThunderboltError::CryptographicError(source.to_string()),
+    )
+}
+
 /// Derives a proof-only context from the stable channel id and all operation
 /// fields. The stable [`crate::ChannelBindingV2::context_id`] remains unchanged.
 pub(crate) fn derive_proof_context_v2(
@@ -242,7 +248,10 @@ pub(crate) fn derive_proof_context_v2(
     append_context_field(&mut hasher, b"bitcoin-thunderbolt/proof-context/v2");
     append_context_field(&mut hasher, proof_domain);
     append_context_field(&mut hasher, &binding.channel().context_id()?);
-    append_context_field(&mut hasher, &[PaillierModulusProfile::ProtocolV2Production3072 as u8]);
+    append_context_field(
+        &mut hasher,
+        &[PaillierModulusProfileV2::ProtocolV2Production3072.profile_id()],
+    );
     append_context_field(&mut hasher, binding.invoice_id().as_bytes());
     match binding.step() {
         Some(step) => {

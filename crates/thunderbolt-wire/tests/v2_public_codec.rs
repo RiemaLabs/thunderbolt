@@ -2,9 +2,8 @@ mod support;
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use libpaillier::unknown_order::BigNumber;
-use libpaillier::EncryptionKey;
-use thunderbolt_core::zkp::{InvoiceProof, InvoiceStatement};
+use thunderbolt_core::zkp::production::{CertifiedKeyResolver3072, PublicKey3072, RawPublicKey3072};
+use thunderbolt_core::{Result as CoreResult, ThunderboltError};
 use thunderbolt_wire::{
     decode_public_message_v2, from_json_slice, threshold_invoice_package_digest_v2, to_json_vec,
     validate_threshold_package_v2, CanonicalDigest, InvoiceEnvelopeV2, PublicMessageV1, PublicMessageV2,
@@ -70,66 +69,46 @@ fn proof_context_fields_have_golden_vectors() {
     );
     assert_eq!(
         hex::encode(recipient_context.ctx_id()),
-        "528d0d57af461f1327e88899ab94337c6100162f0cf6fe8ad38da726b6947499"
+        "5bba67ba1a65b7f34bb76cf051edd385cd1017c27a63704536ffc8f8bd83fcb8"
     );
 }
 
 #[test]
-fn v2_core_ingress_fails_closed_without_panicking_or_falling_back() {
+fn v2_core_ingress_requires_authenticated_keys_without_panicking_or_falling_back() {
+    struct RejectingResolver;
+
+    impl CertifiedKeyResolver3072 for RejectingResolver {
+        fn resolve_certified_key(
+            &self,
+            _raw: &RawPublicKey3072,
+            _expected_role: thunderbolt_core::zkp::CertifiedKeyRole3072,
+        ) -> CoreResult<PublicKey3072> {
+            Err(ThunderboltError::InvalidParameter(
+                "test resolver has no authenticated certified key".to_string(),
+            ))
+        }
+    }
+
     let invoice = invoice(11);
-    let outcome = catch_unwind(AssertUnwindSafe(|| invoice.to_core()));
+    let outcome = catch_unwind(AssertUnwindSafe(|| invoice.to_core_with_keys(&RejectingResolver)));
     let error = outcome
         .expect("raw v2 ingress must not panic")
-        .expect_err("unsupported backend must fail closed");
-    assert_backend_gate(error);
-
-    let core_point = secp::Point::from_slice(invoice.statement.anchor_base.as_bytes()).expect("core point");
-    let mut legacy_modulus = vec![0_u8; 256];
-    legacy_modulus[0] = 0x40;
-    legacy_modulus[255] = 1;
-    let legacy_key = EncryptionKey::from_n(BigNumber::from_slice(&legacy_modulus));
-    let core_statement = InvoiceStatement {
-        context: invoice.proof_context().expect("core context"),
-        anchor_base: core_point,
-        bob_key: legacy_key.clone(),
-        committee_key: legacy_key,
-        delta: core_point,
-        bob_ciphertext: BigNumber::one(),
-        committee_ciphertext: BigNumber::one(),
-    };
-    let core_proof = InvoiceProof {
-        a_delta: core_point,
-        a_bob: BigNumber::one(),
-        a_committee: BigNumber::one(),
-        z: BigNumber::one(),
-        tau_bob: BigNumber::one(),
-        tau_committee: BigNumber::one(),
-    };
-    let from_core = catch_unwind(AssertUnwindSafe(|| {
-        InvoiceEnvelopeV2::from_core(
-            invoice.binding.clone(),
-            invoice.expected_transfer_step,
-            &core_statement,
-            &core_proof,
-        )
-    }));
-    let error = from_core
-        .expect("v2 egress must not panic")
-        .expect_err("legacy core material must not become a v2 envelope");
-    assert_backend_gate(error);
+        .expect_err("unauthenticated raw key must fail closed");
+    assert_registry_gate(error);
 
     let transfer = transfer(12);
-    let outcome = catch_unwind(AssertUnwindSafe(|| transfer.verify()));
+    let outcome = catch_unwind(AssertUnwindSafe(|| transfer.verify_with_keys(&RejectingResolver)));
     let error = outcome
         .expect("v2 transfer verification must not panic")
-        .expect_err("unsupported backend must fail closed");
-    assert_backend_gate(error);
+        .expect_err("unauthenticated transfer key must fail closed");
+    assert_registry_gate(error);
 
     let (recipient, threshold) = threshold_pair(13, 2, 2);
-    let recipient_error = recipient.to_core().expect_err("Recipient ingress must be gated");
-    assert_backend_gate(recipient_error);
-    let threshold_error = threshold.to_core().expect_err("threshold ingress must be gated");
-    assert_backend_gate(threshold_error);
+    let recipient_error = recipient
+        .to_core_with_keys(&RejectingResolver)
+        .expect_err("Recipient ingress must require authenticated keys");
+    assert_registry_gate(recipient_error);
+    assert!(matches!(threshold.verify(), Err(WireError::InvalidMessage { .. })));
 }
 
 #[test]
@@ -168,6 +147,13 @@ fn malformed_cross_profile_and_nested_deserialization_are_sealed() {
 
     let mut statement = serde_json::to_value(&invoice.statement).expect("statement value");
     statement["recipient_key"] = serde_json::Value::String("20".repeat(384));
+    assert!(decode_invoice_statement_value(&invoice, statement).is_err());
+
+    let mut statement = serde_json::to_value(&invoice.statement).expect("statement value");
+    let mut short_modulus = vec![0_u8; 384];
+    short_modulus[0] = 0x40;
+    short_modulus[383] = 1;
+    statement["recipient_key"] = serde_json::Value::String(hex::encode(short_modulus));
     assert!(decode_invoice_statement_value(&invoice, statement).is_err());
 
     let mut statement = serde_json::to_value(&invoice.statement).expect("statement value");
@@ -416,13 +402,12 @@ fn decode_threshold_value(payload: serde_json::Value) -> thunderbolt_wire::Resul
     decode_public_message_v2(&serde_json::to_vec(&message)?)
 }
 
-fn assert_backend_gate(error: WireError) {
+fn assert_registry_gate(error: WireError) {
     match error {
         WireError::Core { source, .. } => {
             let message = source.to_string();
-            assert!(message.contains("3072-bit Paillier"));
-            assert!(message.contains("unsupported"));
+            assert!(message.contains("authenticated certified key"));
         }
-        other => panic!("expected core backend gate, got {other}"),
+        other => panic!("expected certified-key registry gate, got {other}"),
     }
 }

@@ -2,7 +2,7 @@
 
 Bitcoin Thunderbolt is an open source protocol for asynchronous off-chain transfers of Bitcoin UTXO ownership. A Bitcoin UTXO is locked once under a fixed public key shared by its current Holder and a Threshold Committee. Ownership can then move between Holders without an on-chain transaction for every transfer.
 
-Thunderbolt is designed for transfers where the sender and recipient do not need to be online at the same time. It does not use routed payment paths and is not wire-compatible with the Lightning Network.
+Thunderbolt lets the sender and recipient complete a transfer at different times.
 
 ## Release status
 
@@ -15,7 +15,7 @@ The `release/1.0` branch is the active release candidate. Regtest and signet are
 | Holder | Controls the current ownership secret, creates transfers, and can request final settlement. |
 | Recipient | Creates an invoice with a fresh secret and becomes the next Holder after a valid transfer and committee update. |
 | Committee member | Holds one share of the fixed lock key, verifies committed transfers, updates its share, and participates in settlement. |
-| Thunderbolt Ledger | Orders authenticated protocol entries, persists channel state, and makes committed entries available to participants. It holds no Holder or committee secret. |
+| Thunderbolt Ledger | Orders authenticated protocol entries, persists channel state, and makes committed entries available to participants. Participant secrets remain with Holders and committee members. |
 | Bitcoin Core | Provides funding, confirmation, reorganization, and settlement data for the Bitcoin UTXO. |
 
 Each Holder, committee member, and Ledger validator runs as a separate process with its own state and credentials. A thin local CLI talks to the daemon through an owner-only Unix socket.
@@ -45,7 +45,7 @@ The protocol lifecycle is:
 5. The Recipient decrypts the new credential and becomes the Holder.
 6. The current Holder and a committee quorum can finalize the channel on Bitcoin.
 
-Steps 2 through 5 can repeat without touching the Bitcoin chain.
+Steps 2 through 5 repeat off-chain.
 
 ## Repository layout
 

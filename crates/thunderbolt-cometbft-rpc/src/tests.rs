@@ -15,7 +15,7 @@ use bitcoin::Network;
 use ed25519_consensus::SigningKey;
 use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose};
 use rustls::client::ResolvesClientCert;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::pki_types::{pem::PemObject as _, CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::sign::CertifiedKey;
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use serde_json::json;
@@ -2225,7 +2225,7 @@ async fn optional_live_pinned_https_ledger_query_gate() {
     let identity = crate::OwnerOnlyPemClientIdentity::load(&config.client_certificate_path, &config.client_key_path)
         .expect("load owner-only client identity");
     let ca_bytes = std::fs::read(&config.ca_pem_path).expect("read CA bundle");
-    let roots = rustls_pemfile::certs(&mut Cursor::new(ca_bytes))
+    let roots = CertificateDer::pem_slice_iter(&ca_bytes)
         .collect::<std::result::Result<Vec<_>, _>>()
         .expect("decode CA bundle");
     let peer = HttpsPeer::new(
@@ -2325,11 +2325,14 @@ fn tls_material() -> TlsMaterial {
 }
 
 fn server_config(material: &TlsMaterial, require_client: bool) -> Arc<rustls::ServerConfig> {
-    let builder = rustls::ServerConfig::builder();
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let builder = rustls::ServerConfig::builder_with_provider(Arc::clone(&provider))
+        .with_safe_default_protocol_versions()
+        .unwrap();
     let mut config = if require_client {
         let mut roots = rustls::RootCertStore::empty();
         roots.add(material.ca.clone()).unwrap();
-        let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+        let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
             .build()
             .unwrap();
         builder

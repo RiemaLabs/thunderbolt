@@ -54,10 +54,16 @@
 //! ```
 #![forbid(unsafe_code)]
 
+mod certificate;
 mod error;
 mod key;
 mod types;
 
+pub use certificate::{
+    provisioning_authority_id, CertifiedKeyIdentity3072, CertifiedKeyRole3072, CertifiedPublicKeyRecord3072,
+    ExpectedPublicKeyCertificate3072, PublicKeyCertificateBody3072, TrustedProvisioningAuthority3072,
+    PUBLIC_KEY_CERTIFICATE_BODY_BYTES, PUBLIC_KEY_CERTIFICATE_BYTES,
+};
 pub use error::{PaillierError, Result};
 pub use key::{
     Encryption3072, OfflineKeyGenerator, ProofOpeningResponse3072, PublicKey3072, RawPublicKey3072, SecretKey3072,

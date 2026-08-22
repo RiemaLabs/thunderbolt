@@ -11,30 +11,33 @@
 
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::io::Write;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
-use prost::Message as _;
 use serde_json::json;
 use tendermint_abci::Application;
 use tendermint_proto::v0_38::abci::{
-    request, response, Request, RequestApplySnapshotChunk, RequestCheckTx, RequestEcho, RequestExtendVote,
-    RequestFinalizeBlock, RequestInfo, RequestInitChain, RequestLoadSnapshotChunk, RequestOfferSnapshot,
-    RequestPrepareProposal, RequestProcessProposal, RequestQuery, RequestVerifyVoteExtension, Response,
-    ResponseApplySnapshotChunk, ResponseCheckTx, ResponseCommit, ResponseEcho, ResponseExtendVote,
-    ResponseFinalizeBlock, ResponseFlush, ResponseInfo, ResponseInitChain, ResponseListSnapshots,
-    ResponseLoadSnapshotChunk, ResponseOfferSnapshot, ResponsePrepareProposal, ResponseProcessProposal, ResponseQuery,
-    ResponseVerifyVoteExtension,
+    RequestApplySnapshotChunk, RequestCheckTx, RequestEcho, RequestExtendVote, RequestFinalizeBlock, RequestInfo,
+    RequestInitChain, RequestLoadSnapshotChunk, RequestOfferSnapshot, RequestPrepareProposal, RequestProcessProposal,
+    RequestQuery, RequestVerifyVoteExtension, ResponseApplySnapshotChunk, ResponseCheckTx, ResponseCommit,
+    ResponseEcho, ResponseExtendVote, ResponseFinalizeBlock, ResponseFlush, ResponseInfo, ResponseInitChain,
+    ResponseListSnapshots, ResponseLoadSnapshotChunk, ResponseOfferSnapshot, ResponsePrepareProposal,
+    ResponseProcessProposal, ResponseQuery, ResponseVerifyVoteExtension,
+};
+use thunderbolt_abci_server::{
+    start, FatalServerEvent, FatalServerHandler, ServerConfig, ServerDeadlines, ServerEndpoint, ServerLimits,
+    MAX_SERVER_INFLIGHT_BYTES,
 };
 use thunderbolt_ledger::LedgerChainIdV2;
 use thunderbolt_ledger_abci::{
     ConsensusProfileV2, ProcessExitFatalHandler, StaticAdmissionRequestV2, StaticAdmissionVerifierV2,
-    ThunderboltLedgerAbci,
+    ThunderboltLedgerAbci, MAX_COMMIT_VOTES, MAX_MISBEHAVIOR_RECORDS, MAX_PREPARE_SCAN_TRANSACTIONS,
 };
 use thunderbolt_ledger_app::{ApplicationOptions, LedgerApplication};
 use thunderbolt_protocol::v2::{
@@ -45,7 +48,25 @@ use thunderbolt_protocol::v2::{
 const CRASH_EXIT_CODE: u8 = 86;
 const POST_COMMIT_CRASH_EXIT_CODE: u8 = 87;
 const INFO_CRASH_EXIT_CODE: u8 = 88;
+const SERVER_FATAL_EXIT_CODE: u8 = 89;
 const MAX_ABCI_FRAME_BYTES: usize = 26 * 1024 * 1024;
+const MAX_ABCI_CONNECTIONS: usize = 16;
+const MAX_CONCURRENT_HANDLERS: usize = 8;
+const MAX_REQUEST_DECODE_ITEMS: usize = MAX_PREPARE_SCAN_TRANSACTIONS + MAX_MISBEHAVIOR_RECORDS + MAX_COMMIT_VOTES;
+
+#[derive(Clone, Copy)]
+struct LiveServerFatal;
+
+impl FatalServerHandler for LiveServerFatal {
+    fn terminate(&self, event: FatalServerEvent) -> ! {
+        eprintln!(
+            "fatal live-test ABCI server failure: kind={:?} connection={:?}",
+            event.kind(),
+            event.connection_id()
+        );
+        std::process::exit(i32::from(SERVER_FATAL_EXIT_CODE));
+    }
+}
 
 #[derive(Debug, Default)]
 struct InsecureAcceptAll;
@@ -293,122 +314,44 @@ fn serve(options: ServeOptions) -> Result<(), String> {
     if !listen.ip().is_loopback() {
         return Err("live-test ABCI listener must use a loopback address".to_owned());
     }
-    serve_bounded(listen, application)
-}
-
-fn serve_bounded<A: Application>(listen: SocketAddr, application: A) -> Result<(), String> {
-    let listener = TcpListener::bind(listen).map_err(|error| format!("cannot bind ABCI listener: {error}"))?;
-    for connection in listener.incoming() {
-        let stream = connection.map_err(|error| format!("cannot accept ABCI connection: {error}"))?;
-        let application = application.clone();
-        let _ = thread::spawn(move || {
-            if let Err(error) = handle_connection(stream, application) {
-                eprintln!("closing bounded ABCI connection: {error}");
-            }
-        });
-    }
-    Err("bounded ABCI listener stopped".to_owned())
-}
-
-fn handle_connection<A: Application>(mut stream: TcpStream, application: A) -> Result<(), String> {
-    while let Some(frame) = read_bounded_frame(&mut stream)? {
-        let request = Request::decode(frame.as_slice()).map_err(|_| "ABCI protobuf request is invalid".to_owned())?;
-        let response = dispatch_request(&application, request)?;
-        write_bounded_response(&mut stream, response)?;
-    }
-    Ok(())
-}
-
-fn read_bounded_frame<R: Read>(stream: &mut R) -> Result<Option<Vec<u8>>, String> {
-    let mut length = 0_u64;
-    let mut shift = 0_u32;
-    for index in 0..10 {
-        let mut byte = [0_u8; 1];
-        match stream.read(&mut byte) {
-            Ok(0) if index == 0 => return Ok(None),
-            Ok(0) => return Err("ABCI frame ended inside its length prefix".to_owned()),
-            Ok(_) => {}
-            Err(error) => return Err(format!("cannot read ABCI frame length: {error}")),
-        }
-        let payload = u64::from(byte[0] & 0x7f);
-        length |= payload
-            .checked_shl(shift)
-            .ok_or_else(|| "ABCI frame length overflows".to_owned())?;
-        if byte[0] & 0x80 == 0 {
-            let length = usize::try_from(length).map_err(|_| "ABCI frame length exceeds usize".to_owned())?;
-            if length > MAX_ABCI_FRAME_BYTES {
-                return Err("ABCI frame exceeds the pre-allocation bound".to_owned());
-            }
-            let mut frame = vec![0_u8; length];
-            stream
-                .read_exact(&mut frame)
-                .map_err(|error| format!("cannot read complete ABCI frame: {error}"))?;
-            return Ok(Some(frame));
-        }
-        shift = shift
-            .checked_add(7)
-            .ok_or_else(|| "ABCI frame length shift overflows".to_owned())?;
-    }
-    Err("ABCI frame length prefix exceeds ten bytes".to_owned())
-}
-
-fn dispatch_request<A: Application>(application: &A, request: Request) -> Result<Response, String> {
-    let value = request.value.ok_or_else(|| "ABCI request has no value".to_owned())?;
-    let value = match value {
-        request::Value::Echo(value) => response::Value::Echo(application.echo(value)),
-        request::Value::Flush(_) => response::Value::Flush(application.flush()),
-        request::Value::Info(value) => response::Value::Info(application.info(value)),
-        request::Value::InitChain(value) => response::Value::InitChain(application.init_chain(value)),
-        request::Value::Query(value) => response::Value::Query(application.query(value)),
-        request::Value::CheckTx(value) => response::Value::CheckTx(application.check_tx(value)),
-        request::Value::Commit(_) => response::Value::Commit(application.commit()),
-        request::Value::ListSnapshots(_) => response::Value::ListSnapshots(application.list_snapshots()),
-        request::Value::OfferSnapshot(value) => response::Value::OfferSnapshot(application.offer_snapshot(value)),
-        request::Value::LoadSnapshotChunk(value) => {
-            response::Value::LoadSnapshotChunk(application.load_snapshot_chunk(value))
-        }
-        request::Value::ApplySnapshotChunk(value) => {
-            response::Value::ApplySnapshotChunk(application.apply_snapshot_chunk(value))
-        }
-        request::Value::PrepareProposal(value) => response::Value::PrepareProposal(application.prepare_proposal(value)),
-        request::Value::ProcessProposal(value) => response::Value::ProcessProposal(application.process_proposal(value)),
-        request::Value::ExtendVote(value) => response::Value::ExtendVote(application.extend_vote(value)),
-        request::Value::VerifyVoteExtension(value) => {
-            response::Value::VerifyVoteExtension(application.verify_vote_extension(value))
-        }
-        request::Value::FinalizeBlock(value) => response::Value::FinalizeBlock(application.finalize_block(value)),
-    };
-    Ok(Response { value: Some(value) })
-}
-
-fn write_bounded_response<W: Write>(stream: &mut W, response: Response) -> Result<(), String> {
-    let length = response.encoded_len();
-    if length > MAX_ABCI_FRAME_BYTES {
-        return Err("ABCI response exceeds the frame bound".to_owned());
-    }
-    let mut prefix = [0_u8; 10];
-    let mut remaining = u64::try_from(length).map_err(|_| "response length exceeds u64".to_owned())?;
-    let mut prefix_len = 0_usize;
+    let limits = server_limits()?;
+    let deadlines = ServerDeadlines::new(
+        Duration::from_millis(5),
+        Duration::from_secs(30),
+        Duration::from_secs(2),
+        Duration::from_secs(2),
+        Duration::from_secs(15),
+        Duration::from_secs(5),
+        Duration::from_secs(15),
+        Duration::from_secs(60),
+        Duration::from_secs(75),
+    )
+    .map_err(|error| format!("cannot construct live-test ABCI deadlines: {error}"))?;
+    let config = ServerConfig::new(ServerEndpoint::Tcp(listen), limits, deadlines)
+        .map_err(|error| format!("cannot construct live-test ABCI server config: {error}"))?;
+    let _server = start(config, application, LiveServerFatal)
+        .map_err(|error| format!("cannot start bounded live-test ABCI server: {error}"))?;
     loop {
-        let low = u8::try_from(remaining & 0x7f).map_err(|_| "response varint byte exceeds u8".to_owned())?;
-        remaining >>= 7;
-        prefix[prefix_len] = if remaining == 0 { low } else { low | 0x80 };
-        prefix_len = prefix_len
-            .checked_add(1)
-            .ok_or_else(|| "response prefix length overflows".to_owned())?;
-        if remaining == 0 {
-            break;
-        }
+        thread::park();
     }
-    let mut bytes = Vec::with_capacity(length);
-    response
-        .encode(&mut bytes)
-        .map_err(|_| "cannot encode ABCI response".to_owned())?;
-    stream
-        .write_all(&prefix[..prefix_len])
-        .and_then(|()| stream.write_all(&bytes))
-        .and_then(|()| stream.flush())
-        .map_err(|error| format!("cannot write ABCI response: {error}"))
+}
+
+fn server_limits() -> Result<ServerLimits, String> {
+    let per_handler =
+        ServerLimits::required_per_handler_bytes(MAX_ABCI_FRAME_BYTES, MAX_ABCI_FRAME_BYTES, MAX_REQUEST_DECODE_ITEMS)
+            .ok_or_else(|| "live-test ABCI per-handler reservation overflows".to_owned())?;
+    let max_inflight = per_handler
+        .checked_mul(MAX_CONCURRENT_HANDLERS)
+        .filter(|value| *value <= MAX_SERVER_INFLIGHT_BYTES)
+        .ok_or_else(|| "live-test ABCI aggregate reservation exceeds the hard cap".to_owned())?;
+    ServerLimits::new(
+        MAX_ABCI_FRAME_BYTES,
+        MAX_ABCI_FRAME_BYTES,
+        MAX_ABCI_CONNECTIONS,
+        max_inflight,
+        MAX_REQUEST_DECODE_ITEMS,
+    )
+    .map_err(|error| format!("cannot construct live-test ABCI limits: {error}"))
 }
 
 fn print_status(database: &Path, chain_id: LedgerChainIdV2) -> Result<(), String> {
@@ -576,54 +519,4 @@ fn usage(reason: &str) -> String {
     format!(
         "{reason}\nusage: thunderbolt-ledger-abci-live-test serve --listen IP:PORT --db PATH --chain-id ID [--crash-before-commit-height N --crash-before-commit-marker PATH] [--crash-after-commit-height N --crash-after-commit-marker PATH] [--crash-on-info-marker PATH]\n       thunderbolt-ledger-abci-live-test status --db PATH --chain-id ID\n       thunderbolt-ledger-abci-live-test profile --chain-id ID\nWARNING: this binary accepts all operation proofs and is only for the isolated live test"
     )
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
-
-    use std::io::Cursor;
-
-    use super::*;
-
-    #[test]
-    fn oversized_frame_is_rejected_before_payload_allocation() {
-        let mut length = u64::try_from(MAX_ABCI_FRAME_BYTES + 1).expect("bounded frame length");
-        let mut encoded = Vec::new();
-        loop {
-            let low = u8::try_from(length & 0x7f).expect("varint byte");
-            length >>= 7;
-            encoded.push(if length == 0 { low } else { low | 0x80 });
-            if length == 0 {
-                break;
-            }
-        }
-        let error = read_bounded_frame(&mut Cursor::new(encoded)).expect_err("oversized frame");
-        assert!(error.contains("pre-allocation"));
-    }
-
-    #[test]
-    fn missing_request_value_closes_the_connection() {
-        let verifier = InsecureAcceptAll;
-        let chain_id = LedgerChainIdV2::new("bounded-dispatch-test").expect("chain id");
-        let profile = ConsensusProfileV2::from_verifier(
-            &chain_id,
-            thunderbolt_protocol::v2::ProtocolLimitsV2::default(),
-            &verifier,
-        )
-        .expect("profile");
-        let directory = tempfile::TempDir::new().expect("tempdir");
-        let application = LedgerApplication::open(
-            directory.path().join("app.sqlite3"),
-            chain_id,
-            ApplicationOptions {
-                consensus_profile_digest: Some(*profile.as_bytes()),
-                ..ApplicationOptions::default()
-            },
-        )
-        .expect("application");
-        let handler = ProcessExitFatalHandler::new(87).expect("handler");
-        let adapter = ThunderboltLedgerAbci::new(application, verifier, handler).expect("adapter");
-        assert!(dispatch_request(&adapter, Request { value: None }).is_err());
-    }
 }

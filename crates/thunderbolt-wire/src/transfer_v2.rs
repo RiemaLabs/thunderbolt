@@ -1,14 +1,16 @@
 use serde::{Deserialize, Serialize};
-use thunderbolt_core::paillier::PaillierModulusProfile;
-use thunderbolt_core::zkp::{verify_anchor_transition, verify_transfer_with_profile, TransferProof, TransferStatement};
+use thunderbolt_core::zkp::{
+    verify_anchor_transition_3072, verify_transfer_3072, CertifiedKeyResolver3072, CertifiedKeyRole3072,
+    TransferProof3072, TransferStatement3072,
+};
 
 use crate::codec::{CanonicalDigest, CanonicalHasher, ValidateWire};
 use crate::error::core_error;
 use crate::v2_values::{
-    decode_ciphertext_v2, decode_key_v2, decode_nonce_v2, decode_point_v2, decode_response_v2, derive_proof_context_v2,
+    decode_ciphertext_v2, decode_nonce_v2, decode_point_v2, decode_response_v2, derive_proof_context_v2,
     encode_ciphertext_v2, encode_key_v2, encode_nonce_v2, encode_point_v2, encode_response_v2,
-    require_matching_context, validate_modulus, validate_nonzero_fixed, validate_point_v2, validate_response,
-    PaillierCiphertextBytesV2Input, PaillierModulusBytesV2Input, PaillierModulusProfileV2Input,
+    require_matching_context, resolve_key_v2, validate_modulus, validate_nonzero_fixed, validate_point_v2,
+    validate_response, PaillierCiphertextBytesV2Input, PaillierModulusBytesV2Input, PaillierModulusProfileV2Input,
     PaillierNonceBytesV2Input, ProofResponseBytesV2Input,
 };
 use crate::{
@@ -58,14 +60,14 @@ impl TransferStatementV2 {
         Ok(value)
     }
 
-    pub fn from_core(statement: &TransferStatement) -> Result<Self> {
-        let recipient_key = encode_key_v2(&statement.bob_key)?;
+    pub fn from_core(statement: &TransferStatement3072) -> Result<Self> {
+        let recipient_key = encode_key_v2(&statement.recipient_key)?;
         let value = Self {
             anchor_base: encode_point_v2("transfer_v2.statement.anchor_base", &statement.anchor_base)?,
             recipient_key,
             current_anchor: encode_point_v2("transfer_v2.statement.current_anchor", &statement.current_anchor)?,
-            invoice_ciphertext: encode_ciphertext_v2(&statement.bob_key, &statement.invoice_ciphertext)?,
-            next_holder_ciphertext: encode_ciphertext_v2(&statement.bob_key, &statement.next_holder_ciphertext)?,
+            invoice_ciphertext: encode_ciphertext_v2(&statement.recipient_key, &statement.invoice_ciphertext)?,
+            next_holder_ciphertext: encode_ciphertext_v2(&statement.recipient_key, &statement.next_holder_ciphertext)?,
         };
         value.validate_wire()?;
         Ok(value)
@@ -130,13 +132,13 @@ impl TransferProofV2 {
         Ok(value)
     }
 
-    pub fn from_core(statement: &TransferStatement, proof: &TransferProof) -> Result<Self> {
-        let _ = encode_key_v2(&statement.bob_key)?;
+    pub fn from_core(statement: &TransferStatement3072, proof: &TransferProof3072) -> Result<Self> {
+        let _ = encode_key_v2(&statement.recipient_key)?;
         let value = Self {
             a_anchor: encode_point_v2("transfer_v2.proof.a_anchor", &proof.a_anchor)?,
-            a_ciphertext: encode_ciphertext_v2(&statement.bob_key, &proof.a_ciphertext)?,
+            a_ciphertext: encode_ciphertext_v2(&statement.recipient_key, &proof.a_ciphertext)?,
             z: encode_response_v2(&proof.z)?,
-            tau: encode_nonce_v2(&statement.bob_key, &proof.tau)?,
+            tau: encode_nonce_v2(&statement.recipient_key, &proof.tau)?,
         };
         value.validate_wire()?;
         Ok(value)
@@ -266,8 +268,8 @@ impl TransferEnvelopeV2 {
 
     pub fn from_core(
         binding: OperationBindingV2,
-        statement: &TransferStatement,
-        proof: &TransferProof,
+        statement: &TransferStatement3072,
+        proof: &TransferProof3072,
         delta: &secp::Point,
         next_anchor: &secp::Point,
     ) -> Result<Self> {
@@ -307,41 +309,52 @@ impl TransferEnvelopeV2 {
         Self::proof_context_for(&self.binding)
     }
 
-    /// Converts through the core raw-profile ingress and never falls back to
-    /// the legacy 2048-bit profile.
-    pub fn to_core(&self) -> Result<(TransferStatement, TransferProof)> {
+    /// Converts only through an authenticated exact-match certified-key
+    /// resolver. Raw network moduli cannot be promoted here.
+    pub fn to_core_with_keys<R>(&self, resolver: &R) -> Result<(TransferStatement3072, TransferProof3072)>
+    where
+        R: CertifiedKeyResolver3072 + ?Sized,
+    {
         self.validate_wire()?;
         let context = self.proof_context()?;
-        let recipient_key = decode_key_v2("transfer_v2.statement.recipient_key", &self.statement.recipient_key)?;
-        let statement = TransferStatement {
+        let recipient_key = resolve_key_v2(
+            "transfer_v2.statement.recipient_key",
+            &self.statement.recipient_key,
+            CertifiedKeyRole3072::Recipient,
+            resolver,
+        )?;
+        let statement = TransferStatement3072 {
             context,
             anchor_base: decode_point_v2("transfer_v2.statement.anchor_base", &self.statement.anchor_base)?,
             current_anchor: decode_point_v2("transfer_v2.statement.current_anchor", &self.statement.current_anchor)?,
             invoice_ciphertext: decode_ciphertext_v2(&recipient_key, &self.statement.invoice_ciphertext)?,
             next_holder_ciphertext: decode_ciphertext_v2(&recipient_key, &self.statement.next_holder_ciphertext)?,
-            bob_key: recipient_key.clone(),
+            recipient_key: recipient_key.clone(),
         };
-        let proof = TransferProof {
+        let proof = TransferProof3072 {
             a_anchor: decode_point_v2("transfer_v2.proof.a_anchor", &self.proof.a_anchor)?,
             a_ciphertext: decode_ciphertext_v2(&recipient_key, &self.proof.a_ciphertext)?,
-            z: decode_response_v2(&self.proof.z),
+            z: decode_response_v2(&self.proof.z)?,
             tau: decode_nonce_v2(&recipient_key, &self.proof.tau)?,
         };
         Ok((statement, proof))
     }
 
-    pub fn verify(&self) -> Result<()> {
-        let (statement, proof) = self.to_core()?;
-        verify_transfer_with_profile(PaillierModulusProfile::ProtocolV2Production3072, &statement, &proof)
+    pub fn verify_with_keys<R>(&self, resolver: &R) -> Result<()>
+    where
+        R: CertifiedKeyResolver3072 + ?Sized,
+    {
+        let (statement, proof) = self.to_core_with_keys(resolver)?;
+        verify_transfer_3072(&statement, &proof)
             .map_err(|source| core_error("protocol v2 transfer verification", source))?;
         let (current_anchor, delta, next_anchor) = self.anchor_transition.to_core()?;
-        verify_anchor_transition(&current_anchor, &delta, &next_anchor)
+        verify_anchor_transition_3072(&current_anchor, &delta, &next_anchor)
             .map_err(|source| core_error("protocol v2 anchor transition verification", source))
     }
 
     fn append_canonical(&self, hasher: &mut CanonicalHasher) {
         self.binding.append_canonical(hasher);
-        hasher.u8(self.paillier_profile.core() as u8);
+        hasher.u8(self.paillier_profile.profile_id());
         self.statement.append_canonical(hasher);
         self.proof.append_canonical(hasher);
         self.anchor_transition.append_canonical(hasher);

@@ -21,7 +21,7 @@ pub(crate) fn point(seed: u8) -> PointHex {
 
 pub(crate) fn modulus(seed: u8) -> PaillierModulusBytesV2 {
     let mut bytes = vec![0_u8; PAILLIER_V2_MODULUS_BYTES];
-    bytes[0] = 0x40 | (seed & 0x3f);
+    bytes[0] = 0x80 | (seed & 0x7f);
     bytes[PAILLIER_V2_MODULUS_BYTES - 1] = seed | 1;
     PaillierModulusBytesV2::from_bytes("fixture modulus", bytes).expect("fixture modulus is exact width")
 }

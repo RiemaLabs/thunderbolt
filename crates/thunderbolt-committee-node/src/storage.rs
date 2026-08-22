@@ -8,13 +8,30 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
+use thunderbolt_ledger::AppHashV2;
 
 use crate::types::{MAX_INBOX_RECORD_BYTES, MAX_OUTBOX_BYTES};
-use crate::{AcknowledgementRecord, LedgerCursor, NodeConfig, NodeError, OutboxItem, OutboxStatus, Result};
+use crate::{
+    AcknowledgementRecord, FinalityRangeIntentV2, LedgerCursor, NodeConfig, NodeError, OutboxItem, OutboxStatus,
+    Result, StagedFinalityRangeCapabilityV2,
+};
 
 const APPLICATION_ID: i64 = 0x5442_434e; // TBCN
-const SCHEMA_VERSION: i64 = 3;
-type SettingsRow = (Vec<u8>, i64, Vec<u8>, i64, String, Vec<u8>, i64, i64);
+const SCHEMA_VERSION: i64 = 4;
+type SettingsRow = (
+    Vec<u8>,
+    i64,
+    Vec<u8>,
+    i64,
+    String,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    i64,
+    i64,
+);
+type StagedFinalityRow = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, i64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct DurableFileIdentity {
@@ -80,6 +97,7 @@ pub(crate) struct InboxWrite {
 pub(crate) struct ScanCommit<'a> {
     pub expected_cursor: Option<&'a LedgerCursor>,
     pub next_cursor: &'a LedgerCursor,
+    pub staged: &'a StagedFinalityRangeCapabilityV2,
     pub segment_digest: [u8; 32],
     pub expire_through_ms: u64,
     pub pending_writes: Vec<PendingInvoiceWrite>,
@@ -95,9 +113,11 @@ pub(crate) enum ScanCommitOutcome {
 pub(crate) struct SqliteQueue {
     path: PathBuf,
     file_identity: DurableFileIdentity,
+    file_identity_digest: [u8; 32],
     _database_file: File,
     _process_lock: ProcessFileLock,
     connection: Mutex<Connection>,
+    store_id: [u8; 32],
     max_inbox: u32,
     max_outbox: u32,
 }
@@ -247,6 +267,34 @@ fn configure_connection(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn random_store_id() -> Result<[u8; 32]> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).map_err(|_| NodeError::CorruptState)?;
+    if bytes == [0; 32] {
+        return Err(NodeError::CorruptState);
+    }
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn durable_file_identity_digest(path: &Path, identity: DurableFileIdentity) -> [u8; 32] {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let path_bytes = path.as_os_str().as_bytes();
+    let mut hasher = Sha256::new();
+    hasher.update(b"bitcoin-thunderbolt/committee-node/file-identity/v1");
+    hasher.update(u64::try_from(path_bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
+    hasher.update(path_bytes);
+    hasher.update(identity.device.to_be_bytes());
+    hasher.update(identity.inode.to_be_bytes());
+    hasher.finalize().into()
+}
+
+#[cfg(not(unix))]
+fn durable_file_identity_digest(_path: &Path, _identity: DurableFileIdentity) -> [u8; 32] {
+    [0; 32]
+}
+
 #[cfg(unix)]
 fn verify_durable_file(path: &Path, expected: DurableFileIdentity) -> Result<()> {
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
@@ -284,6 +332,7 @@ impl SqliteQueue {
         member_id: u32,
     ) -> Result<Self> {
         let (path, file_identity, database_file) = prepare_durable_path(path.as_ref())?;
+        let file_identity_digest = durable_file_identity_digest(&path, file_identity);
         let process_lock = ProcessFileLock::acquire(file_identity)?;
         let mut connection = Connection::open_with_flags(
             &path,
@@ -314,7 +363,8 @@ impl SqliteQueue {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if matches!(schema_version, 1 | 2) {
             let legacy_rows: i64 = transaction.query_row(
-                "SELECT (SELECT count(*) FROM inbox)+(SELECT count(*) FROM outbox)",
+                "SELECT (SELECT count(*) FROM inbox)+(SELECT count(*) FROM outbox)
+                       +(SELECT count(*) FROM finalized_cursor)",
                 [],
                 |row| row.get(0),
             )?;
@@ -332,6 +382,64 @@ impl SqliteQueue {
                 [config.finality_verifier_profile.as_bytes().as_slice()],
             )?;
         }
+        let new_store_id = random_store_id()?;
+        if schema_version == 3 {
+            let legacy_rows: i64 = transaction.query_row(
+                "SELECT (SELECT count(*) FROM finalized_cursor)
+                       +(SELECT count(*) FROM pending_invoices)
+                       +(SELECT count(*) FROM inbox)
+                       +(SELECT count(*) FROM outbox)",
+                [],
+                |row| row.get(0),
+            )?;
+            if legacy_rows != 0 {
+                return Err(NodeError::LegacyEvidenceRecords);
+            }
+        }
+        if matches!(schema_version, 1..=3) {
+            let has_coordinator: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('node_settings')
+                               WHERE name='finality_coordinator_id')",
+                [],
+                |row| row.get(0),
+            )?;
+            let has_store_id: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('node_settings') WHERE name='store_id')",
+                [],
+                |row| row.get(0),
+            )?;
+            let has_file_identity: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('node_settings') WHERE name='file_identity')",
+                [],
+                |row| row.get(0),
+            )?;
+            if !has_coordinator {
+                transaction.execute_batch(
+                    "ALTER TABLE node_settings ADD COLUMN finality_coordinator_id BLOB
+                       CHECK(finality_coordinator_id IS NULL OR length(finality_coordinator_id)=32);",
+                )?;
+            }
+            if !has_store_id {
+                transaction.execute_batch(
+                    "ALTER TABLE node_settings ADD COLUMN store_id BLOB
+                       CHECK(store_id IS NULL OR length(store_id)=32);",
+                )?;
+            }
+            if !has_file_identity {
+                transaction.execute_batch(
+                    "ALTER TABLE node_settings ADD COLUMN file_identity BLOB
+                       CHECK(file_identity IS NULL OR length(file_identity)=32);",
+                )?;
+            }
+            transaction.execute(
+                "UPDATE node_settings SET finality_coordinator_id=?1,store_id=?2,file_identity=?3 WHERE singleton=1",
+                params![
+                    config.finality_coordinator_id.as_bytes().as_slice(),
+                    new_store_id.as_slice(),
+                    file_identity_digest.as_slice()
+                ],
+            )?;
+        }
         if matches!(schema_version, 1 | 2) {
             transaction.execute_batch("DROP TABLE outbox; DROP TABLE inbox; DROP TABLE finalized_cursor;")?;
         }
@@ -344,6 +452,9 @@ impl SqliteQueue {
                  member_id INTEGER NOT NULL CHECK(member_id>0),
                  ledger_chain_id TEXT NOT NULL,
                  finality_verifier_profile BLOB NOT NULL CHECK(length(finality_verifier_profile)=32),
+                 finality_coordinator_id BLOB NOT NULL CHECK(length(finality_coordinator_id)=32),
+                 store_id BLOB NOT NULL CHECK(length(store_id)=32),
+                 file_identity BLOB NOT NULL CHECK(length(file_identity)=32),
                  max_inbox INTEGER NOT NULL CHECK(max_inbox>0),
                  max_outbox INTEGER NOT NULL CHECK(max_outbox>0)
              ) STRICT;
@@ -386,13 +497,22 @@ impl SqliteQueue {
                  start_cursor_digest BLOB NOT NULL CHECK(length(start_cursor_digest)=32),
                  end_cursor_digest BLOB NOT NULL CHECK(length(end_cursor_digest)=32),
                  segment_digest BLOB NOT NULL CHECK(length(segment_digest)=32)
+             ) STRICT;
+             CREATE TABLE IF NOT EXISTS staged_finality_range(
+                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                 store_id BLOB NOT NULL CHECK(length(store_id)=32),
+                 file_identity BLOB NOT NULL CHECK(length(file_identity)=32),
+                 stage_digest BLOB NOT NULL CHECK(length(stage_digest)=32),
+                 intent_digest BLOB NOT NULL CHECK(length(intent_digest)=32),
+                 intent_json BLOB NOT NULL CHECK(length(intent_json) BETWEEN 1 AND 24117248)
              ) STRICT;",
         )?;
         transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         let existing: Option<SettingsRow> = transaction
             .query_row(
-                "SELECT deployment_id,committee_epoch,descriptor_id,member_id,ledger_chain_id,finality_verifier_profile,max_inbox,max_outbox
+                "SELECT deployment_id,committee_epoch,descriptor_id,member_id,ledger_chain_id,finality_verifier_profile,
+                        finality_coordinator_id,store_id,file_identity,max_inbox,max_outbox
                  FROM node_settings WHERE singleton=1",
                 [],
                 |row| {
@@ -405,6 +525,9 @@ impl SqliteQueue {
                         row.get(5)?,
                         row.get(6)?,
                         row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
                     ))
                 },
             )
@@ -416,6 +539,7 @@ impl SqliteQueue {
             i64::from(member_id),
             config.ledger_chain_id.as_str(),
             config.finality_verifier_profile.as_bytes().as_slice(),
+            config.finality_coordinator_id.as_bytes().as_slice(),
             i64::from(config.max_inbox_rows),
             i64::from(config.max_outbox_rows),
         );
@@ -427,26 +551,50 @@ impl SqliteQueue {
                     && row.3 == expected.3
                     && row.4 == expected.4
                     && row.5.as_slice() == expected.5
-                    && row.6 == expected.6
-                    && row.7 == expected.7 => {}
+                    && row.6.as_slice() == expected.6
+                    && row.7.len() == 32
+                    && row.7.as_slice() != [0_u8; 32]
+                    && row.8.as_slice() == file_identity_digest
+                    && row.9 == expected.7
+                    && row.10 == expected.8 => {}
             Some(_) => return Err(NodeError::IdentityMismatch),
             None => {
                 transaction.execute(
-                    "INSERT INTO node_settings VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8)",
+                    "INSERT INTO node_settings VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
                     params![
-                        expected.0, expected.1, expected.2, expected.3, expected.4, expected.5, expected.6, expected.7
+                        expected.0,
+                        expected.1,
+                        expected.2,
+                        expected.3,
+                        expected.4,
+                        expected.5,
+                        expected.6,
+                        new_store_id.as_slice(),
+                        file_identity_digest.as_slice(),
+                        expected.7,
+                        expected.8
                     ],
                 )?;
             }
+        }
+        let store_id_bytes: Vec<u8> =
+            transaction.query_row("SELECT store_id FROM node_settings WHERE singleton=1", [], |row| {
+                row.get(0)
+            })?;
+        let store_id = <[u8; 32]>::try_from(store_id_bytes.as_slice()).map_err(|_| NodeError::CorruptState)?;
+        if store_id == [0; 32] {
+            return Err(NodeError::CorruptState);
         }
         transaction.commit()?;
         verify_durable_file(&path, file_identity)?;
         Ok(Self {
             path,
             file_identity,
+            file_identity_digest,
             _database_file: database_file,
             _process_lock: process_lock,
             connection: Mutex::new(connection),
+            store_id,
             max_inbox: config.max_inbox_rows,
             max_outbox: config.max_outbox_rows,
         })
@@ -454,6 +602,162 @@ impl SqliteQueue {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn staged_finality_range(&self) -> Result<Option<StagedFinalityRangeCapabilityV2>> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let row: Option<StagedFinalityRow> = transaction
+            .query_row(
+                "SELECT store_id,file_identity,stage_digest,intent_digest,length(intent_json)
+                 FROM staged_finality_range WHERE singleton=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .optional()?;
+        let Some((stored_store, stored_file, stage_digest, intent_digest, encoded_len)) = row else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+        if stored_store.as_slice() != self.store_id
+            || stored_file.as_slice() != self.file_identity_digest
+            || stage_digest.len() != 32
+            || intent_digest.len() != 32
+            || encoded_len <= 0
+            || usize::try_from(encoded_len).map_err(|_| NodeError::CorruptState)?
+                > crate::types::MAX_FINALITY_INTENT_BYTES
+        {
+            return Err(NodeError::CorruptState);
+        }
+        let bytes: Vec<u8> = transaction.query_row(
+            "SELECT intent_json FROM staged_finality_range WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?;
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        if bytes.len() != usize::try_from(encoded_len).map_err(|_| NodeError::CorruptState)?
+            || intent_digest.as_slice() != digest
+        {
+            return Err(NodeError::CorruptState);
+        }
+        let expected_stage = finality_stage_digest(self.store_id, self.file_identity_digest, &bytes);
+        if stage_digest.as_slice() != expected_stage {
+            return Err(NodeError::CorruptState);
+        }
+        let intent = FinalityRangeIntentV2::from_canonical_bytes(&bytes).map_err(|_| NodeError::CorruptState)?;
+        let settings: (String, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) = transaction.query_row(
+            "SELECT ledger_chain_id,finality_verifier_profile,finality_coordinator_id,store_id,file_identity
+             FROM node_settings WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        )?;
+        let current = transaction
+            .query_row(
+                "SELECT next_height,expected_previous_app_hash,processed_refresh_count,last_refresh_entry_hash,
+                        finality_digest,length(finality_json),finality_json
+                 FROM finalized_cursor WHERE singleton=1",
+                [],
+                cursor_row,
+            )
+            .optional()?;
+        if let Some(cursor) = current.as_ref() {
+            validate_stored_cursor(cursor)?;
+        }
+        let expected_height = current.as_ref().map_or(1, |cursor| cursor.next_height);
+        let expected_hash = current
+            .as_ref()
+            .map_or_else(AppHashV2::zero, |cursor| cursor.expected_previous_app_hash.clone());
+        if settings.0 != intent.ledger_chain_id().as_str()
+            || settings.1.as_slice() != intent.verifier_profile().as_bytes()
+            || settings.2.as_slice() != intent.coordinator_id().as_bytes()
+            || settings.3.as_slice() != self.store_id
+            || settings.4.as_slice() != self.file_identity_digest
+            || intent.start_height() != expected_height
+            || intent.expected_previous_app_hash() != &expected_hash
+        {
+            return Err(NodeError::CorruptState);
+        }
+        transaction.commit()?;
+        verify_durable_file(&self.path, self.file_identity)?;
+        Ok(Some(StagedFinalityRangeCapabilityV2::from_store(
+            self.store_id,
+            self.file_identity_digest,
+            expected_stage,
+            intent,
+        )?))
+    }
+
+    pub fn stage_finality_range(&self, intent: &FinalityRangeIntentV2) -> Result<StagedFinalityRangeCapabilityV2> {
+        let bytes = intent.canonical_bytes()?;
+        let intent_digest: [u8; 32] = Sha256::digest(&bytes).into();
+        let stage_digest = finality_stage_digest(self.store_id, self.file_identity_digest, &bytes);
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let settings: (String, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) = transaction.query_row(
+            "SELECT ledger_chain_id,finality_verifier_profile,finality_coordinator_id,store_id,file_identity
+             FROM node_settings WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        )?;
+        if settings.0 != intent.ledger_chain_id().as_str()
+            || settings.1.as_slice() != intent.verifier_profile().as_bytes()
+            || settings.2.as_slice() != intent.coordinator_id().as_bytes()
+            || settings.3.as_slice() != self.store_id
+            || settings.4.as_slice() != self.file_identity_digest
+        {
+            return Err(NodeError::IdentityMismatch);
+        }
+        let current = transaction
+            .query_row(
+                "SELECT next_height,expected_previous_app_hash,processed_refresh_count,last_refresh_entry_hash,
+                        finality_digest,length(finality_json),finality_json
+                 FROM finalized_cursor WHERE singleton=1",
+                [],
+                cursor_row,
+            )
+            .optional()?;
+        if let Some(cursor) = current.as_ref() {
+            validate_stored_cursor(cursor)?;
+        }
+        let expected_height = current.as_ref().map_or(1, |cursor| cursor.next_height);
+        let expected_hash = current
+            .as_ref()
+            .map_or_else(AppHashV2::zero, |cursor| cursor.expected_previous_app_hash.clone());
+        if intent.start_height() != expected_height || intent.expected_previous_app_hash() != &expected_hash {
+            return Err(NodeError::CursorConflict);
+        }
+        let existing: Option<(Vec<u8>, Vec<u8>)> = transaction
+            .query_row(
+                "SELECT stage_digest,intent_digest FROM staged_finality_range WHERE singleton=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        match existing {
+            Some((stored_stage, stored_intent))
+                if stored_stage.as_slice() == stage_digest && stored_intent.as_slice() == intent_digest => {}
+            Some(_) => return Err(NodeError::CursorConflict),
+            None => {
+                transaction.execute(
+                    "INSERT INTO staged_finality_range(singleton,store_id,file_identity,stage_digest,intent_digest,intent_json)
+                     VALUES(1,?1,?2,?3,?4,?5)",
+                    params![
+                        self.store_id.as_slice(),
+                        self.file_identity_digest.as_slice(),
+                        stage_digest.as_slice(),
+                        intent_digest.as_slice(),
+                        bytes
+                    ],
+                )?;
+            }
+        }
+        transaction.commit()?;
+        drop(connection);
+        let staged = self.staged_finality_range()?.ok_or(NodeError::CorruptState)?;
+        if staged.stage_digest() != &stage_digest || staged.intent() != intent {
+            return Err(NodeError::CorruptState);
+        }
+        Ok(staged)
     }
 
     pub fn pending_invoice(&self, entry_hash: [u8; 32]) -> Result<Option<StoredPendingInvoice>> {
@@ -545,7 +849,11 @@ impl SqliteQueue {
     }
 
     pub fn commit_scan(&self, commit: ScanCommit<'_>) -> Result<ScanCommitOutcome> {
-        if commit.segment_digest == [0; 32] {
+        if commit.segment_digest == [0; 32]
+            || commit.staged.store_id != self.store_id
+            || commit.staged.file_identity != self.file_identity_digest
+            || commit.staged.stage_digest == [0; 32]
+        {
             return Err(NodeError::InvalidLedgerArtifact);
         }
         for record in commit
@@ -571,9 +879,40 @@ impl SqliteQueue {
             validate_stored_cursor(cursor)?;
         }
         validate_stored_cursor(commit.next_cursor)?;
+        let staged_row: Option<(Vec<u8>, Vec<u8>, Vec<u8>)> = transaction
+            .query_row(
+                "SELECT store_id,file_identity,stage_digest FROM staged_finality_range WHERE singleton=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        if staged_row
+            .as_ref()
+            .is_some_and(|row| row.0.as_slice() != self.store_id || row.1.as_slice() != self.file_identity_digest)
+        {
+            return Err(NodeError::CorruptState);
+        }
+        let staged_digest = staged_row.as_ref().map(|row| &row.2);
+        let staged_intent = commit.staged.intent();
+        let expected_start_height = commit.expected_cursor.map_or(1, |cursor| cursor.next_height);
+        let expected_start_hash = commit
+            .expected_cursor
+            .map_or_else(AppHashV2::zero, |cursor| cursor.expected_previous_app_hash.clone());
+        if staged_intent.start_height() != expected_start_height
+            || staged_intent.expected_previous_app_hash() != &expected_start_hash
+            || staged_intent.next_height() != commit.next_cursor.next_height
+            || staged_intent.next_expected_previous_app_hash() != &commit.next_cursor.expected_previous_app_hash
+            || commit.next_cursor.last_finality.block_height() != staged_intent.next_height().saturating_sub(1)
+            || commit.next_cursor.last_finality.app_hash() != staged_intent.next_expected_previous_app_hash()
+        {
+            return Err(NodeError::CursorConflict);
+        }
         let start_digest = cursor_digest(commit.expected_cursor);
         let end_digest = cursor_digest(Some(commit.next_cursor));
         if current.as_ref() == Some(commit.next_cursor) {
+            if staged_digest.is_some() {
+                return Err(NodeError::CorruptState);
+            }
             let replay: Option<(Vec<u8>, Vec<u8>, Vec<u8>)> = transaction
                 .query_row(
                     "SELECT start_cursor_digest,end_cursor_digest,segment_digest FROM last_scan_commit WHERE singleton=1",
@@ -587,11 +926,15 @@ impl SqliteQueue {
                     && row.2.as_slice() == commit.segment_digest
             }) {
                 transaction.commit()?;
+                verify_durable_file(&self.path, self.file_identity)?;
                 return Ok(ScanCommitOutcome::Replayed);
             }
             return Err(NodeError::CursorConflict);
         }
         if current.as_ref() != commit.expected_cursor {
+            return Err(NodeError::CursorConflict);
+        }
+        if staged_digest.map(Vec::as_slice) != Some(commit.staged.stage_digest.as_slice()) {
             return Err(NodeError::CursorConflict);
         }
 
@@ -672,6 +1015,18 @@ impl SqliteQueue {
             }
         }
         let finality_json = serde_json::to_vec(&commit.next_cursor.last_finality)?;
+        if transaction.execute(
+            "DELETE FROM staged_finality_range
+             WHERE singleton=1 AND store_id=?1 AND file_identity=?2 AND stage_digest=?3",
+            params![
+                self.store_id.as_slice(),
+                self.file_identity_digest.as_slice(),
+                commit.staged.stage_digest.as_slice()
+            ],
+        )? != 1
+        {
+            return Err(NodeError::CursorConflict);
+        }
         transaction.execute(
             "INSERT INTO finalized_cursor VALUES(1,?1,?2,?3,?4,?5,?6)
              ON CONFLICT(singleton) DO UPDATE SET next_height=excluded.next_height,
@@ -713,6 +1068,7 @@ impl SqliteQueue {
                 Err(error) => Err(NodeError::Sqlite(error)),
             };
         }
+        verify_durable_file(&self.path, self.file_identity)?;
         Ok(ScanCommitOutcome::Applied { inbox_added })
     }
 
@@ -918,7 +1274,13 @@ fn scan_commit_matches(
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
+    let staged_exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM staged_finality_range WHERE singleton=1)",
+        [],
+        |row| row.get(0),
+    )?;
     Ok(cursor.as_ref() == Some(expected_cursor)
+        && !staged_exists
         && receipt.is_some_and(|row| {
             row.0.as_slice() == start_digest && row.1.as_slice() == end_digest && row.2.as_slice() == segment_digest
         }))
@@ -972,6 +1334,7 @@ fn cursor_digest(cursor: Option<&LedgerCursor>) -> [u8; 32] {
             hasher.update(cursor.processed_refresh_count.to_be_bytes());
             hasher.update(cursor.last_refresh_entry_hash.as_bytes());
             hasher.update(cursor.last_finality.verifier_profile().as_bytes());
+            hasher.update(cursor.last_finality.coordinator_id().as_bytes());
             hasher.update(cursor.last_finality.ledger_chain_id().as_bytes());
             hasher.update(cursor.last_finality.block_height().to_be_bytes());
             hasher.update(cursor.last_finality.app_hash().as_bytes());
@@ -981,6 +1344,16 @@ fn cursor_digest(cursor: Option<&LedgerCursor>) -> [u8; 32] {
         }
         None => hasher.update([0]),
     }
+    hasher.finalize().into()
+}
+
+fn finality_stage_digest(store_id: [u8; 32], file_identity: [u8; 32], intent_bytes: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"bitcoin-thunderbolt/committee-node/staged-finality/v1");
+    hasher.update(store_id);
+    hasher.update(file_identity);
+    hasher.update(u64::try_from(intent_bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
+    hasher.update(intent_bytes);
     hasher.finalize().into()
 }
 

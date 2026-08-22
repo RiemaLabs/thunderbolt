@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::error::Error;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 
 use bitcoin::Network;
@@ -41,6 +41,7 @@ fn config() -> Result<NodeConfig> {
     NodeConfig::new(
         LedgerChainIdV2::new("committee-node-regtest").map_err(|_| NodeError::InvalidLedgerArtifact)?,
         FinalityVerifierProfileId::new([0x81; 32])?,
+        FinalityCoordinatorId::new([0x91; 32])?,
         32,
         32,
         8,
@@ -65,25 +66,6 @@ fn open_queue_path(path: impl AsRef<std::path::Path>) -> Result<SqliteQueue> {
     SqliteQueue::open(path, &config()?, b"deployment", 7, &[0x41; 32], 1)
 }
 
-fn cursor(next_height: u64, previous: u8, refresh_count: u64, last_refresh: EntryHashV2) -> Result<LedgerCursor> {
-    let app_hash = AppHashV2::from_bytes([previous; 32]).map_err(|_| NodeError::InvalidLedgerArtifact)?;
-    let last_finality = DurableBlockFinalityCapability::new(
-        FinalityVerifierProfileId::new([0x81; 32])?,
-        LedgerChainIdV2::new("committee-node-regtest").map_err(|_| NodeError::InvalidLedgerArtifact)?,
-        next_height.saturating_sub(1),
-        app_hash.clone(),
-        FinalityDigest::new([previous.wrapping_add(1); 32]),
-        vec![0x80; 64],
-    )?;
-    Ok(LedgerCursor {
-        next_height,
-        expected_previous_app_hash: app_hash,
-        processed_refresh_count: refresh_count,
-        last_refresh_entry_hash: last_refresh,
-        last_finality,
-    })
-}
-
 #[test]
 fn network_and_sqlite_identity_fail_closed() -> std::result::Result<(), Box<dyn Error>> {
     assert!(NodeConfig::validate_network(Network::Regtest).is_ok());
@@ -99,6 +81,7 @@ fn network_and_sqlite_identity_fail_closed() -> std::result::Result<(), Box<dyn 
     let wrong_profile = NodeConfig::new(
         LedgerChainIdV2::new("committee-node-regtest")?,
         FinalityVerifierProfileId::new([0x82; 32])?,
+        FinalityCoordinatorId::new([0x91; 32])?,
         32,
         32,
         8,
@@ -121,8 +104,8 @@ fn durable_sqlite_path_rejects_ephemeral_alias_and_unsafe_modes_and_restarts() -
     let directory = TempDir::new()?;
     let path = temp_path(&directory, "durable.sqlite")?;
     let queue = open_queue_path(&path)?;
-    let next = cursor(2, 0x44, 1, EntryHashV2::from_bytes([0x45; 32])?)?;
-    queue.commit_scan(dummy_scan(None, &next, [0x42; 32], b"durable-record".to_vec()))?;
+    let (staged, next) = dummy_stage(&queue, 1, EntryHashV2::from_bytes([0x45; 32])?)?;
+    queue.commit_scan(dummy_scan(None, &next, &staged, [0x42; 32], b"durable-record".to_vec()))?;
     drop(queue);
     let reopened = open_queue_path(&path)?;
     assert_eq!(reopened.cursor()?, Some(next));
@@ -140,8 +123,61 @@ fn durable_sqlite_path_rejects_ephemeral_alias_and_unsafe_modes_and_restarts() -
     Ok(())
 }
 
+#[cfg(unix)]
 #[test]
-fn legacy_rows_reject_and_empty_v2_migrates() -> std::result::Result<(), Box<dyn Error>> {
+fn staged_recovery_handoff_rejects_valid_replacement_and_copied_database() -> std::result::Result<(), Box<dyn Error>> {
+    let directory = TempDir::new()?;
+    let path = temp_path(&directory, "staged.sqlite")?;
+    let runtime = test_runtime()?;
+    let descriptor = runtime.descriptor();
+    let deployment_id = descriptor.deployment_id().to_vec();
+    let epoch = descriptor.epoch().get();
+    let descriptor_id = *descriptor.id().as_bytes();
+    let member_id = runtime.member_id().get();
+    let queue = SqliteQueue::open(&path, &config()?, &deployment_id, epoch, &descriptor_id, member_id)?;
+    let first = PendingBlockV2::new(
+        LedgerChainIdV2::new("committee-node-regtest")?,
+        1,
+        10,
+        AppHashV2::zero(),
+    )?
+    .execute()?;
+    let second = PendingBlockV2::new(
+        LedgerChainIdV2::new("committee-node-regtest")?,
+        1,
+        11,
+        AppHashV2::zero(),
+    )?
+    .execute()?;
+    queue.stage_finality_range(&segment(vec![first])?)?;
+    drop(queue);
+    let original = CommitteeNode::inspect_staged_finality_recovery(&path, &runtime, &config()?)?
+        .ok_or("original staged recovery")?;
+
+    let queue = SqliteQueue::open(&path, &config()?, &deployment_id, epoch, &descriptor_id, member_id)?;
+    rusqlite::Connection::open(&path)?.execute("DELETE FROM staged_finality_range", [])?;
+    queue.stage_finality_range(&segment(vec![second])?)?;
+    drop(queue);
+    let replacement = CommitteeNode::inspect_staged_finality_recovery(&path, &runtime, &config()?)?
+        .ok_or("replacement staged recovery")?;
+    assert_ne!(replacement, original);
+    assert!(matches!(
+        CommitteeNode::open_with_staged_recovery(&path, runtime, config()?, &original),
+        Err(NodeError::CursorConflict)
+    ));
+
+    rusqlite::Connection::open(&path)?.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    let copied = temp_path(&directory, "copied.sqlite")?;
+    std::fs::copy(&path, &copied)?;
+    assert!(matches!(
+        SqliteQueue::open(&copied, &config()?, &deployment_id, epoch, &descriptor_id, member_id),
+        Err(NodeError::IdentityMismatch)
+    ));
+    Ok(())
+}
+
+#[test]
+fn legacy_rows_reject_and_empty_v2_migrates_to_staged_schema() -> std::result::Result<(), Box<dyn Error>> {
     let occupied = TempDir::new()?;
     let path = temp_path(&occupied, "committee-node.sqlite")?;
     drop(open_queue(&occupied)?);
@@ -163,6 +199,26 @@ fn legacy_rows_reject_and_empty_v2_migrates() -> std::result::Result<(), Box<dyn
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
     assert_eq!(version, 2);
 
+    let advanced = TempDir::new()?;
+    let advanced_path = temp_path(&advanced, "committee-node.sqlite")?;
+    let advanced_queue = open_queue(&advanced)?;
+    let (advanced_stage, advanced_cursor) = dummy_stage(&advanced_queue, 0, EntryHashV2::zero())?;
+    advanced_queue.commit_scan(ScanCommit {
+        expected_cursor: None,
+        next_cursor: &advanced_cursor,
+        staged: &advanced_stage,
+        segment_digest: [0x7a; 32],
+        expire_through_ms: 10,
+        pending_writes: Vec::new(),
+        pending_removals: Vec::new(),
+        inbox_writes: Vec::new(),
+    })?;
+    drop(advanced_queue);
+    let connection = rusqlite::Connection::open(&advanced_path)?;
+    connection.pragma_update(None, "user_version", 2)?;
+    drop(connection);
+    assert!(matches!(open_queue(&advanced), Err(NodeError::LegacyEvidenceRecords)));
+
     let empty = TempDir::new()?;
     let empty_path = temp_path(&empty, "committee-node.sqlite")?;
     drop(open_queue(&empty)?);
@@ -172,19 +228,21 @@ fn legacy_rows_reject_and_empty_v2_migrates() -> std::result::Result<(), Box<dyn
     drop(open_queue(&empty)?);
     let connection = rusqlite::Connection::open(&empty_path)?;
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
     Ok(())
 }
 
 fn dummy_scan<'a>(
     expected: Option<&'a LedgerCursor>,
     next: &'a LedgerCursor,
+    staged: &'a StagedFinalityRangeCapabilityV2,
     segment_digest: [u8; 32],
     record: Vec<u8>,
 ) -> ScanCommit<'a> {
     ScanCommit {
         expected_cursor: expected,
         next_cursor: next,
+        staged,
         segment_digest,
         expire_through_ms: 10,
         pending_writes: vec![PendingInvoiceWrite {
@@ -202,21 +260,44 @@ fn dummy_scan<'a>(
     }
 }
 
+fn dummy_stage(
+    queue: &SqliteQueue,
+    refresh_count: u64,
+    last_refresh: EntryHashV2,
+) -> std::result::Result<(StagedFinalityRangeCapabilityV2, LedgerCursor), Box<dyn Error>> {
+    let block = PendingBlockV2::new(
+        LedgerChainIdV2::new("committee-node-regtest")?,
+        1,
+        10,
+        AppHashV2::zero(),
+    )?
+    .execute()?;
+    let staged = queue.stage_finality_range(&segment(vec![block.clone()])?)?;
+    let next = LedgerCursor {
+        next_height: 2,
+        expected_previous_app_hash: block.app_hash().clone(),
+        processed_refresh_count: refresh_count,
+        last_refresh_entry_hash: last_refresh,
+        last_finality: block_capability(AcceptFinality.profile_id(), &block)?,
+    };
+    Ok((staged, next))
+}
+
 #[test]
 fn scan_commit_is_atomic_bounded_and_idempotent() -> std::result::Result<(), Box<dyn Error>> {
     let directory = TempDir::new()?;
     let queue = open_queue(&directory)?;
-    let next = cursor(2, 0x44, 1, EntryHashV2::from_bytes([0x45; 32])?)?;
+    let (staged, next) = dummy_stage(&queue, 1, EntryHashV2::from_bytes([0x45; 32])?)?;
     assert!(matches!(
-        queue.commit_scan(dummy_scan(None, &next, [0x51; 32], b"compact-record".to_vec()))?,
+        queue.commit_scan(dummy_scan(None, &next, &staged, [0x51; 32], b"compact-record".to_vec()))?,
         ScanCommitOutcome::Applied { inbox_added: 1 }
     ));
     assert!(matches!(
-        queue.commit_scan(dummy_scan(None, &next, [0x51; 32], b"compact-record".to_vec()))?,
+        queue.commit_scan(dummy_scan(None, &next, &staged, [0x51; 32], b"compact-record".to_vec()))?,
         ScanCommitOutcome::Replayed
     ));
     assert!(matches!(
-        queue.commit_scan(dummy_scan(None, &next, [0x52; 32], b"other".to_vec())),
+        queue.commit_scan(dummy_scan(None, &next, &staged, [0x52; 32], b"other".to_vec())),
         Err(NodeError::CursorConflict)
     ));
     assert_eq!(queue.cursor()?, Some(next));
@@ -228,14 +309,10 @@ fn scan_commit_is_atomic_bounded_and_idempotent() -> std::result::Result<(), Box
 
     let fresh = TempDir::new()?;
     let fresh_queue = open_queue(&fresh)?;
+    let (fresh_staged, fresh_next) = dummy_stage(&fresh_queue, 0, EntryHashV2::zero())?;
     let huge = vec![0_u8; MAX_INBOX_RECORD_BYTES + 1];
     assert!(matches!(
-        fresh_queue.commit_scan(dummy_scan(
-            None,
-            &cursor(2, 0x44, 0, EntryHashV2::zero())?,
-            [0x53; 32],
-            huge
-        )),
+        fresh_queue.commit_scan(dummy_scan(None, &fresh_next, &fresh_staged, [0x53; 32], huge)),
         Err(NodeError::InvalidLedgerArtifact)
     ));
     Ok(())
@@ -259,9 +336,9 @@ fn inbox_digest_tamper_property_is_fail_closed() -> std::result::Result<(), Box<
     let directory = TempDir::new()?;
     let path = temp_path(&directory, "committee-node.sqlite")?;
     let queue = open_queue(&directory)?;
-    let next = cursor(2, 0x44, 1, EntryHashV2::from_bytes([0x45; 32])?)?;
+    let (staged, next) = dummy_stage(&queue, 1, EntryHashV2::from_bytes([0x45; 32])?)?;
     let original = b"canonical-record-for-property".to_vec();
-    queue.commit_scan(dummy_scan(None, &next, [0x71; 32], original.clone()))?;
+    queue.commit_scan(dummy_scan(None, &next, &staged, [0x71; 32], original.clone()))?;
     let connection = rusqlite::Connection::open(path)?;
     let mut runner = proptest::test_runner::TestRunner::new(proptest::test_runner::Config::with_cases(96));
     runner.run(&(0..original.len(), 1_u8..=u8::MAX), |(index, mask)| {
@@ -288,92 +365,158 @@ impl std::fmt::Display for TestError {
 }
 impl Error for TestError {}
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-struct TestReceipt {
-    marker: String,
-}
-
 struct AcceptFinality;
-impl LedgerFinalityVerifier<TestReceipt> for AcceptFinality {
+impl LedgerFinalityVerifier for AcceptFinality {
     type Error = TestError;
     fn profile_id(&self) -> FinalityVerifierProfileId {
         FinalityVerifierProfileId::new([0x81; 32]).unwrap_or(FinalityVerifierProfileId::DISABLED)
     }
-    fn verify_finalized_block(
-        &self,
-        finalized: &FinalizedExecutedBlockV2<TestReceipt>,
-    ) -> std::result::Result<DurableBlockFinalityCapability, Self::Error> {
-        block_capability(self.profile_id(), &finalized.block).map_err(|_| TestError)
+    fn coordinator_id(&self) -> FinalityCoordinatorId {
+        FinalityCoordinatorId::new([0x91; 32]).unwrap_or(FinalityCoordinatorId::DISABLED)
     }
-    fn verify_entry_occurrence(
-        &self,
-        occurrence: &FinalizedEntryOccurrenceV2<TestReceipt>,
-    ) -> std::result::Result<VerifiedEntryOccurrenceV2, Self::Error> {
-        Ok(verified_occurrence(self.profile_id(), occurrence))
+    fn finalize_staged_range<'a>(
+        &'a mut self,
+        staged: &'a StagedFinalityRangeCapabilityV2,
+    ) -> LedgerFuture<'a, FinalizedRangeCapabilityV2, Self::Error> {
+        let result = finalized_range(
+            staged,
+            self.profile_id(),
+            self.coordinator_id(),
+            &BTreeMap::new(),
+            OccurrenceMode::Exact,
+            false,
+        );
+        Box::pin(async move { result })
     }
-    fn verify_durable_capability(
-        &self,
-        capability: &DurableBlockFinalityCapability,
-    ) -> std::result::Result<(), Self::Error> {
+    fn verify_durable_capability<'a>(
+        &'a self,
+        capability: &'a DurableBlockFinalityCapability,
+    ) -> LedgerFuture<'a, (), Self::Error> {
         let expected = block_attestation(capability.block_height(), capability.app_hash());
-        (capability.attestation() == expected
+        let result = (capability.attestation() == expected
             && capability.verifier_digest() == FinalityDigest::new(Sha256::digest(&expected).into()))
         .then_some(())
-        .ok_or(TestError)
+        .ok_or(TestError);
+        Box::pin(async move { result })
     }
 }
 
 struct WrongProfileFinality;
-impl LedgerFinalityVerifier<TestReceipt> for WrongProfileFinality {
+impl LedgerFinalityVerifier for WrongProfileFinality {
     type Error = TestError;
     fn profile_id(&self) -> FinalityVerifierProfileId {
         FinalityVerifierProfileId::new([0x82; 32]).unwrap_or(FinalityVerifierProfileId::DISABLED)
     }
-    fn verify_finalized_block(
-        &self,
-        finalized: &FinalizedExecutedBlockV2<TestReceipt>,
-    ) -> std::result::Result<DurableBlockFinalityCapability, Self::Error> {
-        block_capability(self.profile_id(), &finalized.block).map_err(|_| TestError)
+    fn coordinator_id(&self) -> FinalityCoordinatorId {
+        FinalityCoordinatorId::new([0x91; 32]).unwrap_or(FinalityCoordinatorId::DISABLED)
     }
-    fn verify_entry_occurrence(
-        &self,
-        occurrence: &FinalizedEntryOccurrenceV2<TestReceipt>,
-    ) -> std::result::Result<VerifiedEntryOccurrenceV2, Self::Error> {
-        Ok(verified_occurrence(self.profile_id(), occurrence))
+    fn finalize_staged_range<'a>(
+        &'a mut self,
+        staged: &'a StagedFinalityRangeCapabilityV2,
+    ) -> LedgerFuture<'a, FinalizedRangeCapabilityV2, Self::Error> {
+        let result = finalized_range(
+            staged,
+            self.profile_id(),
+            self.coordinator_id(),
+            &BTreeMap::new(),
+            OccurrenceMode::Exact,
+            false,
+        );
+        Box::pin(async move { result })
     }
-    fn verify_durable_capability(&self, _: &DurableBlockFinalityCapability) -> std::result::Result<(), Self::Error> {
-        Err(TestError)
+    fn verify_durable_capability<'a>(
+        &'a self,
+        _: &'a DurableBlockFinalityCapability,
+    ) -> LedgerFuture<'a, (), Self::Error> {
+        Box::pin(async { Err(TestError) })
     }
 }
 
 struct WrongBlockFinality;
-impl LedgerFinalityVerifier<TestReceipt> for WrongBlockFinality {
+impl LedgerFinalityVerifier for WrongBlockFinality {
     type Error = TestError;
     fn profile_id(&self) -> FinalityVerifierProfileId {
         FinalityVerifierProfileId::new([0x81; 32]).unwrap_or(FinalityVerifierProfileId::DISABLED)
     }
-    fn verify_finalized_block(
-        &self,
-        finalized: &FinalizedExecutedBlockV2<TestReceipt>,
-    ) -> std::result::Result<DurableBlockFinalityCapability, Self::Error> {
-        DurableBlockFinalityCapability::new(
+    fn coordinator_id(&self) -> FinalityCoordinatorId {
+        FinalityCoordinatorId::new([0x91; 32]).unwrap_or(FinalityCoordinatorId::DISABLED)
+    }
+    fn finalize_staged_range<'a>(
+        &'a mut self,
+        staged: &'a StagedFinalityRangeCapabilityV2,
+    ) -> LedgerFuture<'a, FinalizedRangeCapabilityV2, Self::Error> {
+        let result = finalized_range(
+            staged,
             self.profile_id(),
-            finalized.block.ledger_chain_id().clone(),
-            finalized.block.height(),
-            AppHashV2::from_bytes([0xee; 32]).map_err(|_| TestError)?,
-            FinalityDigest::new([0xef; 32]),
-            b"wrong-block".to_vec(),
-        )
-        .map_err(|_| TestError)
+            self.coordinator_id(),
+            &BTreeMap::new(),
+            OccurrenceMode::Exact,
+            true,
+        );
+        Box::pin(async move { result })
     }
-    fn verify_entry_occurrence(
-        &self,
-        occurrence: &FinalizedEntryOccurrenceV2<TestReceipt>,
-    ) -> std::result::Result<VerifiedEntryOccurrenceV2, Self::Error> {
-        Ok(verified_occurrence(self.profile_id(), occurrence))
+    fn verify_durable_capability<'a>(
+        &'a self,
+        _: &'a DurableBlockFinalityCapability,
+    ) -> LedgerFuture<'a, (), Self::Error> {
+        Box::pin(async { Err(TestError) })
     }
-    fn verify_durable_capability(&self, _: &DurableBlockFinalityCapability) -> std::result::Result<(), Self::Error> {
-        Err(TestError)
+}
+
+struct BlockingFinality {
+    block_next: AtomicBool,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl BlockingFinality {
+    fn new() -> Self {
+        Self {
+            block_next: AtomicBool::new(true),
+            entered: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+}
+
+impl LedgerFinalityVerifier for BlockingFinality {
+    type Error = TestError;
+
+    fn profile_id(&self) -> FinalityVerifierProfileId {
+        AcceptFinality.profile_id()
+    }
+    fn coordinator_id(&self) -> FinalityCoordinatorId {
+        AcceptFinality.coordinator_id()
+    }
+    fn finalize_staged_range<'a>(
+        &'a mut self,
+        staged: &'a StagedFinalityRangeCapabilityV2,
+    ) -> LedgerFuture<'a, FinalizedRangeCapabilityV2, Self::Error> {
+        let should_block = self.block_next.swap(false, Ordering::SeqCst);
+        let entered = Arc::clone(&self.entered);
+        let release = Arc::clone(&self.release);
+        let result = finalized_range(
+            staged,
+            self.profile_id(),
+            self.coordinator_id(),
+            &BTreeMap::new(),
+            OccurrenceMode::Exact,
+            false,
+        );
+        Box::pin(async move {
+            if should_block {
+                entered.notify_one();
+                release.notified().await;
+            }
+            result
+        })
+    }
+
+    fn verify_durable_capability<'a>(
+        &'a self,
+        capability: &'a DurableBlockFinalityCapability,
+    ) -> LedgerFuture<'a, (), Self::Error> {
+        AcceptFinality.verify_durable_capability(capability)
     }
 }
 
@@ -381,34 +524,169 @@ fn block_attestation(_height: u64, _app_hash: &AppHashV2) -> Vec<u8> {
     vec![0x80; 64]
 }
 
-fn verified_occurrence(
-    profile: FinalityVerifierProfileId,
-    occurrence: &FinalizedEntryOccurrenceV2<TestReceipt>,
-) -> VerifiedEntryOccurrenceV2 {
-    VerifiedEntryOccurrenceV2 {
-        kind: occurrence.kind,
-        ledger_chain_id: occurrence.ledger_chain_id.clone(),
-        channel_context_id: occurrence.channel_context_id.clone(),
-        entry_hash: occurrence.entry_hash.clone(),
-        semantic_digest: occurrence.semantic_digest,
-        observed_height: occurrence.observed_height,
-        observed_index: occurrence.observed_index,
-        first_height: occurrence.first_height,
-        first_index: occurrence.first_index,
-        through_height: occurrence.through_height,
-        expected_through_app_hash: occurrence.expected_through_app_hash.clone(),
-        verifier_profile: profile,
-        verifier_digest: FinalityDigest::new([0xa5; 32]),
+#[derive(Clone, Copy)]
+enum OccurrenceMode {
+    Exact,
+    OmitFirst,
+    FlipFirst,
+}
+
+struct ConfiguredFinality {
+    first_locations: BTreeMap<[u8; 32], (u64, u32)>,
+    mode: OccurrenceMode,
+}
+
+impl ConfiguredFinality {
+    fn new(first_locations: BTreeMap<[u8; 32], (u64, u32)>) -> Self {
+        Self {
+            first_locations,
+            mode: OccurrenceMode::Exact,
+        }
     }
+
+    fn with_mode(mode: OccurrenceMode) -> Self {
+        Self {
+            first_locations: BTreeMap::new(),
+            mode,
+        }
+    }
+}
+
+impl LedgerFinalityVerifier for ConfiguredFinality {
+    type Error = TestError;
+
+    fn profile_id(&self) -> FinalityVerifierProfileId {
+        AcceptFinality.profile_id()
+    }
+
+    fn coordinator_id(&self) -> FinalityCoordinatorId {
+        AcceptFinality.coordinator_id()
+    }
+
+    fn finalize_staged_range<'a>(
+        &'a mut self,
+        staged: &'a StagedFinalityRangeCapabilityV2,
+    ) -> LedgerFuture<'a, FinalizedRangeCapabilityV2, Self::Error> {
+        let result = finalized_range(
+            staged,
+            self.profile_id(),
+            self.coordinator_id(),
+            &self.first_locations,
+            self.mode,
+            false,
+        );
+        Box::pin(async move { result })
+    }
+
+    fn verify_durable_capability<'a>(
+        &'a self,
+        capability: &'a DurableBlockFinalityCapability,
+    ) -> LedgerFuture<'a, (), Self::Error> {
+        AcceptFinality.verify_durable_capability(capability)
+    }
+}
+
+fn finalized_range(
+    staged: &StagedFinalityRangeCapabilityV2,
+    profile: FinalityVerifierProfileId,
+    coordinator: FinalityCoordinatorId,
+    first_locations: &BTreeMap<[u8; 32], (u64, u32)>,
+    occurrence_mode: OccurrenceMode,
+    wrong_block: bool,
+) -> std::result::Result<FinalizedRangeCapabilityV2, TestError> {
+    let intent = staged.intent();
+    let mut blocks = Vec::with_capacity(intent.blocks().len());
+    let mut occurrences = Vec::new();
+    for block in intent.blocks() {
+        let finality = if wrong_block {
+            let app_hash = AppHashV2::from_bytes([0xee; 32]).map_err(|_| TestError)?;
+            DurableBlockFinalityCapability::new(
+                profile,
+                coordinator,
+                block.ledger_chain_id().clone(),
+                block.height(),
+                app_hash,
+                FinalityDigest::new([0xef; 32]),
+                b"wrong-block".to_vec(),
+            )
+            .map_err(|_| TestError)?
+        } else {
+            block_capability_for(profile, coordinator, block).map_err(|_| TestError)?
+        };
+        for entry in block.entries() {
+            if !matches!(
+                entry.metadata().event_kind(),
+                thunderbolt_ledger::EventKindV2::Invoice | thunderbolt_ledger::EventKindV2::Transfer
+            ) {
+                continue;
+            }
+            let metadata = entry.metadata();
+            let entry_hash = *metadata.entry_hash().as_bytes();
+            let (first_height, first_index) = first_locations
+                .get(&entry_hash)
+                .copied()
+                .unwrap_or((metadata.block_height(), metadata.block_index()));
+            occurrences.push(VerifiedEntryOccurrenceV2 {
+                kind: if (first_height, first_index) == (metadata.block_height(), metadata.block_index()) {
+                    EntryOccurrenceKindV2::First
+                } else {
+                    EntryOccurrenceKindV2::Replay
+                },
+                ledger_chain_id: block.ledger_chain_id().clone(),
+                channel_context_id: metadata.channel_context_id().clone(),
+                entry_hash: metadata.entry_hash().clone(),
+                semantic_digest: test_semantic_digest(entry).map_err(|_| TestError)?,
+                observed_height: metadata.block_height(),
+                observed_index: metadata.block_index(),
+                first_height,
+                first_index,
+                through_height: intent.next_height().saturating_sub(1),
+                expected_through_app_hash: intent.next_expected_previous_app_hash().clone(),
+                verifier_profile: profile,
+                coordinator_id: coordinator,
+                verifier_digest: FinalityDigest::new([0xa5; 32]),
+            });
+        }
+        blocks.push(FinalizedBlockV2 {
+            block: block.clone(),
+            finality,
+        });
+    }
+    match occurrence_mode {
+        OccurrenceMode::Exact => {}
+        OccurrenceMode::OmitFirst => {
+            if !occurrences.is_empty() {
+                occurrences.remove(0);
+            }
+        }
+        OccurrenceMode::FlipFirst => {
+            if let Some(first) = occurrences.first_mut() {
+                first.kind = match first.kind {
+                    EntryOccurrenceKindV2::First => EntryOccurrenceKindV2::Replay,
+                    EntryOccurrenceKindV2::Replay => EntryOccurrenceKindV2::First,
+                };
+            }
+        }
+    }
+    FinalizedRangeCapabilityV2::new(staged, blocks, occurrences).map_err(|_| TestError)
 }
 
 fn block_capability(
     profile: FinalityVerifierProfileId,
     block: &ExecutedBlockV2,
 ) -> Result<DurableBlockFinalityCapability> {
+    block_capability_for(profile, FinalityCoordinatorId::new([0x91; 32])?, block)
+}
+
+fn block_capability_for(
+    profile: FinalityVerifierProfileId,
+    coordinator: FinalityCoordinatorId,
+    block: &ExecutedBlockV2,
+) -> Result<DurableBlockFinalityCapability> {
     let attestation = block_attestation(block.height(), block.app_hash());
     DurableBlockFinalityCapability::new(
         profile,
+        coordinator,
         block.ledger_chain_id().clone(),
         block.height(),
         block.app_hash().clone(),
@@ -494,7 +772,7 @@ fn point(value: u8) -> std::result::Result<PointHex, Box<dyn Error>> {
 }
 fn modulus(seed: u32) -> std::result::Result<PaillierModulusBytesV2, Box<dyn Error>> {
     let mut bytes = vec![0_u8; PAILLIER_V2_MODULUS_BYTES];
-    bytes[0] = 0x40 | u8::try_from(seed & 0x3f)?;
+    bytes[0] = 0x80 | u8::try_from(seed & 0x7f)?;
     bytes[PAILLIER_V2_MODULUS_BYTES - 1] = u8::try_from(seed & 0xff)? | 1;
     Ok(PaillierModulusBytesV2::from_bytes("test modulus", bytes)?)
 }
@@ -771,84 +1049,37 @@ fn resign(
     Ok(resigned)
 }
 
-fn segment(
-    blocks: Vec<ExecutedBlockV2>,
-) -> std::result::Result<FinalizedExecutionSegmentV2<TestReceipt>, Box<dyn Error>> {
-    let first_locations = blocks
-        .iter()
-        .flat_map(|block| block.entries())
-        .map(|entry| {
-            (
-                *entry.metadata().entry_hash().as_bytes(),
-                (entry.metadata().block_height(), entry.metadata().block_index()),
-            )
-        })
-        .collect();
-    segment_with_first_locations(blocks, &first_locations)
-}
-
-fn segment_with_first_locations(
-    blocks: Vec<ExecutedBlockV2>,
-    first_locations: &BTreeMap<[u8; 32], (u64, u32)>,
-) -> std::result::Result<FinalizedExecutionSegmentV2<TestReceipt>, Box<dyn Error>> {
+fn segment(blocks: Vec<ExecutedBlockV2>) -> std::result::Result<FinalityRangeIntentV2, Box<dyn Error>> {
     let first = blocks.first().ok_or("empty fixture")?;
     let last = blocks.last().ok_or("empty fixture")?;
-    let through_height = last.height();
-    let through_app_hash = last.app_hash().clone();
-    let occurrences = blocks
-        .iter()
-        .flat_map(|block| block.entries())
-        .filter(|entry| {
-            matches!(
-                entry.metadata().event_kind(),
-                thunderbolt_ledger::EventKindV2::Invoice | thunderbolt_ledger::EventKindV2::Transfer
-            )
-        })
-        .map(|entry| {
-            let first = first_locations
-                .get(entry.metadata().entry_hash().as_bytes())
-                .copied()
-                .ok_or("missing first location")?;
-            let observed = (entry.metadata().block_height(), entry.metadata().block_index());
-            Ok(FinalizedEntryOccurrenceV2 {
-                kind: if first == observed {
-                    EntryOccurrenceKindV2::First
-                } else {
-                    EntryOccurrenceKindV2::Replay
-                },
-                ledger_chain_id: entry.metadata().ledger_chain_id().clone(),
-                channel_context_id: entry.metadata().channel_context_id().clone(),
-                entry_hash: entry.metadata().entry_hash().clone(),
-                semantic_digest: test_semantic_digest(entry)?,
-                observed_height: observed.0,
-                observed_index: observed.1,
-                first_height: first.0,
-                first_index: first.1,
-                through_height,
-                expected_through_app_hash: through_app_hash.clone(),
-                receipt: TestReceipt {
-                    marker: "RAW-LOCATOR-RECEIPT".to_owned(),
-                },
-            })
-        })
-        .collect::<std::result::Result<Vec<_>, Box<dyn Error>>>()?;
-    Ok(FinalizedExecutionSegmentV2 {
-        ledger_chain_id: first.ledger_chain_id().clone(),
-        start_height: first.height(),
-        expected_previous_app_hash: first.previous_app_hash().clone(),
-        next_height: last.height().checked_add(1).ok_or("next height")?,
-        next_expected_previous_app_hash: last.app_hash().clone(),
-        occurrences,
-        blocks: blocks
-            .into_iter()
-            .map(|block| FinalizedExecutedBlockV2 {
-                receipt: TestReceipt {
-                    marker: format!("RAW-RECEIPT-{}", block.height()),
-                },
-                block,
-            })
-            .collect(),
-    })
+    let ledger_chain_id = first.ledger_chain_id().clone();
+    let start_height = first.height();
+    let expected_previous = first.previous_app_hash().clone();
+    let next_height = last.height().checked_add(1).ok_or("next height")?;
+    let next_previous = last.app_hash().clone();
+    Ok(FinalityRangeIntentV2::new(
+        FinalityVerifierProfileId::new([0x81; 32])?,
+        FinalityCoordinatorId::new([0x91; 32])?,
+        ledger_chain_id,
+        start_height,
+        expected_previous,
+        blocks,
+        next_height,
+        next_previous,
+    )?)
+}
+
+async fn poll_intent<R, V>(
+    node: &mut CommitteeNode<R>,
+    intent: FinalityRangeIntentV2,
+    finality: &mut V,
+) -> Result<usize>
+where
+    R: CommitteeRuntime,
+    V: LedgerFinalityVerifier,
+{
+    let mut client = BlockingClient::new(Some(intent));
+    node.poll(&mut client, finality).await
 }
 
 fn test_refresh_event_id(commitment: thunderbolt_committee::CommittedTransfer) -> [u8; 32] {
@@ -866,8 +1097,8 @@ fn test_refresh_event_id(commitment: thunderbolt_committee::CommittedTransfer) -
     hasher.finalize().into()
 }
 
-#[test]
-fn contiguous_scan_pending_pair_empty_block_crash_and_restart() -> std::result::Result<(), Box<dyn Error>> {
+#[tokio::test]
+async fn contiguous_scan_pending_pair_empty_block_crash_and_restart() -> std::result::Result<(), Box<dyn Error>> {
     let directory = TempDir::new()?;
     let runtime = test_runtime()?;
     let blocks = build_blocks(&runtime, 1, false, true, false)?;
@@ -875,7 +1106,7 @@ fn contiguous_scan_pending_pair_empty_block_crash_and_restart() -> std::result::
     let transfer_page = segment(blocks[1..].to_vec())?;
     let db = temp_path(&directory, "node.sqlite")?;
     let mut node = CommitteeNode::open(&db, runtime, config()?)?;
-    assert_eq!(node.ingest_segment(invoice_page, &AcceptFinality)?, 0);
+    assert_eq!(poll_intent(&mut node, invoice_page, &mut AcceptFinality).await?, 0);
     let first_cursor = node.control(ControlRequest::Status, true)?;
     let ControlResponse::Status(first_status) = first_cursor else {
         return Err("status".into());
@@ -891,6 +1122,7 @@ fn contiguous_scan_pending_pair_empty_block_crash_and_restart() -> std::result::
     let wrong_attestation = vec![0x81; 64];
     let wrong_capability = DurableBlockFinalityCapability::new(
         cursor_capability.verifier_profile(),
+        cursor_capability.coordinator_id(),
         cursor_capability.ledger_chain_id().clone(),
         cursor_capability.block_height(),
         cursor_capability.app_hash().clone(),
@@ -903,7 +1135,7 @@ fn contiguous_scan_pending_pair_empty_block_crash_and_restart() -> std::result::
         rusqlite::params![wrong_json, wrong_capability.verifier_digest().as_bytes().as_slice()],
     )?;
     assert!(matches!(
-        node.ingest_segment(transfer_page.clone(), &AcceptFinality),
+        poll_intent(&mut node, transfer_page.clone(), &mut AcceptFinality).await,
         Err(NodeError::FinalityRejected)
     ));
     cursor_connection.execute(
@@ -911,7 +1143,7 @@ fn contiguous_scan_pending_pair_empty_block_crash_and_restart() -> std::result::
         rusqlite::params![cursor_json, cursor_digest],
     )?;
     drop(cursor_connection);
-    assert_eq!(node.ingest_segment(transfer_page, &AcceptFinality)?, 1);
+    assert_eq!(poll_intent(&mut node, transfer_page, &mut AcceptFinality).await?, 1);
     let connection = rusqlite::Connection::open(&db)?;
     let pending: i64 = connection.query_row("SELECT count(*) FROM pending_invoices", [], |row| row.get(0))?;
     let record: Vec<u8> = connection.query_row("SELECT record_json FROM inbox", [], |row| row.get(0))?;
@@ -939,7 +1171,7 @@ fn contiguous_scan_pending_pair_empty_block_crash_and_restart() -> std::result::
         rusqlite::params![tampered, tampered_digest.as_slice()],
     )?;
     assert!(matches!(
-        node.process_next::<TestReceipt, _>(&AcceptFinality),
+        node.process_next(&AcceptFinality).await,
         Err(NodeError::InvalidLedgerArtifact | NodeError::FinalityRejected)
     ));
     let record_digest: [u8; 32] = Sha256::digest(&record).into();
@@ -950,13 +1182,13 @@ fn contiguous_scan_pending_pair_empty_block_crash_and_restart() -> std::result::
     drop(connection);
     node.inject_crash_after_runtime_once();
     assert!(matches!(
-        node.process_next::<TestReceipt, _>(&AcceptFinality),
+        node.process_next(&AcceptFinality).await,
         Err(NodeError::InjectedCrash)
     ));
     let runtime = node.into_runtime();
     let mut restarted = CommitteeNode::open(&db, runtime, config()?)?;
     assert_eq!(
-        restarted.process_next::<TestReceipt, _>(&AcceptFinality)?,
+        restarted.process_next(&AcceptFinality).await?,
         ProcessDisposition::Replay
     );
     let ControlResponse::Status(status) = restarted.control(ControlRequest::Status, true)? else {
@@ -969,8 +1201,8 @@ fn contiguous_scan_pending_pair_empty_block_crash_and_restart() -> std::result::
     Ok(())
 }
 
-#[test]
-fn exact_invoice_and_transfer_replays_keep_first_semantics_across_pages_and_restart(
+#[tokio::test]
+async fn exact_invoice_and_transfer_replays_keep_first_semantics_across_pages_and_restart(
 ) -> std::result::Result<(), Box<dyn Error>> {
     let directory = TempDir::new()?;
     let runtime = test_runtime()?;
@@ -981,12 +1213,10 @@ fn exact_invoice_and_transfer_replays_keep_first_semantics_across_pages_and_rest
     let transfer_hash = *originals[2].entries()[0].metadata().entry_hash().as_bytes();
     let mut first_locations = BTreeMap::from([(invoice_hash, (1, 0))]);
     let db = temp_path(&directory, "replay-node.sqlite")?;
-    let node = CommitteeNode::open(&db, runtime, config()?)?;
+    let mut node = CommitteeNode::open(&db, runtime, config()?)?;
+    let mut finality = ConfiguredFinality::new(first_locations.clone());
     assert_eq!(
-        node.ingest_segment(
-            segment_with_first_locations(vec![originals[0].clone()], &first_locations)?,
-            &AcceptFinality
-        )?,
+        poll_intent(&mut node, segment(vec![originals[0].clone()])?, &mut finality).await?,
         0
     );
 
@@ -997,19 +1227,14 @@ fn exact_invoice_and_transfer_replays_keep_first_semantics_across_pages_and_rest
         originals[0].app_hash().clone(),
     )?;
     assert_eq!(
-        node.ingest_segment(
-            segment_with_first_locations(vec![invoice_replay.clone()], &first_locations)?,
-            &AcceptFinality
-        )?,
+        poll_intent(&mut node, segment(vec![invoice_replay.clone()])?, &mut finality).await?,
         0
     );
     first_locations.insert(transfer_hash, (3, 0));
+    finality = ConfiguredFinality::new(first_locations.clone());
     let transfer_first = replay_block(transfer_proposal.clone(), 3, 10_002, invoice_replay.app_hash().clone())?;
     assert_eq!(
-        node.ingest_segment(
-            segment_with_first_locations(vec![transfer_first.clone()], &first_locations)?,
-            &AcceptFinality
-        )?,
+        poll_intent(&mut node, segment(vec![transfer_first.clone()])?, &mut finality).await?,
         1
     );
 
@@ -1022,10 +1247,12 @@ fn exact_invoice_and_transfer_replays_keep_first_semantics_across_pages_and_rest
         transfer_first.app_hash().clone(),
     )?;
     assert_eq!(
-        restarted.ingest_segment(
-            segment_with_first_locations(vec![invoice_after_consumption.clone()], &first_locations)?,
-            &AcceptFinality,
-        )?,
+        poll_intent(
+            &mut restarted,
+            segment(vec![invoice_after_consumption.clone()])?,
+            &mut finality,
+        )
+        .await?,
         0
     );
     let transfer_replay = replay_block(
@@ -1035,10 +1262,7 @@ fn exact_invoice_and_transfer_replays_keep_first_semantics_across_pages_and_rest
         invoice_after_consumption.app_hash().clone(),
     )?;
     assert_eq!(
-        restarted.ingest_segment(
-            segment_with_first_locations(vec![transfer_replay], &first_locations)?,
-            &AcceptFinality,
-        )?,
+        poll_intent(&mut restarted, segment(vec![transfer_replay])?, &mut finality).await?,
         0
     );
     let ControlResponse::Status(status) = restarted.control(ControlRequest::Status, true)? else {
@@ -1054,14 +1278,14 @@ fn exact_invoice_and_transfer_replays_keep_first_semantics_across_pages_and_rest
     assert_eq!(stored.blocks.invoice().height(), 1);
     assert_eq!(stored.blocks.transfer().height(), 3);
     assert_eq!(
-        restarted.process_next::<TestReceipt, _>(&AcceptFinality)?,
+        restarted.process_next(&AcceptFinality).await?,
         ProcessDisposition::Applied
     );
     Ok(())
 }
 
-#[test]
-fn expired_invoice_replay_is_noop_without_a_tombstone() -> std::result::Result<(), Box<dyn Error>> {
+#[tokio::test]
+async fn expired_invoice_replay_is_noop_without_a_tombstone() -> std::result::Result<(), Box<dyn Error>> {
     let directory = TempDir::new()?;
     let runtime = test_runtime()?;
     let originals = build_blocks(&runtime, 1, false, false, false)?;
@@ -1069,12 +1293,10 @@ fn expired_invoice_replay_is_noop_without_a_tombstone() -> std::result::Result<(
     let invoice_hash = *originals[0].entries()[0].metadata().entry_hash().as_bytes();
     let first_locations = BTreeMap::from([(invoice_hash, (1, 0))]);
     let db = temp_path(&directory, "expired-replay.sqlite")?;
-    let node = CommitteeNode::open(&db, runtime, config()?)?;
+    let mut node = CommitteeNode::open(&db, runtime, config()?)?;
+    let mut finality = ConfiguredFinality::new(first_locations.clone());
     assert_eq!(
-        node.ingest_segment(
-            segment_with_first_locations(vec![originals[0].clone()], &first_locations)?,
-            &AcceptFinality,
-        )?,
+        poll_intent(&mut node, segment(vec![originals[0].clone()])?, &mut finality).await?,
         0
     );
     let expired = PendingBlockV2::new(
@@ -1085,20 +1307,14 @@ fn expired_invoice_replay_is_noop_without_a_tombstone() -> std::result::Result<(
     )?
     .execute()?;
     assert_eq!(
-        node.ingest_segment(segment(vec![expired.clone()])?, &AcceptFinality)?,
+        poll_intent(&mut node, segment(vec![expired.clone()])?, &mut finality).await?,
         0
     );
     let pending: i64 =
         rusqlite::Connection::open(&db)?.query_row("SELECT count(*) FROM pending_invoices", [], |row| row.get(0))?;
     assert_eq!(pending, 0);
     let replay = replay_block(resign(&invoice, 2, [0x21; 32])?, 3, 100_001, expired.app_hash().clone())?;
-    assert_eq!(
-        node.ingest_segment(
-            segment_with_first_locations(vec![replay], &first_locations)?,
-            &AcceptFinality
-        )?,
-        0
-    );
+    assert_eq!(poll_intent(&mut node, segment(vec![replay])?, &mut finality).await?, 0);
     let ControlResponse::Status(status) = node.control(ControlRequest::Status, true)? else {
         return Err("status".into());
     };
@@ -1106,8 +1322,8 @@ fn expired_invoice_replay_is_noop_without_a_tombstone() -> std::result::Result<(
     Ok(())
 }
 
-#[test]
-fn pruned_transfer_replay_is_noop_without_a_tombstone() -> std::result::Result<(), Box<dyn Error>> {
+#[tokio::test]
+async fn pruned_transfer_replay_is_noop_without_a_tombstone() -> std::result::Result<(), Box<dyn Error>> {
     let directory = TempDir::new()?;
     let runtime = test_runtime()?;
     let original = build_blocks(&runtime, 1, true, false, false)?;
@@ -1115,8 +1331,12 @@ fn pruned_transfer_replay_is_noop_without_a_tombstone() -> std::result::Result<(
     let transfer_hash = *original[0].entries()[1].metadata().entry_hash().as_bytes();
     let first_locations = BTreeMap::from([(transfer_hash, (1, 1))]);
     let db = temp_path(&directory, "pruned-replay.sqlite")?;
-    let node = CommitteeNode::open(&db, runtime, config()?)?;
-    assert_eq!(node.ingest_segment(segment(original.clone())?, &AcceptFinality)?, 1);
+    let mut node = CommitteeNode::open(&db, runtime, config()?)?;
+    let mut finality = ConfiguredFinality::new(first_locations.clone());
+    assert_eq!(
+        poll_intent(&mut node, segment(original.clone())?, &mut finality).await?,
+        1
+    );
     rusqlite::Connection::open(&db)?.execute("DELETE FROM inbox", [])?;
     let replay = replay_block(
         resign(&transfer, 3, [0x22; 32])?,
@@ -1124,13 +1344,7 @@ fn pruned_transfer_replay_is_noop_without_a_tombstone() -> std::result::Result<(
         10_001,
         original[0].app_hash().clone(),
     )?;
-    assert_eq!(
-        node.ingest_segment(
-            segment_with_first_locations(vec![replay], &first_locations)?,
-            &AcceptFinality
-        )?,
-        0
-    );
+    assert_eq!(poll_intent(&mut node, segment(vec![replay])?, &mut finality).await?, 0);
     let ControlResponse::Status(status) = node.control(ControlRequest::Status, true)? else {
         return Err("status".into());
     };
@@ -1154,42 +1368,60 @@ fn test_semantic_digest(entry: &thunderbolt_ledger::ExecutedEntryV2) -> std::res
     Ok(hasher.finalize().into())
 }
 
-#[test]
-fn wrong_profile_block_artifact_and_gap_leave_cursor_unchanged() -> std::result::Result<(), Box<dyn Error>> {
+#[tokio::test]
+async fn wrong_profile_block_artifact_and_gap_leave_cursor_unchanged() -> std::result::Result<(), Box<dyn Error>> {
     let runtime = test_runtime()?;
     let directory = TempDir::new()?;
     let blocks = build_blocks(&runtime, 1, false, true, false)?;
-    let wrong_artifact = build_blocks(&runtime, 1, false, false, true)?;
-    let node = CommitteeNode::open(temp_path(&directory, "node.sqlite")?, runtime, config()?)?;
+    let mut node = CommitteeNode::open(temp_path(&directory, "profile.sqlite")?, runtime, config()?)?;
     assert!(matches!(
-        node.ingest_segment(segment(blocks.clone())?, &WrongProfileFinality),
+        poll_intent(&mut node, segment(blocks.clone())?, &mut WrongProfileFinality).await,
         Err(NodeError::FinalityRejected)
     ));
+    let ControlResponse::Status(status) = node.control(ControlRequest::Status, true)? else {
+        return Err("status".into());
+    };
+    assert!(status.cursor.is_none());
+    drop(node);
+
+    let role_path = temp_path(&directory, "wrong-block.sqlite")?;
+    let mut node = CommitteeNode::open(&role_path, test_runtime()?, config()?)?;
     assert!(matches!(
-        node.ingest_segment(segment(blocks.clone())?, &WrongBlockFinality),
+        poll_intent(&mut node, segment(blocks.clone())?, &mut WrongBlockFinality).await,
         Err(NodeError::FinalityRejected)
     ));
-    let mut missing_location = segment(blocks.clone())?;
-    missing_location.occurrences.clear();
+    let staged_count: i64 =
+        rusqlite::Connection::open(&role_path)?
+            .query_row("SELECT count(*) FROM staged_finality_range", [], |row| row.get(0))?;
+    assert_eq!(staged_count, 1);
+    let recovery_runtime = node.into_runtime();
+    let recovery = CommitteeNode::inspect_staged_finality_recovery(&role_path, &recovery_runtime, &config()?)?
+        .ok_or("staged recovery")?;
+    assert_eq!(recovery.intent(), &segment(blocks.clone())?);
+    let role_blocks = build_blocks(&recovery_runtime, 1, false, true, false)?;
+    let role_wrong_artifact = build_blocks(&recovery_runtime, 1, false, false, true)?;
+    rusqlite::Connection::open(&role_path)?.execute("DELETE FROM staged_finality_range", [])?;
+    let mut node = CommitteeNode::open(&role_path, recovery_runtime, config()?)?;
+    let mut missing = ConfiguredFinality::with_mode(OccurrenceMode::OmitFirst);
     assert!(matches!(
-        node.ingest_segment(missing_location, &AcceptFinality),
+        poll_intent(&mut node, segment(role_blocks.clone())?, &mut missing).await,
         Err(NodeError::InvalidLedgerArtifact)
     ));
-    let mut wrong_location = segment(blocks.clone())?;
-    wrong_location.occurrences[0].kind = EntryOccurrenceKindV2::Replay;
+    rusqlite::Connection::open(&role_path)?.execute("DELETE FROM staged_finality_range", [])?;
+    let mut wrong_location = ConfiguredFinality::with_mode(OccurrenceMode::FlipFirst);
     assert!(matches!(
-        node.ingest_segment(wrong_location, &AcceptFinality),
+        poll_intent(&mut node, segment(role_blocks.clone())?, &mut wrong_location).await,
         Err(NodeError::FinalityRejected)
     ));
+    rusqlite::Connection::open(&role_path)?.execute("DELETE FROM staged_finality_range", [])?;
     assert!(matches!(
-        node.ingest_segment(segment(wrong_artifact)?, &AcceptFinality),
+        poll_intent(&mut node, segment(role_wrong_artifact)?, &mut AcceptFinality).await,
         Err(NodeError::RefreshBindingMismatch)
     ));
-    let mut gap = segment(blocks[1..].to_vec())?;
-    gap.start_height = 1;
-    gap.expected_previous_app_hash = AppHashV2::zero();
+    rusqlite::Connection::open(&role_path)?.execute("DELETE FROM staged_finality_range", [])?;
+    let gap = segment(role_blocks[1..].to_vec())?;
     assert!(matches!(
-        node.ingest_segment(gap, &AcceptFinality),
+        poll_intent(&mut node, gap, &mut AcceptFinality).await,
         Err(NodeError::CursorConflict)
     ));
     let ControlResponse::Status(status) = node.control(ControlRequest::Status, true)? else {
@@ -1227,7 +1459,7 @@ fn compact_256_member_record_is_measured_below_bound() -> std::result::Result<()
         )?,
     };
     let shared_measured = serde_json::to_vec(&record)?.len();
-    assert_eq!(shared_measured, 3_397_810);
+    assert_eq!(shared_measured, 3_397_957);
     assert!(shared_measured < MAX_INBOX_RECORD_BYTES);
 
     let distinct = build_blocks(&runtime, 256, false, false, false)?;
@@ -1254,7 +1486,7 @@ fn compact_256_member_record_is_measured_below_bound() -> std::result::Result<()
         finality: DurableFinalityCapability::new(&commitments, invoice_cap, transfer_cap)?,
     };
     let distinct_measured = serde_json::to_vec(&record)?.len();
-    assert_eq!(distinct_measured, 3_398_697);
+    assert_eq!(distinct_measured, 3_398_991);
     assert!(distinct_measured < MAX_INBOX_RECORD_BYTES);
     assert!(shared_measured < distinct_measured);
     Ok(())
@@ -1301,24 +1533,87 @@ impl CommitteeVault for MemoryVault {
 struct CountingClient {
     calls: Arc<AtomicUsize>,
 }
-impl SignedV2LedgerClient for CountingClient {
-    type Receipt = TestReceipt;
-    type Error = TestError;
-    fn fetch_contiguous_finalized_segment(
-        &mut self,
-        _: Option<&LedgerCursor>,
-        _: u16,
-    ) -> std::result::Result<Option<FinalizedExecutionSegmentV2<Self::Receipt>>, Self::Error> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Err(TestError)
+
+struct BlockingClient {
+    intent: Option<FinalityRangeIntentV2>,
+    block_next: Arc<std::sync::atomic::AtomicBool>,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl BlockingClient {
+    fn new(intent: Option<FinalityRangeIntentV2>) -> Self {
+        Self {
+            intent,
+            block_next: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            entered: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new(tokio::sync::Notify::new()),
+        }
     }
-    fn submit_signed_proposal(&mut self, _: &SignedProposalV2) -> std::result::Result<Self::Receipt, Self::Error> {
-        Err(TestError)
+
+    fn block_next(&self) {
+        self.block_next.store(true, Ordering::SeqCst);
     }
 }
 
-#[test]
-fn legacy_engine_fails_before_fetch_or_cursor_advance() -> std::result::Result<(), Box<dyn Error>> {
+impl SignedV2LedgerClient for BlockingClient {
+    type Error = TestError;
+
+    fn profile_id(&self) -> FinalityVerifierProfileId {
+        AcceptFinality.profile_id()
+    }
+
+    fn coordinator_id(&self) -> FinalityCoordinatorId {
+        AcceptFinality.coordinator_id()
+    }
+
+    fn prepare_finalized_execution<'a>(
+        &'a mut self,
+        _: Option<&'a LedgerCursor>,
+        _: u16,
+    ) -> LedgerFuture<'a, Option<FinalityRangeIntentV2>, Self::Error> {
+        Box::pin(async move {
+            if self.block_next.swap(false, Ordering::SeqCst) {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            Ok(self.intent.take())
+        })
+    }
+
+    fn submit_signed_proposal<'a>(
+        &'a mut self,
+        _: &'a SignedProposalV2,
+    ) -> LedgerFuture<'a, SubmissionStatus, Self::Error> {
+        Box::pin(async { Err(TestError) })
+    }
+}
+impl SignedV2LedgerClient for CountingClient {
+    type Error = TestError;
+    fn profile_id(&self) -> FinalityVerifierProfileId {
+        AcceptFinality.profile_id()
+    }
+    fn coordinator_id(&self) -> FinalityCoordinatorId {
+        AcceptFinality.coordinator_id()
+    }
+    fn prepare_finalized_execution<'a>(
+        &'a mut self,
+        _: Option<&'a LedgerCursor>,
+        _: u16,
+    ) -> LedgerFuture<'a, Option<FinalityRangeIntentV2>, Self::Error> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Err(TestError) })
+    }
+    fn submit_signed_proposal<'a>(
+        &'a mut self,
+        _: &'a SignedProposalV2,
+    ) -> LedgerFuture<'a, SubmissionStatus, Self::Error> {
+        Box::pin(async { Err(TestError) })
+    }
+}
+
+#[tokio::test]
+async fn legacy_engine_fails_before_fetch_or_cursor_advance() -> std::result::Result<(), Box<dyn Error>> {
     let directory = TempDir::new()?;
     let dealer = dealer_bootstrap(
         Network::Regtest,
@@ -1335,7 +1630,7 @@ fn legacy_engine_fails_before_fetch_or_cursor_advance() -> std::result::Result<(
     let mut client = CountingClient { calls: calls.clone() };
     let mut node = CommitteeNode::open(temp_path(&directory, "legacy.sqlite")?, engine, config()?)?;
     assert!(matches!(
-        node.poll(&mut client, &AcceptFinality),
+        node.poll(&mut client, &mut AcceptFinality).await,
         Err(NodeError::V2RuntimeUnavailable)
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -1344,6 +1639,140 @@ fn legacy_engine_fails_before_fetch_or_cursor_advance() -> std::result::Result<(
     };
     assert!(!status.v2_runtime_available);
     assert!(status.cursor.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn missing_finality_capability_fails_before_async_fetch() -> std::result::Result<(), Box<dyn Error>> {
+    let directory = TempDir::new()?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut client = CountingClient { calls: calls.clone() };
+    let mut node = CommitteeNode::open(
+        temp_path(&directory, "disabled-finality.sqlite")?,
+        test_runtime()?,
+        config()?,
+    )?;
+    assert!(matches!(
+        node.poll(&mut client, &mut DisabledFinalityVerifier).await,
+        Err(NodeError::FinalityUnavailable)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let ControlResponse::Status(status) = node.control(ControlRequest::Status, false)? else {
+        return Err("status".into());
+    };
+    assert!(status.cursor.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn missing_ledger_capability_fails_before_cursor_access() -> std::result::Result<(), Box<dyn Error>> {
+    let directory = TempDir::new()?;
+    let mut client = DisabledSignedV2LedgerClient;
+    let mut node = CommitteeNode::open(
+        temp_path(&directory, "disabled-ledger.sqlite")?,
+        test_runtime()?,
+        config()?,
+    )?;
+    assert!(matches!(
+        node.poll(&mut client, &mut AcceptFinality).await,
+        Err(NodeError::FinalityUnavailable)
+    ));
+    let ControlResponse::Status(status) = node.control(ControlRequest::Status, false)? else {
+        return Err("status".into());
+    };
+    assert!(status.cursor.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_finality_verification_leaves_cursor_empty_then_replays_exact_page(
+) -> std::result::Result<(), Box<dyn Error>> {
+    let directory = TempDir::new()?;
+    let runtime = test_runtime()?;
+    let blocks = build_blocks(&runtime, 1, false, true, false)?;
+    let page = segment(blocks)?;
+    let path = temp_path(&directory, "async-finality.sqlite")?;
+    let mut node = CommitteeNode::open(&path, runtime, config()?)?;
+    let mut client = BlockingClient::new(Some(page.clone()));
+    let mut finality = BlockingFinality::new();
+    let entered = Arc::clone(&finality.entered);
+    let release = Arc::clone(&finality.release);
+    let mut ingesting = Box::pin(node.poll(&mut client, &mut finality));
+    tokio::select! {
+        () = entered.notified() => {}
+        result = &mut ingesting => {
+            return Err(format!("ingest returned before finality cancellation barrier: {result:?}").into());
+        }
+    }
+    drop(ingesting);
+    release.notify_one();
+    let ControlResponse::Status(status) = node.control(ControlRequest::Status, true)? else {
+        return Err("status".into());
+    };
+    assert!(status.cursor.is_none());
+    let runtime = node.into_runtime();
+    let recovery =
+        CommitteeNode::inspect_staged_finality_recovery(&path, &runtime, &config()?)?.ok_or("staged recovery")?;
+    assert_eq!(recovery.intent(), &page);
+    let mut node = CommitteeNode::open_with_staged_recovery(&path, runtime, config()?, &recovery)?;
+    assert_eq!(node.poll(&mut client, &mut finality).await?, 1);
+    let ControlResponse::Status(status) = node.control(ControlRequest::Status, true)? else {
+        return Err("status".into());
+    };
+    assert_eq!(status.cursor.ok_or("cursor")?.next_height, 4);
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_async_fetch_leaves_cursor_empty_then_exact_empty_block_page_replays(
+) -> std::result::Result<(), Box<dyn Error>> {
+    let directory = TempDir::new()?;
+    let runtime = test_runtime()?;
+    let blocks = build_blocks(&runtime, 1, false, true, false)?;
+    assert!(blocks[1].entries().is_empty());
+    let page = segment(blocks)?;
+    let path = temp_path(&directory, "async-poll.sqlite")?;
+    let mut node = CommitteeNode::open(&path, runtime, config()?)?;
+    let mut client = BlockingClient::new(Some(page.clone()));
+    client.block_next();
+    let entered = Arc::clone(&client.entered);
+    let release = Arc::clone(&client.release);
+    let mut finality = AcceptFinality;
+    let mut polling = Box::pin(node.poll(&mut client, &mut finality));
+    tokio::select! {
+        () = entered.notified() => {}
+        result = &mut polling => return Err(format!("poll returned before cancellation barrier: {result:?}").into()),
+    }
+    drop(polling);
+    release.notify_one();
+    let ControlResponse::Status(status) = node.control(ControlRequest::Status, true)? else {
+        return Err("status".into());
+    };
+    assert!(status.cursor.is_none());
+    let staged_count: i64 =
+        rusqlite::Connection::open(&path)?
+            .query_row("SELECT count(*) FROM staged_finality_range", [], |row| row.get(0))?;
+    assert_eq!(staged_count, 0);
+    let runtime = node.into_runtime();
+    let mut node = CommitteeNode::open(&path, runtime, config()?)?;
+
+    assert_eq!(node.poll(&mut client, &mut finality).await?, 1);
+    let ControlResponse::Status(status) = node.control(ControlRequest::Status, true)? else {
+        return Err("status".into());
+    };
+    let cursor = status.cursor.ok_or("cursor")?;
+    assert_eq!(cursor.next_height, 4);
+    assert_eq!(
+        &cursor.expected_previous_app_hash,
+        page.next_expected_previous_app_hash()
+    );
+
+    let mut no_page = BlockingClient::new(None);
+    assert_eq!(node.poll(&mut no_page, &mut finality).await?, 0);
+    let ControlResponse::Status(after_none) = node.control(ControlRequest::Status, true)? else {
+        return Err("status".into());
+    };
+    assert_eq!(after_none.cursor, Some(cursor));
     Ok(())
 }
 

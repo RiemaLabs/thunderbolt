@@ -1,22 +1,20 @@
 use std::convert::TryFrom;
 use std::fmt;
 
-use libpaillier::EncryptionKey;
 use serde::de::{Error as DeError, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use thunderbolt_core::paillier::PaillierModulusProfile;
-use thunderbolt_core::threshold::{
-    verify_threshold_refresh_distribution_with_profile, ThresholdEncryptedShare, ThresholdRefreshDistribution,
+use thunderbolt_core::zkp::{
+    verify_share_encryption_3072, CertifiedKeyResolver3072, CertifiedKeyRole3072, ShareEncryptionProof3072,
+    ShareEncryptionStatement3072,
 };
-use thunderbolt_core::zkp::{verify_share_encryption_with_profile, ShareEncryptionProof, ShareEncryptionStatement};
 
 use crate::codec::{CanonicalDigest, CanonicalHasher, ValidateWire};
 use crate::error::core_error;
 use crate::v2_values::{
-    decode_ciphertext_v2, decode_key_v2, decode_nonce_v2, decode_point_v2, decode_response_v2, derive_proof_context_v2,
+    decode_ciphertext_v2, decode_nonce_v2, decode_point_v2, decode_response_v2, derive_proof_context_v2,
     encode_ciphertext_v2, encode_key_v2, encode_nonce_v2, encode_point_v2, encode_response_v2,
-    require_matching_context, validate_modulus, validate_nonzero_fixed, validate_point_v2, validate_response,
-    PaillierCiphertextBytesV2Input, PaillierModulusBytesV2Input, PaillierModulusProfileV2Input,
+    require_matching_context, resolve_key_v2, validate_modulus, validate_nonzero_fixed, validate_point_v2,
+    validate_response, PaillierCiphertextBytesV2Input, PaillierModulusBytesV2Input, PaillierModulusProfileV2Input,
     PaillierNonceBytesV2Input, ProofResponseBytesV2Input,
 };
 use crate::{
@@ -310,7 +308,10 @@ impl ShareProofV2 {
         Ok(value)
     }
 
-    fn from_core(key: &EncryptionKey, proof: &ShareEncryptionProof) -> Result<Self> {
+    fn from_core(
+        key: &thunderbolt_core::zkp::production::PublicKey3072,
+        proof: &ShareEncryptionProof3072,
+    ) -> Result<Self> {
         let _ = encode_key_v2(key)?;
         let value = Self {
             a_point: encode_point_v2("share_v2.proof.a_point", &proof.a_point)?,
@@ -322,11 +323,11 @@ impl ShareProofV2 {
         Ok(value)
     }
 
-    fn to_core(&self, key: &EncryptionKey) -> Result<ShareEncryptionProof> {
-        Ok(ShareEncryptionProof {
+    fn to_core(&self, key: &thunderbolt_core::zkp::production::PublicKey3072) -> Result<ShareEncryptionProof3072> {
+        Ok(ShareEncryptionProof3072 {
             a_point: decode_point_v2("share_v2.proof.a_point", &self.a_point)?,
             a_ciphertext: decode_ciphertext_v2(key, &self.a_ciphertext)?,
-            z: decode_response_v2(&self.z),
+            z: decode_response_v2(&self.z)?,
             tau: decode_nonce_v2(key, &self.tau)?,
         })
     }
@@ -388,7 +389,7 @@ impl RecipientShareStatementV2 {
         Ok(value)
     }
 
-    pub fn from_core(statement: &ShareEncryptionStatement) -> Result<Self> {
+    pub fn from_core(statement: &ShareEncryptionStatement3072) -> Result<Self> {
         let recipient_key = encode_key_v2(&statement.recipient_key)?;
         let value = Self {
             anchor_base: encode_point_v2("recipient_share_v2.statement.anchor_base", &statement.anchor_base)?,
@@ -465,8 +466,8 @@ impl RecipientShareEnvelopeV2 {
     pub fn from_core(
         binding: OperationBindingV2,
         package: ThresholdPackageBindingV2,
-        statement: &ShareEncryptionStatement,
-        proof: &ShareEncryptionProof,
+        statement: &ShareEncryptionStatement3072,
+        proof: &ShareEncryptionProof3072,
     ) -> Result<Self> {
         require_invoice_operation(&binding)?;
         package.validate_for_operation(&binding)?;
@@ -483,13 +484,18 @@ impl RecipientShareEnvelopeV2 {
         Ok(value)
     }
 
-    pub fn to_core(&self) -> Result<(ShareEncryptionStatement, ShareEncryptionProof)> {
+    pub fn to_core_with_keys<R>(&self, resolver: &R) -> Result<(ShareEncryptionStatement3072, ShareEncryptionProof3072)>
+    where
+        R: CertifiedKeyResolver3072 + ?Sized,
+    {
         self.validate_wire()?;
-        let key = decode_key_v2(
+        let key = resolve_key_v2(
             "recipient_share_v2.statement.recipient_key",
             &self.statement.recipient_key,
+            CertifiedKeyRole3072::Recipient,
+            resolver,
         )?;
-        let statement = ShareEncryptionStatement {
+        let statement = ShareEncryptionStatement3072 {
             context: self.proof_context()?,
             anchor_base: decode_point_v2("recipient_share_v2.statement.anchor_base", &self.statement.anchor_base)?,
             recipient_key: key.clone(),
@@ -509,15 +515,18 @@ impl RecipientShareEnvelopeV2 {
         self.package.proof_context(&self.binding)
     }
 
-    pub fn verify(&self) -> Result<()> {
-        let (statement, proof) = self.to_core()?;
-        verify_share_encryption_with_profile(PaillierModulusProfile::ProtocolV2Production3072, &statement, &proof)
+    pub fn verify_with_keys<R>(&self, resolver: &R) -> Result<()>
+    where
+        R: CertifiedKeyResolver3072 + ?Sized,
+    {
+        let (statement, proof) = self.to_core_with_keys(resolver)?;
+        verify_share_encryption_3072(&statement, &proof)
             .map_err(|source| core_error("protocol v2 Recipient share verification", source))
     }
 
     fn append_canonical(&self, hasher: &mut CanonicalHasher) -> Result<()> {
         self.binding.append_canonical(hasher);
-        hasher.u8(self.paillier_profile.core() as u8);
+        hasher.u8(self.paillier_profile.profile_id());
         self.package.append_canonical(hasher)?;
         self.statement.append_canonical(hasher);
         self.proof.append_canonical(hasher);
@@ -579,28 +588,6 @@ impl ThresholdEncryptedShareV2 {
         Ok(value)
     }
 
-    fn from_core(share: &ThresholdEncryptedShare) -> Result<Self> {
-        let encryption_key = encode_key_v2(&share.encryption_key)?;
-        let value = Self {
-            member_id: share.member_id,
-            encryption_key,
-            ciphertext: encode_ciphertext_v2(&share.encryption_key, &share.ciphertext)?,
-            proof: ShareProofV2::from_core(&share.encryption_key, &share.proof)?,
-        };
-        value.validate_wire()?;
-        Ok(value)
-    }
-
-    fn to_core(&self) -> Result<ThresholdEncryptedShare> {
-        let key = decode_key_v2("threshold_v2.share.encryption_key", &self.encryption_key)?;
-        Ok(ThresholdEncryptedShare {
-            member_id: self.member_id,
-            ciphertext: decode_ciphertext_v2(&key, &self.ciphertext)?,
-            proof: self.proof.to_core(&key)?,
-            encryption_key: key,
-        })
-    }
-
     fn append_canonical(&self, hasher: &mut CanonicalHasher) {
         hasher.u32(self.member_id);
         hasher.bytes(self.encryption_key.as_bytes());
@@ -660,60 +647,6 @@ impl ThresholdDistributionV2 {
         };
         value.validate_wire()?;
         Ok(value)
-    }
-
-    pub fn from_core(distribution: &ThresholdRefreshDistribution) -> Result<Self> {
-        let threshold = u32::try_from(distribution.threshold).map_err(|_| WireError::InvalidMessage {
-            message: "protocol v2 threshold refresh",
-            reason: "threshold does not fit in the wire format",
-        })?;
-        let mut encrypted_shares = distribution
-            .encrypted_shares
-            .iter()
-            .map(ThresholdEncryptedShareV2::from_core)
-            .collect::<Result<Vec<_>>>()?;
-        encrypted_shares.sort_by_key(|share| share.member_id);
-        let value = Self {
-            anchor_base: encode_point_v2("threshold_v2.anchor_base", &distribution.anchor_base)?,
-            threshold,
-            delta: encode_point_v2("threshold_v2.delta", &distribution.delta)?,
-            polynomial_commitments: distribution
-                .polynomial_commitments
-                .iter()
-                .map(|point| encode_point_v2("threshold_v2.polynomial_commitment", point))
-                .collect::<Result<Vec<_>>>()?,
-            encrypted_shares,
-        };
-        value.validate_wire()?;
-        Ok(value)
-    }
-
-    fn to_core(&self, context: thunderbolt_core::zkp::ProofContext) -> Result<ThresholdRefreshDistribution> {
-        self.validate_wire()?;
-        let first_share = self.encrypted_shares.first().ok_or(WireError::InvalidMessage {
-            message: "protocol v2 threshold refresh",
-            reason: "distribution must contain at least one encrypted share",
-        })?;
-        let _ = decode_key_v2("threshold_v2.share.encryption_key", &first_share.encryption_key)?;
-        Ok(ThresholdRefreshDistribution {
-            context,
-            anchor_base: decode_point_v2("threshold_v2.anchor_base", &self.anchor_base)?,
-            threshold: usize::try_from(self.threshold).map_err(|_| WireError::InvalidMessage {
-                message: "protocol v2 threshold refresh",
-                reason: "threshold does not fit on this platform",
-            })?,
-            delta: decode_point_v2("threshold_v2.delta", &self.delta)?,
-            polynomial_commitments: self
-                .polynomial_commitments
-                .iter()
-                .map(|point| decode_point_v2("threshold_v2.polynomial_commitment", point))
-                .collect::<Result<Vec<_>>>()?,
-            encrypted_shares: self
-                .encrypted_shares
-                .iter()
-                .map(ThresholdEncryptedShareV2::to_core)
-                .collect::<Result<Vec<_>>>()?,
-        })
     }
 
     fn validate_against_roster(&self, roster: &ThresholdRosterV2) -> Result<()> {
@@ -825,48 +758,27 @@ impl ThresholdEnvelopeV2 {
         Ok(value)
     }
 
-    pub fn from_core(
-        binding: OperationBindingV2,
-        package: ThresholdPackageBindingV2,
-        distribution: &ThresholdRefreshDistribution,
-    ) -> Result<Self> {
-        require_invoice_operation(&binding)?;
-        package.validate_for_operation(&binding)?;
-        let expected_context = package.proof_context(&binding)?;
-        require_matching_context(&expected_context, &distribution.context)?;
-        let value = Self {
-            binding,
-            paillier_profile: PaillierModulusProfileV2::ProtocolV2Production3072,
-            package,
-            distribution: ThresholdDistributionV2::from_core(distribution)?,
-        };
-        value.validate_wire()?;
-        Ok(value)
-    }
-
-    pub fn to_core(&self) -> Result<ThresholdRefreshDistribution> {
-        self.validate_wire()?;
-        self.distribution.to_core(self.proof_context()?)
-    }
-
     /// Returns the exact package-bound Fiat-Shamir context shared with the
     /// Recipient proof.
     pub fn proof_context(&self) -> Result<thunderbolt_core::zkp::ProofContext> {
         self.package.proof_context(&self.binding)
     }
 
+    /// The paper does not specify the concrete aggregate VESS equations or
+    /// Fiat-Shamir transcript. Wire/package validation remains available, but
+    /// cryptographic activation stays closed until that specification exists.
     pub fn verify(&self) -> Result<()> {
-        let distribution = self.to_core()?;
-        verify_threshold_refresh_distribution_with_profile(
-            PaillierModulusProfile::ProtocolV2Production3072,
-            &distribution,
-        )
-        .map_err(|source| core_error("protocol v2 threshold refresh verification", source))
+        self.validate_wire()?;
+        Err(WireError::InvalidMessage {
+            message: "protocol v2 threshold refresh",
+            reason:
+                "aggregate VESS verification is unavailable without a concrete equation and transcript specification",
+        })
     }
 
     fn append_canonical(&self, hasher: &mut CanonicalHasher) -> Result<()> {
         self.binding.append_canonical(hasher);
-        hasher.u8(self.paillier_profile.core() as u8);
+        hasher.u8(self.paillier_profile.profile_id());
         self.package.append_canonical(hasher)?;
         self.distribution.append_canonical(hasher)
     }

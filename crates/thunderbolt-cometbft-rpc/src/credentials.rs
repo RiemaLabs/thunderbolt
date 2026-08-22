@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 
 use rustls::client::ResolvesClientCert;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::{pem::PemObject as _, CertificateDer, PrivateKeyDer};
 use rustls::sign::CertifiedKey;
 use sha2::{Digest as _, Sha256};
 use thunderbolt_cometbft_client::PeerIdentity;
@@ -93,17 +93,13 @@ impl OwnerOnlyPemClientIdentity {
     pub fn load(certificate_path: impl AsRef<Path>, private_key_path: impl AsRef<Path>) -> Result<Self> {
         let certificate = read_protected(certificate_path.as_ref(), MAX_CERTIFICATE_PEM_BYTES, false)?;
         let private_key = read_protected(private_key_path.as_ref(), MAX_PRIVATE_KEY_PEM_BYTES, true)?;
-        let mut certificate_reader = std::io::Cursor::new(certificate.as_slice());
-        let certificates = rustls_pemfile::certs(&mut certificate_reader)
+        let certificates = CertificateDer::pem_slice_iter(certificate.as_slice())
             .collect::<std::result::Result<Vec<CertificateDer<'static>>, _>>()
             .map_err(|_| RpcTransportError::Credential)?;
         if certificates.is_empty() || certificates.len() > 8 {
             return Err(RpcTransportError::Credential);
         }
-        let mut key_reader = std::io::Cursor::new(private_key.as_slice());
-        let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key_reader)
-            .map_err(|_| RpcTransportError::Credential)?
-            .ok_or(RpcTransportError::Credential)?;
+        let key = PrivateKeyDer::from_pem_slice(private_key.as_slice()).map_err(|_| RpcTransportError::Credential)?;
         let provider = rustls::crypto::CryptoProvider::get_default()
             .cloned()
             .unwrap_or_else(|| Arc::new(rustls::crypto::aws_lc_rs::default_provider()));

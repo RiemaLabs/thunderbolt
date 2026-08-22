@@ -19,6 +19,7 @@ use thunderbolt_ledger_rpc::{ExecutionRangeCursorV2, MAX_EXECUTION_RANGE_BLOCKS}
 use crate::{ClientError, Result};
 
 const REFERENCE_MAGIC: &[u8; 8] = b"TBHER001";
+const BLOCK_REFERENCE_MAGIC: &[u8; 8] = b"TBHBR001";
 const REFERENCE_CHAIN_BYTES: usize = 50;
 const MIN_RPC_TIMEOUT: Duration = Duration::from_millis(100);
 const MAX_RPC_TIMEOUT: Duration = Duration::from_secs(120);
@@ -26,6 +27,8 @@ const CLIENT_STATIC_PROFILE_DOMAIN: &[u8] = b"bitcoin-thunderbolt/ledger-comet-c
 const CLIENT_PROFILE_DOMAIN: &[u8] = b"bitcoin-thunderbolt/ledger-comet-client/profile/v1";
 /// Exact fixed-width authority-free historical-reference encoding.
 pub const MAX_HISTORICAL_REFERENCE_BYTES: usize = 423;
+/// Exact fixed-width authority-free historical whole-block-reference encoding.
+pub const MAX_HISTORICAL_BLOCK_REFERENCE_BYTES: usize = 291;
 /// Maximum finalized execution blocks inspected by one absence proof.
 pub const MAX_LOCATOR_SCAN_BLOCKS: u32 = 4_096;
 /// Maximum configured proof bytes inspected by one absence verification.
@@ -301,6 +304,276 @@ fn derive_client_profile(
 fn append_profile_bytes(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
     hasher.update(bytes);
+}
+
+/// Fixed-width provider-free historical locator for one complete executed block.
+///
+/// This value contains no validator receipt, peer identity, entry index, or
+/// capability authority. Deserialization proves canonical shape only. Every
+/// use must call `LedgerCometClient::revalidate_block_reference` against the
+/// externally anchored coordinator history.
+#[derive(Clone, PartialEq, Eq)]
+pub struct HistoricalBlockReferenceV2 {
+    pub(crate) profile_id: ClientProfileIdV2,
+    pub(crate) coordinator_identity: TrustCoordinatorIdentity,
+    pub(crate) ledger_chain_id: LedgerChainIdV2,
+    pub(crate) source_config_version: u64,
+    pub(crate) application_version: u64,
+    pub(crate) execution_height: u64,
+    pub(crate) execution_block_time_ms: u64,
+    pub(crate) application_hash: AppHashV2,
+    pub(crate) execution_header_hash: [u8; 32],
+    pub(crate) committing_height: u64,
+    pub(crate) committing_header_hash: [u8; 32],
+    pub(crate) proof_digest: [u8; 32],
+}
+
+impl HistoricalBlockReferenceV2 {
+    pub(crate) fn from_finality(
+        profile_id: ClientProfileIdV2,
+        coordinator_identity: TrustCoordinatorIdentity,
+        summary: &FinalitySummary,
+        proof_digest: [u8; 32],
+    ) -> Result<Self> {
+        let reference = Self {
+            profile_id,
+            coordinator_identity,
+            ledger_chain_id: summary.ledger_chain_id().clone(),
+            source_config_version: summary.config_version(),
+            application_version: summary.application_version(),
+            execution_height: summary.execution_height(),
+            execution_block_time_ms: summary.execution_block_time_ms(),
+            application_hash: summary.application_hash().clone(),
+            execution_header_hash: *summary.execution_header_hash(),
+            committing_height: summary.committing_height(),
+            committing_header_hash: *summary.committing_header_hash(),
+            proof_digest,
+        };
+        reference.validate_shape()?;
+        Ok(reference)
+    }
+
+    /// Encodes the sole fixed-width binary representation.
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let mut output = Vec::with_capacity(MAX_HISTORICAL_BLOCK_REFERENCE_BYTES);
+        output.extend_from_slice(BLOCK_REFERENCE_MAGIC);
+        output.extend_from_slice(self.profile_id.as_bytes());
+        output.extend_from_slice(self.coordinator_identity.as_bytes());
+        let chain = self.ledger_chain_id.as_bytes();
+        output.push(u8::try_from(chain.len()).unwrap_or(u8::MAX));
+        output.extend_from_slice(chain);
+        output.resize(8 + 32 + 32 + 1 + REFERENCE_CHAIN_BYTES, 0);
+        output.extend_from_slice(&self.source_config_version.to_be_bytes());
+        output.extend_from_slice(&self.application_version.to_be_bytes());
+        output.extend_from_slice(&self.execution_height.to_be_bytes());
+        output.extend_from_slice(&self.execution_block_time_ms.to_be_bytes());
+        output.extend_from_slice(self.application_hash.as_bytes());
+        output.extend_from_slice(&self.execution_header_hash);
+        output.extend_from_slice(&self.committing_height.to_be_bytes());
+        output.extend_from_slice(&self.committing_header_hash);
+        output.extend_from_slice(&self.proof_digest);
+        output
+    }
+
+    /// Decodes canonical shape without granting finality authority.
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() != MAX_HISTORICAL_BLOCK_REFERENCE_BYTES
+            || bytes.get(..8) != Some(BLOCK_REFERENCE_MAGIC.as_slice())
+        {
+            return Err(ClientError::BindingMismatch);
+        }
+        let chain_len = usize::from(*bytes.get(72).ok_or(ClientError::BindingMismatch)?);
+        if chain_len == 0 || chain_len > REFERENCE_CHAIN_BYTES {
+            return Err(ClientError::BindingMismatch);
+        }
+        let chain_start = 73;
+        let chain_end = chain_start + chain_len;
+        if bytes
+            .get(chain_end..123)
+            .ok_or(ClientError::BindingMismatch)?
+            .iter()
+            .any(|byte| *byte != 0)
+        {
+            return Err(ClientError::BindingMismatch);
+        }
+        let reference = Self {
+            profile_id: ClientProfileIdV2(copy_fixed::<32>(bytes, 8)?),
+            coordinator_identity: TrustCoordinatorIdentity::new(copy_fixed::<32>(bytes, 40)?)?,
+            ledger_chain_id: LedgerChainIdV2::new(
+                std::str::from_utf8(bytes.get(chain_start..chain_end).ok_or(ClientError::BindingMismatch)?)
+                    .map_err(|_| ClientError::BindingMismatch)?,
+            )
+            .map_err(|_| ClientError::BindingMismatch)?,
+            source_config_version: read_u64(bytes, 123)?,
+            application_version: read_u64(bytes, 131)?,
+            execution_height: read_u64(bytes, 139)?,
+            execution_block_time_ms: read_u64(bytes, 147)?,
+            application_hash: AppHashV2::from_bytes(copy_fixed::<32>(bytes, 155)?)
+                .map_err(|_| ClientError::BindingMismatch)?,
+            execution_header_hash: copy_fixed::<32>(bytes, 187)?,
+            committing_height: read_u64(bytes, 219)?,
+            committing_header_hash: copy_fixed::<32>(bytes, 227)?,
+            proof_digest: copy_fixed::<32>(bytes, 259)?,
+        };
+        reference.validate_shape()?;
+        if reference.canonical_bytes() != bytes {
+            return Err(ClientError::BindingMismatch);
+        }
+        Ok(reference)
+    }
+
+    fn validate_shape(&self) -> Result<()> {
+        if self.profile_id.0 == [0_u8; 32]
+            || self.source_config_version == 0
+            || self.application_version != 2
+            || self.execution_height == 0
+            || self.execution_block_time_ms == 0
+            || self.application_hash.is_zero()
+            || self.execution_header_hash == [0_u8; 32]
+            || self.committing_height
+                != self
+                    .execution_height
+                    .checked_add(1)
+                    .ok_or(ClientError::BindingMismatch)?
+            || self.committing_header_hash == [0_u8; 32]
+            || self.proof_digest == [0_u8; 32]
+        {
+            return Err(ClientError::BindingMismatch);
+        }
+        Ok(())
+    }
+
+    /// Returns the audited client profile required for revalidation.
+    pub const fn profile_id(&self) -> ClientProfileIdV2 {
+        self.profile_id
+    }
+
+    /// Returns the exact coordinator identity required for revalidation.
+    pub const fn coordinator_identity(&self) -> TrustCoordinatorIdentity {
+        self.coordinator_identity
+    }
+
+    /// Returns the exact Ledger chain.
+    pub const fn ledger_chain_id(&self) -> &LedgerChainIdV2 {
+        &self.ledger_chain_id
+    }
+
+    /// Returns the historical source-roster version.
+    pub const fn source_config_version(&self) -> u64 {
+        self.source_config_version
+    }
+
+    /// Returns the verified application version.
+    pub const fn application_version(&self) -> u64 {
+        self.application_version
+    }
+
+    /// Returns the exact finalized execution height.
+    pub const fn execution_height(&self) -> u64 {
+        self.execution_height
+    }
+
+    /// Returns the exact consensus execution time in milliseconds.
+    pub const fn execution_block_time_ms(&self) -> u64 {
+        self.execution_block_time_ms
+    }
+
+    /// Returns the exact finalized application hash.
+    pub const fn application_hash(&self) -> &AppHashV2 {
+        &self.application_hash
+    }
+
+    /// Returns the verified execution-header hash.
+    pub const fn execution_header_hash(&self) -> &[u8; 32] {
+        &self.execution_header_hash
+    }
+
+    /// Returns the adjacent committing height.
+    pub const fn committing_height(&self) -> u64 {
+        self.committing_height
+    }
+
+    /// Returns the verified committing-header hash.
+    pub const fn committing_header_hash(&self) -> &[u8; 32] {
+        &self.committing_header_hash
+    }
+
+    /// Returns the coordinator integrity digest for the exact proof bundle.
+    pub const fn proof_digest(&self) -> &[u8; 32] {
+        &self.proof_digest
+    }
+}
+
+impl fmt::Debug for HistoricalBlockReferenceV2 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HistoricalBlockReferenceV2")
+            .field("profile_id", &self.profile_id)
+            .field("ledger_chain_id", &self.ledger_chain_id)
+            .field("source_config_version", &self.source_config_version)
+            .field("execution_height", &self.execution_height)
+            .field("application_version", &self.application_version)
+            .field("authority", &"none")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Serialize for HistoricalBlockReferenceV2 {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&hex::encode(self.canonical_bytes()))
+    }
+}
+
+struct BlockReferenceVisitor;
+
+impl<'de> Visitor<'de> for BlockReferenceVisitor {
+    type Value = HistoricalBlockReferenceV2;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "exactly {} lowercase hexadecimal characters",
+            MAX_HISTORICAL_BLOCK_REFERENCE_BYTES * 2
+        )
+    }
+
+    fn visit_borrowed_str<E>(self, value: &'de str) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        decode_block_reference_hex(value).map_err(E::custom)
+    }
+
+    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        decode_block_reference_hex(value).map_err(E::custom)
+    }
+}
+
+impl<'de> Deserialize<'de> for HistoricalBlockReferenceV2 {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_str(BlockReferenceVisitor)
+    }
+}
+
+fn decode_block_reference_hex(value: &str) -> Result<HistoricalBlockReferenceV2> {
+    if value.len() != MAX_HISTORICAL_BLOCK_REFERENCE_BYTES * 2
+        || value
+            .bytes()
+            .any(|byte| !(byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')))
+    {
+        return Err(ClientError::BindingMismatch);
+    }
+    let bytes = hex::decode(value).map_err(|_| ClientError::BindingMismatch)?;
+    HistoricalBlockReferenceV2::from_canonical_bytes(&bytes)
 }
 
 /// Fixed-width serializable locator with no receipt or capability authority.
@@ -629,16 +902,15 @@ impl fmt::Debug for HolderFinalityCapabilityV2 {
 /// Private in-process finality capability for one complete executed block.
 #[derive(Clone)]
 pub struct FinalizedBlockCapabilityV2 {
-    pub(crate) profile_id: ClientProfileIdV2,
+    pub(crate) reference: HistoricalBlockReferenceV2,
     pub(crate) summary: FinalizedExecutionSummaryV2,
     pub(crate) block: ExecutedBlockV2,
-    pub(crate) proof_digest: [u8; 32],
 }
 
 impl FinalizedBlockCapabilityV2 {
     /// Returns the audited client profile.
     pub const fn profile_id(&self) -> ClientProfileIdV2 {
-        self.profile_id
+        self.reference.profile_id
     }
 
     /// Returns the finality summary bound to the block.
@@ -653,7 +925,12 @@ impl FinalizedBlockCapabilityV2 {
 
     /// Returns the coordinator integrity digest for the historical proof bundle.
     pub const fn proof_digest(&self) -> &[u8; 32] {
-        &self.proof_digest
+        &self.reference.proof_digest
+    }
+
+    /// Returns the provider-free authority-free historical block reference.
+    pub const fn reference(&self) -> &HistoricalBlockReferenceV2 {
+        &self.reference
     }
 }
 
@@ -661,7 +938,7 @@ impl fmt::Debug for FinalizedBlockCapabilityV2 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("FinalizedBlockCapabilityV2")
-            .field("profile_id", &self.profile_id)
+            .field("profile_id", &self.reference.profile_id)
             .field("height", &self.block.height())
             .field("entry_count", &self.block.entries().len())
             .field("app_hash", self.block.app_hash())
@@ -774,6 +1051,42 @@ pub struct PreparedExecutionRangeV2 {
 }
 
 impl PreparedExecutionRangeV2 {
+    pub(crate) fn from_staged_blocks(
+        profile_id: ClientProfileIdV2,
+        coordinator_identity: TrustCoordinatorIdentity,
+        blocks: Vec<ExecutedBlockV2>,
+        next_cursor: ExecutionRangeCursorV2,
+        max_execution_encoded_bytes: usize,
+    ) -> Result<Self> {
+        if blocks.is_empty() || blocks.len() > usize::from(MAX_EXECUTION_RANGE_BLOCKS) {
+            return Err(ClientError::Capacity);
+        }
+        for pair in blocks.windows(2) {
+            pair[1]
+                .validate_successor(&pair[0])
+                .map_err(|_| ClientError::BindingMismatch)?;
+        }
+        let intents = blocks
+            .into_iter()
+            .map(|block| {
+                FinalityAdvanceIntentV2::new(profile_id, coordinator_identity, block, max_execution_encoded_bytes)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let last = intents.last().ok_or(ClientError::Capacity)?;
+        if next_cursor.ledger_chain_id() != last.execution().ledger_chain_id()
+            || next_cursor.next_height()
+                != last
+                    .execution()
+                    .height()
+                    .checked_add(1)
+                    .ok_or(ClientError::BindingMismatch)?
+            || next_cursor.expected_previous_app_hash() != last.execution().app_hash()
+        {
+            return Err(ClientError::BindingMismatch);
+        }
+        Ok(Self { intents, next_cursor })
+    }
+
     /// Returns authority-free exact execution intents in global block order.
     pub fn intents(&self) -> &[FinalityAdvanceIntentV2] {
         &self.intents

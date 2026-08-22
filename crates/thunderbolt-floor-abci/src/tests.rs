@@ -291,8 +291,23 @@ fn info_and_init_pin_profile_validators_and_resources() -> TestResult<()> {
     assert_eq!(info.last_block_height, 0);
     let response = adapter.try_init_chain(init_request(&fixture)?)?;
     assert_eq!(response.consensus_params, Some(expected_consensus_parameters()));
+    let app_state = fixture
+        .adapter()?
+        .consensus_profile()
+        .genesis_app_state_bytes(&fixture.genesis)?;
+    let json: serde_json::Value = serde_json::from_slice(&app_state)?;
+    assert_eq!(serde_json::to_vec(&json)?, app_state);
+    assert_eq!(json["format"], "bitcoin-thunderbolt-floor-genesis-v2");
+    assert_eq!(json["application_version"], 2);
+    assert_eq!(
+        <[u8; 32]>::from(Sha256::digest(&app_state)),
+        [
+            0x6e, 0xf2, 0xf1, 0x82, 0xd6, 0xab, 0x0e, 0x5b, 0xd2, 0x88, 0x09, 0xde, 0x07, 0x18, 0xf8, 0x07, 0x3a, 0x67,
+            0x53, 0x90, 0x2c, 0x52, 0x02, 0x23, 0x8c, 0xd8, 0xdd, 0x7d, 0x59, 0x85, 0x41, 0x40,
+        ]
+    );
     let mut wrong = init_request(&fixture)?;
-    wrong.app_state_bytes = vec![0; 144].into();
+    wrong.app_state_bytes = b"{}".to_vec().into();
     assert!(adapter.try_init_chain(wrong).is_err());
     let mut wrong = init_request(&fixture)?;
     wrong.validators[0].power += 1;

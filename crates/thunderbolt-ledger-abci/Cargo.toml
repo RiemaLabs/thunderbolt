@@ -13,7 +13,7 @@ categories = ["cryptography::cryptocurrencies", "database"]
 default = []
 # Insecure proof acceptance exists only to drive an isolated live consensus
 # compatibility test. Never enable this feature in a release deployment.
-insecure-live-test = ["dep:prost"]
+insecure-live-test = ["dep:thunderbolt-abci-server"]
 
 [[bin]]
 name = "thunderbolt-ledger-abci-live-test"
@@ -30,13 +30,13 @@ workspace = true
 
 [dependencies]
 bytes = "1.10.1"
-prost = { version = "0.13.5", optional = true }
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.10.9"
 tendermint-abci = "0.40.4"
 tendermint-proto = "0.40.4"
 thiserror = "2.0.16"
+thunderbolt-abci-server = { path = "../thunderbolt-abci-server", optional = true }
 thunderbolt-ledger = { path = "../thunderbolt-ledger" }
 thunderbolt-ledger-app = { path = "../thunderbolt-ledger-app" }
 thunderbolt-ledger-rpc = { path = "../thunderbolt-ledger-rpc" }
