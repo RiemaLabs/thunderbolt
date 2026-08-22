@@ -1,6 +1,4 @@
-use bitcoin::bip32::Xpriv;
-use bitcoin::key::{rand, Parity};
-use bitcoin::{Address, Network, PublicKey, XOnlyPublicKey};
+use bitcoin::Network;
 use bitcoin_utils::account::AccountInfo;
 use lazy_static::lazy_static;
 use secp::{Point, Scalar};

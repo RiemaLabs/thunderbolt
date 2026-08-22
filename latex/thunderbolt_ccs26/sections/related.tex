@@ -1,0 +1,22 @@
+\section{Related Work}\label{sec:related}
+
+\paragraph{Payment channels and layer-2 protocols.}
+The concept of off-chain payment channels dates to Spilman~\cite{spilman2013} and was substantially generalized by Poon and Dryja's Lightning Network~\cite{poon2016lightning}, which chains channels into a routed graph using HTLCs. Decker and Wattenhofer~\cite{decker2015fast} propose duplex micropayment channels using timelocked commitment trees. The \emph{eltoo} (ANYPREVOUT) update mechanism~\cite{decker2018eltoo} simplifies channel state management at the protocol level but still assumes a bidirectional two-party channel. All of these designs require the endpoints of a channel to be fixed at open time and to be online during payment. \thunderbolt differs by allowing the ``endpoint'' to change: the holder role moves from one user to the next via off-chain transfer, without opening a new channel.
+
+\paragraph{Virtual channels and channel factories.}
+Dziembowski et al.~\cite{dziembowski2018virtual} introduce virtual channels that avoid the need for a direct link between payer and payee by tunneling through an intermediary's channels. Burchert et al.~\cite{burchert2018scalable} propose channel factories that batch-open many channels in a single on-chain transaction. These approaches reduce the on-chain cost per channel but still require channels to be opened between specific pairs. \thunderbolt eliminates per-pair channels entirely: a single UTXO lock supports an unbounded chain of holder transitions.
+
+\paragraph{Verifiable encryption of discrete logarithms.}
+Camenisch and Shoup~\cite{camenisch2003verifiable} give an efficient protocol for proving that a Paillier ciphertext encrypts the discrete logarithm of a known group element, using Sigma protocols. Their construction has been widely used in threshold cryptography, electronic voting, and escrow schemes. Asokan et al.~\cite{asokan1998optimistic} give earlier constructions for verifiable encryption in the context of optimistic fair exchange. Our Core Proofs 1 and 2 are direct instantiations of Camenisch--Shoup verifiable encryption, specialized to the ``one add, one subtract'' invariant of \thunderbolt.
+
+\paragraph{Verifiable encrypted secret sharing.}
+Shoup's Simple VESS~\cite{shoup2024simple} provides a verifiable encryption of Shamir secret sharing to a committee, designed as a building block for distributed key generation and resharing. Earlier work on verifiable secret sharing includes Feldman~\cite{feldman1987practical} and Pedersen~\cite{pedersen1991non}, which provide information-theoretic verification but not encryption to specific recipients. \thunderbolt uses VESS when the Committee is instantiated as a threshold group, to distribute the committee-side refresh $r_s$ so that no single member learns the committee share $y_s$.
+
+\paragraph{Threshold signatures for Bitcoin.}
+FROST~\cite{komlo2021frost} and ROAST~\cite{ruffing2022roast} provide efficient threshold Schnorr signing, which can be used to finalize a \thunderbolt channel when the on-chain output is a Taproot key. Lindell~\cite{lindell2017fast} gives a two-party ECDSA protocol. These schemes are complementary to \thunderbolt: they handle the on-chain finalization, while our Core ZKPs handle the off-chain state transitions.
+
+\paragraph{General-purpose zero-knowledge proofs.}
+Groth16~\cite{groth16}, Plonk~\cite{gabizon2019plonk}, and zkVM-based systems such as Succinct SP1~\cite{sp1} and RISC Zero~\cite{risczero} can in principle prove any NP statement. While powerful, these systems pay a large constant for algebraic relations that Sigma protocols handle natively. Recent work on aggregated SNARKs for blockchain state~\cite{boneh2020recursive} reduces verification costs at scale but does not eliminate the proving-time overhead.
+
+\paragraph{Off-chain protocols beyond Bitcoin.}
+Ethereum's layer-2 landscape includes optimistic rollups~\cite{arbitrum} and zk-rollups~\cite{zkSync}, which batch many transactions into a single on-chain proof or challenge. These systems benefit from Ethereum's expressive smart contracts and are not directly comparable to Bitcoin-native protocols. \thunderbolt is designed specifically for Bitcoin's constrained scripting environment.

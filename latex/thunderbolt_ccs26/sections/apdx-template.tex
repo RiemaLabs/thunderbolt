@@ -1,0 +1,103 @@
+\section{Semantic Vectorization for Input Abstraction}\label{apdx:template}
+
+To enable transfer across schemas, SGIA assigns each abstract bucket $\theta$ a short semantic description $\text{desc}(\theta)$ that is later consumed by the bucket encoder $\mu_b$ (\autoref{sec:vectorization}, \autoref{sec:policy_action}). In our implementation, we use lightweight lexical features (deterministic feature hashing~\cite{weinberger2009featurehashing}) rather than a pretrained language model, which is sufficient to generalize across schemas at low overhead.
+
+We use a schema-agnostic template:
+
+\begin{mdframed}[
+    backgroundcolor=gray!10,
+    linecolor=white,
+    skipabove=0.5em
+    ]
+\noindent\ttfamily\small
+Field=[FieldPath] \\
+Type=[SSZType] \\
+Aspect=[AspectID] \\
+Bucket=[BucketID] \\
+Meaning=[NaturalLanguageHint]
+\end{mdframed}
+
+\paragraph{What the fields mean}
+Each line corresponds to a component of the bucket $\theta$:
+\begin{itemize}
+    \item \textbf{Field} is the fully-qualified path of the affected schema field (e.g., \icode{BeaconState.JustificationBits}).
+    \item \textbf{Type} is the SSZ type of that field (e.g., \icode{Bitvector[4]}).
+    \item \textbf{Aspect} identifies \emph{which part of the encoding} is being bucketed (e.g., \icode{Value}, \icode{Length}, \icode{ElementValue}, \icode{Offset}, \icode{Tail}).
+    \item \textbf{Bucket} is the bucket identifier within that aspect. For type-driven templates, this ID corresponds to a concrete interval (\autoref{apdx:typp}); for spec-derived boundaries, it is a symbolic label (e.g., \icode{DirtyTail}).
+    \item \textbf{Meaning} is a short human-readable gloss of the boundary the bucket represents. It is not required by the concretizer, but provides lexical cues for transfer across schemas and makes buckets auditable.
+\end{itemize}
+
+Formally, $\text{desc}(\theta)$ is a deterministic string obtained by concatenating the above components.
+The online phase then uses the encoder $\mu_b$ to map this string into a fixed-dimensional vector $h_\theta \in \mathbb{R}^d$.
+In our prototype, $\mu_b$ is implemented via deterministic feature hashing~\cite{weinberger2009featurehashing}: for $i\in\{1,\ldots,d\}$,
+\[
+    h_\theta[i] = {\sf scale}\big(H(\text{desc}(\theta), i)\big) \in [-1,1],
+\]
+where $H$ is a stable hash function and ${\sf scale}(\cdot)$ maps the hash output into a bounded real value. The full description $\text{desc}(\theta)$ contains all components; the encoder may hash a chosen subset of fields (at minimum Field/Aspect/Bucket) depending on the desired invariances.
+
+In the current artifact, the hashed key includes at least \icode{Field}, \icode{Aspect}, and \icode{Bucket}; \icode{Type} and \icode{Meaning} can be appended without changing the rest of the pipeline.
+
+For example:
+
+\begin{mdframed}[
+    backgroundcolor=gray!10,
+    linecolor=white,
+    skipabove=0.3em,
+    skipbelow=0.2em
+    ]
+\noindent\ttfamily\small
+Field=BeaconState.\allowbreak JustificationBits \\
+Type=Bitvector[4] \\
+Aspect=ElementValue \\
+Bucket=B11 \\
+Meaning=set non-zero padding bits in the final byte
+\end{mdframed}
+
+\begin{mdframed}[
+    backgroundcolor=gray!10,
+    linecolor=white,
+    skipabove=0.2em,
+    skipbelow=0.2em
+    ]
+\noindent\ttfamily\small
+Field=Validator.\allowbreak Slashed \\
+Type=boolean \\
+Aspect=Value \\
+Bucket=Dirty \\
+Meaning=non-canonical boolean byte in 0x02--0xFF
+\end{mdframed}
+
+\begin{mdframed}[
+    backgroundcolor=gray!10,
+    linecolor=white,
+    skipabove=0.2em,
+    skipbelow=0.2em
+    ]
+\noindent\ttfamily\small
+Field=SuffixStateDiff.\allowbreak NewValue \\
+Type=Optional[Bytes32] \\
+Aspect=Tail \\
+Bucket=DirtyTail \\
+Meaning=append trailing bytes to the None selector
+\end{mdframed}
+
+\begin{mdframed}[
+    backgroundcolor=gray!10,
+    linecolor=white,
+    skipabove=0.2em
+    ]
+\noindent\ttfamily\small
+Field=PendingAttestation.\allowbreak AggregationBits \\
+Type=Bitlist[2048] \\
+Aspect=ElementValue \\
+Bucket=B0 \\
+Meaning=inject 0x00 to probe the missing-sentinel boundary
+\end{mdframed}
+
+\paragraph{Interpreting the examples}
+The bucket IDs above correspond to concrete constraints in $\Theta$.
+For instance, \icode{B11} refers to the highest byte bucket $[0xF2,0xFF]$ (\autoref{apdx:typp}); when applied to \icode{Bitvector[4]} stored in one byte, sampling from this bucket naturally sets non-zero padding bits.
+Similarly, \icode{Dirty} is the boolean non-canonical bucket $[0x02,0xFF]$, \icode{DirtyTail} triggers the union trailing-byte boundary, and \icode{B0} includes \icode{0x00}, which probes the missing-sentinel edge case for bitlists.
+
+In our implementation, these descriptions are embedded using deterministic feature hashing to obtain a fixed-dimensional bucket vector.
+This choice keeps the prototype self-contained while still enabling lexical transfer: buckets that share cues such as ``dirty padding'' across schemas map to overlapping hashed features.

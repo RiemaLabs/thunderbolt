@@ -1,0 +1,55 @@
+\section{Catalog of Type-Driven Input Partitioning}\label{apdx:typp}
+
+% \yanju{To be added by Hanzhi.}
+
+This appendix formalizes the base bucket templates used to initialize the abstraction map $\Theta$ in the type-driven stage of SGIA (\autoref{sec:type_partition}). Buckets are induced from base thresholds by taking consecutive intervals; we present the resulting intervals directly for clarity.
+
+For each schema field $v$ (and, where applicable, each aspect such as \emph{value}, \emph{length}, or \emph{offset}), we construct a small collection of balanced buckets that isolate canonical values and systematically cover the remaining domain.
+Unless stated otherwise, each bucket is a closed interval over a finite integer domain; singleton buckets are written as $[x,x]$.
+
+\paragraph{Unsigned integers (\icode{uintN})}
+For \icode{uintN} with maximum value ${\sf MAX}=2^N-1$, we define ten buckets: $B_0=[0,0]$, $B_1=[1,1]$, and eight balanced slices that cover the remaining domain.
+Let $w = \left\lceil \frac{{\sf MAX}-1}{8} \right\rceil$.
+For $j\in\{0,\ldots,7\}$ we define
+\[
+  B_{j+2} = \big[\max(2, j\cdot w),\; \min((j+1)\cdot w - 1, {\sf MAX})\big].
+\]
+Intuitively, this isolates the canonical boundary values 0 and 1, and then partitions the remaining range into near-equal-width regions.
+
+\paragraph{Booleans}
+Booleans are partitioned into three buckets that isolate canonical values and expose dirty encodings:
+$[0x00,0x00]$, $[0x01,0x01]$, and $[0x02,0xFF]$.
+
+\paragraph{Byte values}
+We use twelve equal-width buckets over $[0x00,0xFF]$.
+Let $w_b = \lceil 256/12 \rceil = 22$ and for $i\in\{0,\ldots,11\}$ define
+\[
+  B_i = \big[i\cdot w_b,\; \min((i+1)\cdot w_b - 1, 255)\big].
+\]
+Concretely, this yields ranges such as $B_0=[0x00,0x15]$, $B_1=[0x16,0x2B]$, \dots, $B_{11}=[0xF2,0xFF]$.
+We apply this template to roots, byte lists, and the underlying storage bytes of packed bitfields (bitvectors/bitlists).
+
+\paragraph{List/bitlist lengths}
+For variable-length lists \icode{List[T,L]} and bitlists \icode{Bitlist[L]} with bound $L$, we define six buckets: $B_0=[0,0]$, $B_1=[1,1]$, and four balanced slices over $[2,L]$.
+Let $w = \left\lceil \frac{L-1}{4} \right\rceil$.
+For $j\in\{0,\ldots,3\}$ we define
+\[
+  B_{j+2} = \big[2 + j\cdot w,\; \min(1 + (j+1)\cdot w, L)\big].
+\]
+For fixed-size vectors (via \icode{ssz-size:"N"}), length is deterministic and SGIA does not introduce a length aspect.
+
+\paragraph{Offsets for variable parts}
+For each variable-length field inside an SSZ container, SGIA additionally buckets the 4-byte offset word in the fixed section.
+Let $O_{\max}$ be the largest legal offset for the container (fixed-section size plus the maximum total size of its variable payloads), so offset buckets remain meaningful and bounded in practice.
+
+We define four offset buckets: $B_0=[0,0]$ (malformed) and three balanced slices of $[1,O_{\max}]$.
+Let $w = \lceil O_{\max}/3\rceil$ and for $i\in\{1,2,3\}$ define
+\[
+  B_i = \big[1+(i-1)\cdot w,\; \min(i\cdot w, O_{\max})\big].
+\]
+These buckets apply to the offset words that point into the variable section.
+
+\paragraph{Composition for containers}
+For containers, we apply the corresponding template independently to each field.
+For every variable-length field, SGIA composes (i) a length bucket and (ii) an offset bucket.
+Fixed-size vectors are inlined in the fixed section and therefore do not admit offset buckets.

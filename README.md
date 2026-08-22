@@ -24,6 +24,56 @@ We want an **off-chain UTXO payment system** for Bitcoin that provides a **payme
    - Funds remain locked in a Bitcoin UTXO under a **fixed Taproot key-path pubkey**.
    - Final settlement is a standard on-chain spend (no Bitcoin consensus changes required).
 
+## Current Implementation Status (April 2026)
+
+This repository currently contains **experimental research code**, not a full end-to-end Thunderbolt deployment.
+
+Implemented today:
+- a specialized `CORE_ZKP` proof kernel in `crates/thunderbolt-core/src/zkp/`
+- focused tests for invoice consistency and transfer consistency in `crates/thunderbolt-core/tests/core_zkp.rs`
+- a measurable single-committee off-chain benchmark harness in `crates/thunderbolt-eval/src/benchmark.rs`
+- comparison harnesses against:
+  - local Core Lightning regtest payments in `benchmarks/local-lightning-benchmark/`
+  - a general-purpose SP1 proof of the same transfer-step semantics in `benchmarks/sp1-transfer-benchmark/`
+
+Not implemented end-to-end today:
+- a persistent ledger / invoice pool / spent-set state machine
+- full registration / redeem-readiness proofs
+- threshold committee resharing / PVSS plumbing
+- a production Thunderbolt transfer path that wires the full protocol state machine to the proof kernel
+
+If you are picking up this repo for research, read `RESEARCH_HANDOFF.md` before extending the experiments.
+
+## Experiment Quickstart
+
+### Specialized single-committee Thunderbolt benchmark
+
+The package for `crates/thunderbolt-eval` is named `thunderbolt-mock`.
+
+```bash
+cargo run -p thunderbolt-mock --release --example single_committee_benchmark -- 10
+```
+
+### Thunderbolt vs Lightning / SP1 comparison
+
+```bash
+cargo run -p thunderbolt-mock --release --example compare_single_committee_transfer -- 10
+```
+
+Optional local Lightning comparison:
+
+```bash
+cargo run -p thunderbolt-mock --release --example compare_single_committee_transfer -- 10 --with-local-lightning
+```
+
+Optional SP1 comparison:
+
+```bash
+cargo run -p thunderbolt-mock --release --example compare_single_committee_transfer -- 10 --with-sp1
+```
+
+The SP1 benchmark may require a working `cargo-prove` toolchain, Docker, and a usable `PROTOC`; see `benchmarks/sp1-transfer-benchmark/README.md`.
+
 ## Core Architecture
 
 Thunderbolt is an **off-chain ownership-transfer layer for a single Bitcoin UTXO**. Funds remain locked on Bitcoin under a **fixed Taproot key-path public key** $P$. Off-chain, the “right to redeem” that UTXO is transferred between users by updating a ledger state and delivering the new holder secret to the recipient **asynchronously** (the recipient can prepare an invoice ahead of time and be offline during the sender’s transfer). Both parties only need access to the same ledger $L$; they do not need a direct P2P session at transfer time.

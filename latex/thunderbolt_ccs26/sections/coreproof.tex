@@ -1,0 +1,189 @@
+\section{Core Cryptographic Primitive}\label{sec:coreproof}
+
+This section presents the two NIZK proofs that certify a single \thunderbolt transfer step. Throughout, let $\GG$ be the secp256k1 group of prime order $q$ with base point $H$. Let $(N_B, g_B)$ and $(N_C, g_C)$ be Paillier public keys for Bob and the Committee, respectively. All Paillier arithmetic is modulo $N_B^2$ or $N_C^2$ as appropriate. All elliptic-curve scalar equalities are taken modulo $q$.
+
+\subsection{Transfer Model}\label{sec:transfer-model}
+
+A \thunderbolt state at step $s$ consists of a \emph{holder secret} $x_s$, a \emph{committee secret} $y_s$, and a \emph{public anchor} $X_s = x_s H$, subject to the fixed-key invariant
+\begin{equation}\label{eq:invariant}
+P = (x_s + y_s) G.
+\end{equation}
+Alice is the current holder; Bob is the next recipient.
+
+A transfer from Alice to Bob proceeds in two phases:
+
+\begin{enumerate}
+  \item \textbf{Invoice phase (Bob).} Bob chooses a fresh refresh value $r_s \in \ZZ_q$ and publishes:
+  \begin{itemize}
+    \item a public delta point $D_s = r_s H$,
+    \item a ciphertext to himself, $\mathrm{ct}_B = \Enc_{pk_B}(r_s;\, \rho_B)$,
+    \item a ciphertext to the Committee, $\mathrm{ct}_C = \Enc_{pk_C}(r_s;\, \rho_C)$,
+    \item a proof $\pi_{\mathrm{inv}}$ (Core Proof~1) that all three objects encode the same $r_s$.
+  \end{itemize}
+
+  \item \textbf{Consume phase (Alice).} Alice forms the next holder ciphertext
+  $$
+  T_{s+1} = \Enc_{pk_B}(x_s;\, \eta_s) \oplus \mathrm{ct}_B,
+  $$
+  updates the public anchor to $X_{s+1} = X_s + D_s$, and publishes a proof $\pi_{\mathrm{xfer}}$ (Core Proof~2) that she injected the actual current holder secret $x_s$ consistent with $X_s$.
+\end{enumerate}
+
+After the transfer, Bob decrypts $T_{s+1}$ to obtain $x_s + r_s$ and sets $x_{s+1} \equiv x_s + r_s \pmod{q}$. The Committee recovers $r_s$ from $\mathrm{ct}_C$ and updates $y_{s+1} = y_s - r_s$. The fixed-key invariant~\eqref{eq:invariant} is preserved:
+$$
+(x_{s+1} + y_{s+1})G = (x_s + r_s + y_s - r_s)G = (x_s + y_s)G = P.
+$$
+
+\subsection{Core Proof~1: Invoice Consistency Proof}\label{sec:proof1}
+
+\begin{definition}[Invoice Consistency Relation]\label{def:inv-relation}
+The relation $\mathcal{R}_{\mathrm{inv}}$ is defined as
+$$
+\mathcal{R}_{\mathrm{inv}} = \left\{
+  (D_s, \mathrm{ct}_B, \mathrm{ct}_C ;\; r_s, \rho_B, \rho_C) \;:\;
+  \begin{array}{l}
+  D_s = r_s H, \\[2pt]
+  \mathrm{ct}_B = g_B^{r_s}\, \rho_B^{N_B} \bmod N_B^2, \\[2pt]
+  \mathrm{ct}_C = g_C^{r_s}\, \rho_C^{N_C} \bmod N_C^2
+  \end{array}
+\right\}.
+$$
+\end{definition}
+
+\paragraph{Why this proof is needed.} Without it, a malicious Bob could publish an invoice in which the anchor delta $D_s$ corresponds to one refresh value, the ciphertext to Bob encodes a second, and the ciphertext to the Committee encodes a third. This would break the ``one add, one subtract'' invariant, because Alice, Bob, and the Committee would disagree on the refresh offset.
+
+\paragraph{Sigma protocol.} The prover (Bob) samples a commitment scalar $\alpha$ and commitment randomnesses $\beta_B, \beta_C$, and computes:
+\begin{align*}
+A_D &= \alpha H, \\
+A_B &= g_B^{\alpha}\, \beta_B^{N_B} \bmod N_B^2, \\
+A_C &= g_C^{\alpha}\, \beta_C^{N_C} \bmod N_C^2.
+\end{align*}
+
+\paragraph{Fiat--Shamir challenge.} The challenge is computed as
+$$
+c = \Hash\!\left(\texttt{tb/invoice},\; \texttt{ctx\_id},\; \texttt{inv\_id},\; H,\; pk_B,\; pk_C,\; D_s,\; \mathrm{ct}_B,\; \mathrm{ct}_C,\; A_D,\; A_B,\; A_C\right) \bmod q.
+$$
+
+\paragraph{Response.} The prover computes a single shared response and two Paillier randomness responses:
+\begin{align*}
+z &= \alpha + c \cdot r_s, \\
+\tau_B &= \beta_B \cdot \rho_B^c \bmod N_B, \\
+\tau_C &= \beta_C \cdot \rho_C^c \bmod N_C.
+\end{align*}
+
+The proof is $\pi_{\mathrm{inv}} = (A_D, A_B, A_C, z, \tau_B, \tau_C)$.
+
+\paragraph{Verification.} The verifier accepts iff all three of the following hold (same $z$ in all three):
+\begin{enumerate}
+  \item \textbf{EC check:}
+  $
+  z H \stackrel{?}{=} A_D + c \cdot D_s.
+  $
+  \item \textbf{Bob--Paillier check:}
+  $
+  g_B^{z}\, \tau_B^{N_B} \stackrel{?}{=} A_B \cdot \mathrm{ct}_B^{c} \pmod{N_B^2}.
+  $
+  \item \textbf{Committee--Paillier check:}
+  $
+  g_C^{z}\, \tau_C^{N_C} \stackrel{?}{=} A_C \cdot \mathrm{ct}_C^{c} \pmod{N_C^2}.
+  $
+\end{enumerate}
+
+\begin{theorem}[Soundness of Core Proof~1]\label{thm:proof1-sound}
+The Invoice Consistency Proof is a NIZK for $\mathcal{R}_{\mathrm{inv}}$ in the random-oracle model. In particular, the shared response $z$ in all three verification equations forces a single integer $r_s$ to be the discrete log of $D_s$ and the Paillier plaintext of both $\mathrm{ct}_B$ and $\mathrm{ct}_C$.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+Special soundness follows from the standard two-extraction argument for Sigma protocols: given two accepting transcripts $(A, c, z)$ and $(A, c', z')$ with $c \neq c'$ for the same commitments, the extractor recovers $r_s = (z - z')/(c - c')$ from the EC equation and $\rho_B, \rho_C$ from the Paillier equations. Because a single $z$ is used, all three extractions yield the same integer. The Fiat--Shamir compilation preserves soundness in the random-oracle model. Honest-verifier zero-knowledge holds by simulation: sample $z, \tau_B, \tau_C$ uniformly and set $c$ from the hash, then compute the commitments $A_D, A_B, A_C$ from the verification equations.
+\end{proof}
+
+
+\subsection{Core Proof~2: Transfer Consistency Proof}\label{sec:proof2}
+
+Core Proof~2 assumes that Core Proof~1 has been verified, so the public inputs $D_s$ and $\mathrm{ct}_B$ are known to be consistent with a single $r_s$.
+
+\begin{definition}[Transfer Consistency Relation]\label{def:xfer-relation}
+The relation $\mathcal{R}_{\mathrm{xfer}}$ is defined as
+$$
+\mathcal{R}_{\mathrm{xfer}} = \left\{
+  (X_s, \mathrm{ct}_B, T_{s+1} ;\; x_s, \eta_s) \;:\;
+  \begin{array}{l}
+  X_s = x_s H, \\[2pt]
+  T_{s+1} \cdot \mathrm{ct}_B^{-1} = g_B^{x_s}\, \eta_s^{N_B} \bmod N_B^2
+  \end{array}
+\right\}.
+$$
+\end{definition}
+
+\paragraph{Why this proof is needed.} Without it, a malicious Alice could fabricate $T_{s+1}$ using an arbitrary $x'_s \neq x_s$, delivering to Bob a holder secret that is inconsistent with the public anchor. Bob would hold a worthless ciphertext.
+
+\paragraph{Sigma protocol.} The prover (Alice) samples a commitment scalar $\alpha$ and a Paillier commitment randomness $\beta$, and computes:
+\begin{align*}
+A_X &= \alpha H, \\
+A_T &= g_B^{\alpha}\, \beta^{N_B} \bmod N_B^2.
+\end{align*}
+
+\paragraph{Fiat--Shamir challenge.}
+$$
+c = \Hash\!\left(\texttt{tb/xfer},\; \texttt{ctx\_id},\; s{+}1,\; \texttt{inv\_id},\; H,\; pk_B,\; X_s,\; \mathrm{ct}_B,\; T_{s+1},\; A_X,\; A_T\right) \bmod q.
+$$
+
+\paragraph{Response.}
+\begin{align*}
+z &= \alpha + c \cdot x_s, \\
+\tau &= \beta \cdot \eta_s^c \bmod N_B.
+\end{align*}
+
+The proof is $\pi_{\mathrm{xfer}} = (A_X, A_T, z, \tau)$.
+
+\paragraph{Verification.} The verifier accepts iff both of the following hold (same $z$):
+\begin{enumerate}
+  \item \textbf{EC check:}
+  $
+  z H \stackrel{?}{=} A_X + c \cdot X_s.
+  $
+  \item \textbf{Paillier check:}
+  $
+  g_B^{z}\, \tau^{N_B} \stackrel{?}{=} A_T \cdot (T_{s+1} \ominus \mathrm{ct}_B)^{c} \pmod{N_B^2}.
+  $
+\end{enumerate}
+
+Additionally, the verifier checks the public anchor transition:
+$$
+X_{s+1} \stackrel{?}{=} X_s + D_s.
+$$
+This check is outside the zero-knowledge relation itself but is necessary for protocol correctness.
+
+\begin{theorem}[Soundness of Core Proof~2]\label{thm:proof2-sound}
+The Transfer Consistency Proof is a NIZK for $\mathcal{R}_{\mathrm{xfer}}$ in the random-oracle model. The shared response $z$ forces a single integer $x_s$ to be both the discrete log of $X_s$ and the Paillier plaintext of $T_{s+1} \ominus \mathrm{ct}_B$.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+Analogous to the proof of \autoref{thm:proof1-sound}, by two-extraction on a pair of accepting transcripts with the same commitments and distinct challenges, from which the extractor recovers $x_s$ and $\eta_s$ satisfying both the EC and Paillier relations.
+\end{proof}
+
+
+\subsection{Joint Consequence: Correct Transfer Step}\label{sec:joint}
+
+\begin{theorem}[Transfer Correctness]\label{thm:correct-step}
+If both $\pi_{\mathrm{inv}}$ and $\pi_{\mathrm{xfer}}$ verify, and the anchor transition $X_{s+1} = X_s + D_s$ holds, then there exist integers $x_s$ and $r_s$ such that
+\begin{align}
+X_s &= x_s H, \label{eq:anchor-open} \\
+D_s &= r_s H, \label{eq:delta-open} \\
+T_{s+1} &= \Enc_{pk_B}(x_s + r_s), \label{eq:next-ct} \\
+X_{s+1} &= (x_s + r_s) H. \label{eq:next-anchor}
+\end{align}
+Furthermore, the committee-side update $y_{s+1} = y_s - r_s$ preserves the invariant~\eqref{eq:invariant}:
+$$
+(x_{s+1} + y_{s+1}) G = (x_s + y_s) G = P.
+$$
+\end{theorem}
+
+\begin{proof}
+From Core Proof~1 (\autoref{thm:proof1-sound}), extract $r_s$ satisfying $D_s = r_s H$ and $\mathrm{ct}_B = \Enc_{pk_B}(r_s)$. From Core Proof~2 (\autoref{thm:proof2-sound}), extract $x_s$ satisfying $X_s = x_s H$ and $T_{s+1} \ominus \mathrm{ct}_B = \Enc_{pk_B}(x_s)$. By Paillier's additive homomorphism, $T_{s+1} = \Enc_{pk_B}(x_s) \oplus \Enc_{pk_B}(r_s) = \Enc_{pk_B}(x_s + r_s)$, giving~\eqref{eq:next-ct}. The anchor transition gives $X_{s+1} = X_s + D_s = x_s H + r_s H = (x_s + r_s) H$, giving~\eqref{eq:next-anchor}. Setting $x_{s+1} \equiv x_s + r_s \pmod{q}$ and $y_{s+1} \equiv y_s - r_s \pmod{q}$, we obtain $(x_{s+1} + y_{s+1})G = (x_s + y_s)G = P$.
+\end{proof}
+
+\subsection{Relationship to Existing Schemes}\label{sec:relationship}
+
+\paragraph{Camenisch--Shoup verifiable encryption.} Core Proof~1 is a multi-receiver extension of the Camenisch--Shoup verifiable-encryption-of-discrete-logs protocol~\cite{camenisch2003verifiable}: a single integer $r_s$ is simultaneously the discrete log of the public point $D_s$ and the plaintext of two Paillier ciphertexts $\mathrm{ct}_B$ and $\mathrm{ct}_C$, all bound by a shared Sigma response $z$. Core Proof~2 is the standard single-receiver case applied to the holder secret $x_s$.
+
+\paragraph{Simple VESS for threshold committee.} When the Committee is a threshold committee of $n$ members with threshold $t$, the single ciphertext $\mathrm{ct}_C$ is replaced by a VESS distribution: Bob verifiably encrypts a Shamir sharing of $r_s$ to the $n$ committee members, and any observer can check that the encrypted shares are consistent with a degree-$(t{-}1)$ polynomial evaluating to $r_s$. This modular substitution replaces the single-Committee trust assumption with the standard $(t, n)$-threshold assumption. Crucially, Core Proofs~1 and~2 are unchanged; only the committee-side object changes form.

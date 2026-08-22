@@ -1,0 +1,136 @@
+\section{Boundary-Seeking Fuzzing}\label{sec:fuzzing}
+
+\yanju{Re-working as hierarchical action space mutation DSL + bandit, feels good, coming soon.}
+
+With the static abstraction $\Theta$ constructed in the previous phase (\autoref{sec:inpabs}), the infinite domain of raw byte sequences is reduced to a structured, finite action space. However, the sheer combinatorial complexity of selecting buckets across potentially hundreds of fields remains a challenge. Randomly selecting buckets is inefficient, as consensus bugs often reside in specific, correlated boundary conditions (e.g., a maximal length in one field coupled with a specific flag in another).
+
+In this section, we present the online phase of \tool. We formulate the fuzzing process as a sequential decision-making problem where a reinforcement learning (RL) agent interacts with the target client.
+
+\subsection{Overview}
+\label{sec:fuzzing_overview}
+
+Before detailing the formal mechanisms, we provide a high-level intuition of the \tool fuzzing loop. The core insight of our approach is to treat fuzzing not as random mutation, but as a \textit{navigation problem} over the semantic map $\Theta$.
+
+Imagine the input space as a vast, high-dimensional terrain. Most of this terrain consists of valid, uninteresting inputs (i.e., plains) or invalid inputs that are trivially rejected (i.e., cliffs). The consensus bugs we seek are hidden in narrow, jagged ridges --- the boundaries between validity and invalidity, or between canonical and non-canonical representations. Standard fuzzers wander these plains randomly. In contrast, \tool operates as follows:
+
+\begin{enumerate}
+    \item \textbf{Map-Based Navigation (Policy):} Instead of bit-flipping, the agent looks at the semantic map $\Theta$. For each field in the data structure, it selects a specific region to explore (e.g., ``field A should be strictly at its maximum limit'' or ``field B should have dirty padding''). This set of choices forms an \textit{abstract template}.
+    \item \textbf{Instantiating the Path (Concretization):} The agent hands this template to a concretizer, which generates actual test cases that strictly adhere to these constraints. This ensures every generated input lands precisely on the targeted semantic ridges.
+    \item \textbf{Sensing the Terrain (Distributional Feedback):} The client executes these inputs. Since consensus bugs are often silent (no crashes), \tool does not rely on simple failure signals. Instead, it observes the \textit{distribution} of the client's internal execution behaviors (signatures) over a batch of inputs.
+    \item \textbf{Learning from Novelty (Reward):} If a batch triggers a distribution of behaviors that differs significantly from what has been seen before (measured via KL-divergence~\cite{kullback1951information}), the agent receives a high reward. This encourages the policy to continuously seek out \emph{surprising} semantic interactions, effectively driving the search toward unexplored protocol edge cases.
+\end{enumerate}
+
+\subsection{Hierarchical Action Space}
+
+\begin{figure}[t]
+    \centering
+    \small
+     \[
+        \begin{array}{r c l l}
+            a & ::=  & \left\langle f,v,b \right\rangle & \textbf{Action}\\  
+            v & ::=  & & \textbf{View:} \\
+              & \mid & {\sf val} & \text{value} \\ 
+              & \mid & {\sf elems} & \text{collection} \\ 
+              & \mid & {\sf len} & \text{list length} \\ 
+              & \mid & {\sf off} & \text{offset layout} \\ 
+              & \mid & {\sf tail} & \text{trailing data} \\ 
+              & \mid & {\sf sbit} & \text{sentinel bit} \\ 
+            b & ::=  & & \textbf{Bucket:} \\
+              & \mid & b_p & \text{specification-guided} \\ 
+              & \mid & {\sf zero} \mid {\sf one} \mid {\sf min} \mid {\sf max} & \text{numeric boundaries} \\ 
+              & \mid & {\sf empty} \mid {\sf minlen} \mid {\sf maxlen} & \text{structural boundaries} \\ 
+              & \mid & {\sf dirty} & \text{non-canonical encoding} \\ 
+              & \mid & {\sf gap} & \text{layout anomalies} \\ 
+              & \mid & {\sf null} & \text{missing delimiters} \\ 
+              & \mid & {\sf garbage} & \text{trailing junk} \\ 
+        \end{array}
+    \]
+    $f \in \textbf{Fields}\text{, generated via \autoref{alg:abstraction}.}$
+    \caption{Structure of \tool's action space. An action is thus sampled as mutation of the fuzzing inputs.}
+    \label{fig:mutation-ir}
+\end{figure}
+
+\begin{example}[Mutation]
+    (TBD)
+\end{example}
+
+\subsection{Process Model and Rollouts}
+\label{sec:process_model}
+
+The fuzzing campaign proceeds in iterative epochs. In each epoch, the agent generates a \textit{batch} of trajectories, or \textit{rollouts}. A rollout consists of a sequence of $n$ steps, where each step represents a single fuzzing iteration.
+
+Let $i$ denote the current step within a rollout. At step $i$, the agent selects an abstract action map $b_i$, which assigns a specific bucket to every field in the schema. This abstract map is concretized into a logical state $s_i$, which is then executed by the target implementation $P$. The execution yields two outcomes:
+\begin{itemize}
+    \item A validity result $g_i \in \{ \top, \bot \}$, where $\bot$ indicates a crash or consensus violation, and $\top$ indicates a successful (or gracefully rejected) execution.
+    \item A runtime signature $q_i \in \mathbb{R}^m$, captured via instrumentation. This vector summarizes critical runtime events, such as branch coverage, offset calculations, and validity checks.
+\end{itemize}
+
+The interaction history for a rollout of length $n$ is formally defined as a trajectory $\xi$:
+\[
+    \xi = \Big\langle (q_0, b_0, g_0), \dots, (q_n, b_n, g_n) \Big\rangle,
+\]
+where $b_i$ is the abstract action map chosen at step $i$.
+
+\subsection{State Representation and Encoding}
+\label{sec:encoding}
+
+The policy $\pi$ relies on two distinct sources of information to make decisions: the static context of the system and the dynamic feedback from the previous step.
+
+\paragraph{Static context encoding}
+The static context encapsulates the invariant properties of the target system, including the source code $P$, the protocol specification $\phi$, and the schema definition $\Gamma$. We employ a global context encoder $\mu_c$ to compress this information into a fixed-dimensional embedding $h_c$:
+\[
+    h_c = \mu_c(P, \phi, \Gamma).
+\]
+This embedding remains constant across all steps of the rollout, providing the policy with a grounding in the protocol's semantic structure.
+
+\paragraph{Dynamic signature encoding}
+To enable the policy to react to runtime feedback, we encode the raw signature $q_{i-1}$ observed in the previous step. A signature encoder $\mu_q$ maps the high-dimensional instrumentation vector into a latent signature embedding $h_q^{(i-1)}$:
+\[
+    h_q^{(i-1)} = \mu_q(q_{i-1}).
+\]
+This vector captures the location of the execution in the program's state space, allowing the agent to distinguish between different functional paths (e.g., ``fast path validation'' vs. ``slow path deserialization'').
+
+\subsection{Policy and Action Selection}
+\label{sec:policy_action}
+
+The core task of the policy is to construct an abstract action map $b$ for the next input. For every field $v \in \Gamma$, the policy must select a specific bucket $b[v] \in \Theta[v]$.
+
+\paragraph{Bucket encoding}
+To support generalization across different schemas, we do not learn discrete weights for bucket IDs. Instead, we employ a bucket encoder $\mu_b$ to project the semantic description of each bucket into a shared embedding space $\mathbb{R}^d$. For a field $v$, we define the candidate action matrix $H_b^{(v)}$ as the collection of all bucket embeddings:
+\[
+    H_b^{(v)} = \{ h_\theta \in \mathbb{R}^d \mid h_\theta = \mu_b(\text{desc}(\theta)), \theta \in \Theta[v] \}.
+\]
+This matrix represents the available semantic choices for field $v$ in a continuous space.
+
+\paragraph{Policy network}
+The policy network maps the combined static context $h_c$ and dynamic signature $h_q^{(i-1)}$ to a $d$-dimensional query vector $h_\pi \in \mathbb{R}^d$. We then employ a dot-product attention mechanism~\cite{vaswani2017attention} to select the most relevant bucket for each field. Formally, the probability of selecting a bucket $\theta \in \Theta[v]$ is given by\footnote{The $\softmax$ operator normalizes the inner product similarity scores into a probability distribution: $\softmax_i(z) = e^{z_i} / \sum_j e^{z_j}$. The subscript $h_\theta$ indicates that we select the probability mass corresponding to the specific bucket embedding $h_\theta$.}:
+\[
+    \pi(\theta \mid v, h_c, h_q^{(i-1)}) = \softmax_{h' \in H_b^{(v)}} \Big( \langle h_\pi, h' \rangle \Big)_{h_\theta}.
+\]
+By maximizing the alignment between the decision state $h_\pi$ and the bucket embeddings, the policy learns to prioritize semantic boundaries that are most likely to yield high rewards in the current execution context.
+
+\paragraph{Concretization}
+Once the abstract map $b$ is fully constructed, it must be instantiated into a concrete value map $s$. We define a concretization function $\gamma$ that maps an abstract bucket to a concrete value. For each field $v$:
+\[
+    s[v] = \gamma(b[v]),
+\]
+this function implements the constraints defined by the bucket. For example, if $b[v]$ represents the interval $(10, 20)$, $\gamma(b[v])$ samples a uniform integer from that range. If $b[v]$ represents a dirty padding boundary, $\gamma$ deterministically constructs the specific byte sequence with non-zero padding bits. The resulting state $s$ is then serialized and fed to the client.
+
+\subsection{Distributional Reward Mechanism}
+
+To overcome the sparse reward problem inherent in consensus testing, we utilize a distributional reward signal. Instead of relying on a single scalar outcome, we treat the execution of a batch of inputs as a probability distribution over the signature space.
+
+For a current batch of rollouts, we collect the observed signatures to form an empirical distribution $Q_i$. We compare this against a sliding window of historical distributions, denoted as $Q_{i-\varepsilon:i}$, where $\varepsilon$ is the window size. The intrinsic exploration reward $r_i$ is defined using the Kullback-Leibler (KL) divergence~\cite{kullback1951information}:
+\[
+    r_i = \lambda_f \cdot \KL(Q_i \parallel Q_{i-\varepsilon:i}) - \lambda_r \cdot \KL(Q_{i-\varepsilon:i} \parallel Q_i) + \lambda_g \cdot R_i.
+\]
+We leverage the asymmetry of the KL divergence ($\KL(P \parallel Q) \neq \KL(Q \parallel P)$) to encode two distinct objectives:
+\begin{itemize}
+    \item Novelty Search (Forward KL, $\lambda_f$): The term $\KL(Q_i \parallel Q_{i-\varepsilon:i})$ measures the information gain of the current batch relative to history. Maximizing this drives the fuzzer to explore behavioral modes that are statistically distinct from recent observations.
+    \item Trust Region (Reverse KL, $\lambda_r$): The term $\KL(Q_{i-\varepsilon:i} \parallel Q_i)$ acts as a regularization penalty. It discourages the policy from deviating too wildly into degenerate regions (e.g., trivial parsing errors) that, while distinct, lack the structural complexity of valid states.
+\end{itemize}
+The term $R_i$ represents the extrinsic reward component, which provides a signal based on whether a consensus violation is explicitly detected (parameterized by weight $\lambda_g$):
+\[
+    R_i = \mathbf{1}[g_i = \bot],
+\]
+where $\mathbf{1}[\cdot]$ is the indicator function evaluating to 1 if the condition is true and 0 otherwise.

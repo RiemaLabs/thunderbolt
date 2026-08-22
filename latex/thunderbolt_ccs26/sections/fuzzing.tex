@@ -1,0 +1,126 @@
+\section{Boundary-Seeking Fuzzing}\label{sec:fuzzing}
+
+The specification-guided input abstraction described in \autoref{sec:inpabs} effectively transforms the continuous input domain into a discrete landscape of semantic buckets. This abstraction exposes the critical boundaries of the state space, namely canonical value limits, structural edges, and specific encoding artifacts. However, a static map alone does not guarantee efficient exploration. The combinatorial space of possible inputs remains vast, and consensus bugs often hide in specific, correlated boundary conditions that random mutation is unlikely to trigger.
+
+In this section, we present the online phase of \tool. We formulate the fuzzing process as a sequential decision-making problem, where a reinforcement learning agent learns to navigate this semantic landscape. By iteratively selecting specific boundary conditions to probe, the agent effectively steers the fuzzer toward the most fragile regions of the implementation logic.
+
+\subsection{Overview}
+\label{sec:fuzzing_overview}
+
+The fuzzing campaign operates as a continuous feedback loop between the agent and the target environment. We assume the system is initialized with a corpus of valid base objects (or a structure-aware generator) and the set of semantic buckets derived from the abstraction phase. The interaction proceeds through four logical stages:
+
+\begin{enumerate}
+    \item \emph{Select}. The agent chooses an action from the defined action space. This choice acts as a strategic directive, identifying a specific field and prescribing a semantic property to test, effectively setting the hypothesis for the current iteration.
+    \item \emph{Mutate}. The system concretizes this directive by applying the selected action to a valid base object. This process instantiates the target field with a concrete value derived from the action's semantic definition. Depending on the bucket type, this may involve standard value sampling or the injection of specific boundary artifacts.
+    \item \emph{Fuzz}. The target client executes the mutated batch. Crucially, the system captures runtime execution traces to model the internal behavior of the implementation, moving beyond simple crash detection.
+    \item \emph{Update}. The system analyzes the traces to compute a feedback signal. If the batch triggers statistically novel behaviors compared to history, the agent receives a high reward. This reinforcement drives the policy to favor actions that successfully uncover new implementation states.
+\end{enumerate}
+
+\paragraph{Problem setup}
+We model this loop as an interaction between an agent and an environment over discrete time steps $t=0, 1, 2, \dots$. At each step $t$, the environment is defined by the target implementation and the abstraction map $\Theta$ derived from \autoref{sec:inpabs}. The agent selects an action $a_t \in \mathcal{A}$ from the available action space. Upon executing the action (via mutation and execution), the environment returns a reward $r_t \in \mathbb{R}$, which quantifies the information gain derived from the execution traces. The goal of the agent is to learn a policy $\pi$ that maximizes the cumulative discovery of novel implementation behaviors over the campaign duration.
+
+\subsection{Mutation-Based Action Space}
+\label{sec:process_model}
+
+A key challenge in fuzzing complex protocols is the semantic gap between high-level logical validity and low-level serialization correctness. To bridge this gap, we structure the action space $\mathcal{A}$ hierarchically using a domain-specific language (DSL) that formalizes the schema decomposition provided by the abstraction layer.
+
+\begin{figure}[t]
+    \centering
+    \small
+     \[
+        \begin{array}{r c l l}
+            a & ::=  & \langle v,d,\theta \rangle & \textbf{Action}\\
+            d & ::=  & & \textbf{View:} \\
+              & \mid & {\sf val} & \text{value} \\
+              & \mid & {\sf elems} & \text{collection} \\
+              & \mid & {\sf len} & \text{list length} \\
+              & \mid & {\sf off} & \text{offset layout} \\
+              & \mid & {\sf tail} & \text{trailing data} \\
+              & \mid & {\sf sbit} & \text{sentinel bit} \\
+       \theta & ::=  & & \textbf{Bucket:} \\
+              & \mid & \theta_p & \text{specification-guided} \\
+              & \mid & {\sf zero} \mid {\sf one} \mid {\sf min} \mid {\sf max} & \text{numeric boundaries} \\
+              & \mid & {\sf empty} \mid {\sf minlen} \mid {\sf maxlen} & \text{structural boundaries} \\
+              & \mid & {\sf dirty} & \text{non-canonical encoding} \\
+              & \mid & {\sf gap} & \text{layout anomalies} \\
+              & \mid & {\sf null} & \text{missing delimiters} \\
+              & \mid & {\sf garbage} & \text{trailing junk} \\
+        \end{array}
+    \]
+    $v \in \textbf{Fields}\text{, derived from the target schema definition.}$
+    \caption{Structure of \tool's action space. An action is thus sampled as mutation of the fuzzing inputs.}
+    \label{fig:mutation-ir}
+\end{figure}
+
+As defined in \autoref{fig:mutation-ir}, an action $a$ is a tuple $\langle v, d, \theta \rangle$, comprising three hierarchical components:
+
+\paragraph{Field ($v$)}
+The field component identifies the mutation target within the schema (e.g., \icode{Validator.Pubkey}). This allows the agent to localize its testing efforts, systematically probing specific parts of the data structure. The set of available fields is derived directly from the target schema definition.
+
+\paragraph{View ($d$)}
+The view component defines the dimension of variability for the selected field. To effectively bridge the semantic gap, we distinguish between \emph{logical views} and \emph{serialization views}.
+\begin{itemize}
+    \item \textbf{Logical Views} (${\sf val}, {\sf len}, {\sf elems}$) operate within the type system constraints. They allow the agent to manipulate the object's high-level state, such as toggling boolean flags, resizing validator committees, or selecting boundary integer values. These views explore the ``logic'' surface of the protocol.
+    \item \textbf{Serialization Views} (${\sf off}, {\sf tail}, {\sf sbit}$) operate on the wire-format layout, bypassing high-level abstractions. For instance, ${\sf off}$ targets the internal offset pointers in variable-length containers, while ${\sf sbit}$ targets the protocol-mandated sentinel bits in compact bitlists. These views enable the agent to engineer precise serialization anomalies that are representable in bytes but undefined in the high-level schema.
+\end{itemize}
+
+\paragraph{Bucket ($\theta$)}
+The bucket component specifies the concrete mutation strategy applied through the selected view. We categorize these into \emph{boundary buckets} and \emph{artifact buckets}.
+\begin{itemize}
+    \item \textbf{Boundary Buckets} (${\sf min}, {\sf max}, {\sf empty}$) target the extreme edges of the valid domain defined by the specification. They test the implementation's robustness against off-by-one errors and corner cases in loop conditions or arithmetic logic.
+    \item \textbf{Artifact Buckets} (${\sf dirty}, {\sf gap}, {\sf null}$) inject adversarial patterns to test strict canonicalization enforcement. Specifically:
+    \begin{itemize}
+        \item ${\sf dirty}$: Injects semantically valid but non-canonical encodings, such as setting unused high-order padding bits in a \icode{Bitvector} or encoding a boolean \icode{true} as \icode{0x02} instead of \icode{0x01}.
+        \item ${\sf gap}$: Manipulates the offset table to create ``dead zones'' (unreferenced ghost bytes) between fields in a serialized container. A compliant parser must reject such gaps, while a naive one might silently skip them.
+        \item ${\sf null}$: Removes the mandatory sentinel bit from a \icode{Bitlist}, effectively encoding an empty list as \icode{0x00} instead of the canonical \icode{0x01}.
+    \end{itemize}
+\end{itemize}
+By systematically selecting these buckets, the agent forces the generation of inputs that reside in the dangerous gap between logical validity and strict serialization canonicalization.
+
+
+\begin{example}[Mutation by Action]
+Consider a field \icode{AcEpoch} of type \icode{uint64}. The action $a = \langle \icode{AcEpoch}, {\sf val}, {\sf max} \rangle$ directs the fuzzer to set this specific field to its maximum representable value ($2^{64}-1$). When executing this action, \tool instantiates a base object and mutates the \icode{AcEpoch} field to \icode{UINT64\_MAX}, while keeping other fields randomized or default. This probes whether the implementation correctly handles boundary integer arithmetic or overflow conditions for this specific consensus parameter.
+\end{example}
+
+\subsection{Bandit Policy}
+\label{sec:policy_action}
+
+We formulate the action selection problem as a \emph{context-free multi-armed bandit}. Since serialization vulnerabilities are typically stateless, dependent on the structure of the current payload rather than execution history, the agent focuses on estimating the intrinsic quality of each action without modeling complex state transitions.
+
+\paragraph{Value estimation}
+The core of the policy is the action-value function $Q(a)$, which estimates the expected reward of selecting action $a$. In the context of fuzzing, the environment is inherently non-stationary: the novelty (and thus the reward) of a specific bug class diminishes rapidly as it is repeatedly triggered. A standard mean estimator would be sluggish to react to this saturation. Therefore, we update our value estimates using an \emph{exponential moving average}, which assigns higher weight to recent observations:
+\[
+    Q_{t+1}(a_t) \leftarrow (1-\eta) \cdot Q_t(a_t) + \eta \cdot r_t,
+\]
+where $\eta$ is the learning rate. This allows the agent to quickly pivot away from exhausted boundaries and explore new candidates.
+
+\paragraph{Action selection}
+To balance exploration and exploitation, the agent selects actions using an $\epsilon$-greedy strategy. With probability $1-\epsilon$, the agent exploits the current knowledge by selecting the action with the highest estimated value: $a_t = \argmax_{a \in \mathcal{A}} Q_t(a)$. With probability $\epsilon$, it explores by sampling a random action from the space. This ensures that while the fuzzer focuses on high-yield boundaries, it maintains coverage of the broader input space to avoid local optima.
+
+\subsection{Input Mutation}
+\label{sec:concretization}
+
+The realization of an action $a_t = \langle v, d, \theta \rangle$ is implemented as a mutation operation on a base SSZ object $S$. The system first initializes $S$ (e.g., with default values or drawn from a corpus). The mutation mechanism then diverges based on the type of the selected view $\tau$.
+
+When $\tau$ targets logical properties (e.g., ${\sf val}, {\sf len}$), the system modifies $S$ directly. For instance, if the bucket specifies ${\sf maxlen}$, the mutator resizes the list field in $S$ to the maximum allowed size and populates it. This ensures that the logical properties of the input strictly adhere to the chosen boundary condition.
+
+When $v$ targets serialization artifacts (e.g., ${\sf off}, {\sf tail}$), the system first serializes $S$ into a canonical byte stream, and then applies a byte-level mutation. For example, if the bucket specifies ${\sf dirty}$, the mutator identifies the byte offset corresponding to the bitvector field and overrides the unused bits to non-zero values. This allows \tool to unify the perturbation of logical and serialization boundaries within a single learning framework.
+
+\subsection{Distributional Reward Mechanism}
+
+To overcome the sparse reward problem inherent in consensus testing, we utilize a distributional reward signal. Instead of relying on a single scalar outcome, we treat the execution of a batch of inputs as a probability distribution over the signature space.
+
+For a current batch of rollouts, we collect the observed signatures to form an empirical distribution $P_i$. We compare this against a sliding window of historical distributions, denoted as $P_{i-\varepsilon:i}$, where $\varepsilon$ is the window size. The intrinsic exploration reward $r_i$ is defined using the Kullback-Leibler (KL) divergence~\cite{kullback1951information}:
+\[
+    r_i = \lambda_f \cdot \KL(P_i \parallel P_{i-\varepsilon:i}) - \lambda_r \cdot \KL(P_{i-\varepsilon:i} \parallel P_i) + \lambda_g \cdot R_i.
+\]
+We leverage the asymmetry of the KL divergence ($\KL(P \parallel Q) \neq \KL(Q \parallel P)$) to encode two distinct objectives:
+\begin{itemize}
+    \item Novelty Search (Forward KL, $\lambda_f$): The term $\KL(P_i \parallel P_{i-\varepsilon:i})$ measures the information gain of the current batch relative to history. Maximizing this drives the fuzzer to explore behavioral modes that are statistically distinct from recent observations.
+    \item Trust Region (Reverse KL, $\lambda_r$): The term $\KL(P_{i-\varepsilon:i} \parallel P_i)$ acts as a regularization penalty. It discourages the policy from deviating too wildly into degenerate regions (e.g., trivial parsing errors) that, while distinct, lack the structural complexity of valid states.
+\end{itemize}
+The term $R_i$ represents the extrinsic reward component, which provides a signal based on whether a consensus violation is explicitly detected (parameterized by weight $\lambda_g$):
+\[
+    R_i = \mathbf{1}[g_i = \bot],
+\]
+where $\mathbf{1}[\cdot]$ is the indicator function evaluating to 1 if the condition is true and 0 otherwise.
