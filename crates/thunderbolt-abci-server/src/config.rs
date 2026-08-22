@@ -162,6 +162,7 @@ pub struct ServerDeadlines {
     header: Duration,
     read: Duration,
     frame: Duration,
+    decode: Duration,
     write: Duration,
     handler: Duration,
     shutdown_grace: Duration,
@@ -176,19 +177,40 @@ impl ServerDeadlines {
         header: Duration,
         read: Duration,
         frame: Duration,
+        decode: Duration,
         write: Duration,
         handler: Duration,
         shutdown_grace: Duration,
     ) -> Result<Self> {
-        if [accept_poll, idle, header, read, frame, write, handler, shutdown_grace]
-            .into_iter()
-            .any(|duration| duration.is_zero())
+        if [
+            accept_poll,
+            idle,
+            header,
+            read,
+            frame,
+            decode,
+            write,
+            handler,
+            shutdown_grace,
+        ]
+        .into_iter()
+        .any(|duration| duration.is_zero())
         {
             return Err(ServerError::InvalidConfig("all server deadlines must be positive"));
         }
-        if [accept_poll, idle, header, read, frame, write, handler, shutdown_grace]
-            .into_iter()
-            .any(|duration| duration > MAX_SERVER_DEADLINE)
+        if [
+            accept_poll,
+            idle,
+            header,
+            read,
+            frame,
+            decode,
+            write,
+            handler,
+            shutdown_grace,
+        ]
+        .into_iter()
+        .any(|duration| duration > MAX_SERVER_DEADLINE)
         {
             return Err(ServerError::InvalidConfig(
                 "server deadline exceeds hard implementation cap",
@@ -205,6 +227,7 @@ impl ServerDeadlines {
             header,
             read,
             frame,
+            decode,
             write,
             handler,
             shutdown_grace,
@@ -230,6 +253,10 @@ impl ServerDeadlines {
     /// Returns the absolute payload frame deadline.
     pub const fn frame(self) -> Duration {
         self.frame
+    }
+    /// Returns the bounded schema preflight and prost decode budget.
+    pub const fn decode(self) -> Duration {
+        self.decode
     }
     /// Returns the absolute response write deadline.
     pub const fn write(self) -> Duration {

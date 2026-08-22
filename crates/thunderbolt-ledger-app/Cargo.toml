@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Crash-safe SQLite application for the Bitcoin Thunderbolt v2 Ledger contract"
+description = "Crash-safe SQLite application for the Bitcoin Thunderbolt Ledger contract"
 keywords = ["bitcoin", "ledger", "sqlite", "state-machine"]
 categories = ["database", "cryptography::cryptocurrencies"]
 

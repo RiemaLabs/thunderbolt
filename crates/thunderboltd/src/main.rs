@@ -28,10 +28,10 @@ const DEFAULT_CONFIG_PATH: &str = "/var/lib/thunderbolt/runtime.toml";
 #[command(
     name = "thunderboltd",
     version,
-    about = "Fail-closed Bitcoin Thunderbolt v2 operator runtime"
+    about = "Fail-closed Bitcoin Thunderbolt operator runtime"
 )]
 struct Cli {
-    /// Absolute path to an owner-only version 2 runtime configuration.
+    /// Absolute path to an owner-only runtime configuration.
     #[arg(long, global = true, default_value = DEFAULT_CONFIG_PATH)]
     config: PathBuf,
 

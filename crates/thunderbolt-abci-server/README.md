@@ -20,9 +20,11 @@ interprets application state, consensus, or finality.
   allocation-producing repeated request value before `prost` decode; its cap
   must be identical across consensus replicas. Compile-time type-size checks
   bind the per-item reservation to the exact v0.38 schema.
-- Idle, header, individual read, complete-frame, write, callback, and shutdown
-  deadlines are mandatory and capped. A shutdown stops admission first,
-  closes current sockets, then joins every connection and callback worker.
+- Idle, header, individual read, complete-frame, schema-decode, write, callback,
+  and shutdown deadlines are mandatory and capped. Malformed or over-budget
+  decode work closes only its connection; the process-fatal callback timer
+  starts only after successful decode. A shutdown stops admission first, closes
+  current sockets, then joins every connection and callback worker.
 - `RunningServer` is `must_use`. Dropping it performs the same stop-and-join
   path as `shutdown_and_join`.
 
@@ -38,6 +40,8 @@ production policy.
 
 No response is written after a callback deadline. The per-handler byte permit
 stays owned by that callback until it returns or the process terminates.
+Every completed callback thread is joined before the connection accepts its
+next request; callback join handles do not accumulate behind listener polling.
 Application callbacks must not perform externally visible side effects that
 violate their own ABCI commit boundary. The transport bounds its frame and
 worker reservations; each application remains responsible for bounding its

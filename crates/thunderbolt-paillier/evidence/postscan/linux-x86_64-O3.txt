@@ -1,0 +1,21 @@
+CT_SCAN root=thunderbolt_paillier3key13PublicKey307227plaintext_from_secret_bytes symbol=_ZN20thunderbolt_paillier3key13PublicKey307227plaintext_from_secret_bytes17h60320e80e070eb0aE
+CT_SCAN root=thunderbolt_paillier3key13PublicKey30727encrypt symbol=_ZN20thunderbolt_paillier3key13PublicKey30727encrypt17hd4e3159cb74ec652E
+CT_SCAN root=thunderbolt_paillier3key13PublicKey30723add symbol=_ZN20thunderbolt_paillier3key13PublicKey30723add17h505a81459ddca116E
+CT_SCAN root=thunderbolt_paillier3key13PublicKey30728subtract symbol=_ZN20thunderbolt_paillier3key13PublicKey30728subtract17hd90624b1236ace46E
+CT_SCAN root=thunderbolt_paillier3key13PublicKey307212exponentiate symbol=_ZN20thunderbolt_paillier3key13PublicKey307212exponentiate17h8d510cbbf3254f65E
+CT_SCAN root=thunderbolt_paillier3key13PublicKey307222consume_proof_openings symbol=_ZN20thunderbolt_paillier3key13PublicKey307222consume_proof_openings17h9a569f6f1cc66ae5E
+CT_SCAN root=thunderbolt_paillier3key13PublicKey307212response_lhs symbol=_ZN20thunderbolt_paillier3key13PublicKey307212response_lhs17h681df9a7c66bad39E
+CT_SCAN root=thunderbolt_paillier3key13SecretKey30727decrypt symbol=_ZN20thunderbolt_paillier3key13SecretKey30727decrypt17h1604e8fe94a7e461E
+CT_SCAN root=thunderbolt_paillier3key7exact_l symbol=_ZN20thunderbolt_paillier3key7exact_l17h8a897bf551c618e9E
+CT_SCAN root=thunderbolt_paillier5types19SecretPlaintext307215to_secret_bytes symbol=_ZN20thunderbolt_paillier5types19SecretPlaintext307215to_secret_bytes17h0c266de5d9a3bd16E
+CT_SCAN allowed_indirect_control_transfer=_ZN20thunderbolt_paillier3key10system_rng17hd8493469c77eef7bE count=1 evidence=line=61356:callq *%r14;
+CT_SCAN allowed_indirect_control_transfer=_ZN13crypto_bigint7modular3pow40multi_exponentiate_montgomery_form_array17h8b21f4fbefb19bd6E count=2 evidence=line=22375:callq *%r13;line=22494:callq *%r13;
+CT_SCAN allowed_indirect_control_transfer=_ZN20thunderbolt_paillier3key13SecretKey30727decrypt17h1604e8fe94a7e461E count=2 evidence=line=53813:callq *%r13;line=53818:callq *%r13;
+CT_SCAN allowed_indirect_control_transfer=_ZN20thunderbolt_paillier3key13PublicKey30727encrypt17hd4e3159cb74ec652E count=19 evidence=line=42593:callq *%r14;line=42703:callq *%r14;line=42717:callq *%r14;line=42722:callq *%r14;line=42727:callq *%r14;line=42794:callq *%r14;line=42806:callq *%r14;line=42811:callq *%r14;line=42819:callq *%r14;line=42828:callq *%r14;line=42842:callq *%r14;line=42859:callq *%r14;line=42864:callq *%r14;line=42868:callq *%r14;line=42881:callq *%r15;line=42886:callq *%r15;line=42895:callq *%r15;line=42905:callq *%r15;line=42920:callq *%r15;
+CT_SCAN allowed_indirect_control_transfer=_ZN20thunderbolt_paillier3key13PublicKey307222consume_proof_openings17h9a569f6f1cc66ae5E count=21 evidence=line=45468:callq *%r12;line=45588:callq *%r12;line=45619:callq *%r12;line=45623:callq *%r12;line=45627:callq *%r12;line=45655:callq *%r12;line=45660:callq *%r12;line=45713:callq *%r14;line=45718:callq *%r14;line=45728:callq *%r14;line=45732:callq *%r14;line=45736:callq *%r14;line=45740:callq *%r14;line=45745:callq *%r14;line=45750:callq *%r14;line=45772:callq *%r14;line=45777:callq *%r14;line=45788:callq *%r14;line=45793:callq *%r14;line=45803:callq *%r14;line=45814:callq *%r14;
+CT_SCAN allowed_named_external=_Unwind_Resume
+CT_SCAN allowed_named_external=memmove
+CT_SCAN allowed_named_external=memset
+CT_SCAN allowed_named_external=memcpy
+CT_SCAN allowed_named_external=bcmp
+CT_SCAN summary arch=x86_64 roots=10 reachable_symbols=32 reachable_indirect_calls=45 failures=0

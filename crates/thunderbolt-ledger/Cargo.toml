@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Deterministic protocol-v2 Ledger contract for Bitcoin Thunderbolt"
+description = "Deterministic Ledger contract for Bitcoin Thunderbolt"
 keywords = ["bitcoin", "ledger", "protocol", "consensus"]
 categories = ["cryptography::cryptocurrencies", "data-structures"]
 

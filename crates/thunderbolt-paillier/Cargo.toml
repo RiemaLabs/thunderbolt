@@ -10,11 +10,13 @@ include = [
     "src/**",
     "tests/fixtures/**",
     "README.md",
+    "CT_EVIDENCE.md",
     "CONSTANT_TIME.md",
     "ASSEMBLY_REVIEW.md",
     "LICENSE_BOUNDARY.md",
     "LICENSE",
     "NOTICE",
+    "scripts/**",
 ]
 
 [lints]

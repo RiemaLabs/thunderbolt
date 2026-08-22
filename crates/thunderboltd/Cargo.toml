@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Fail-closed Bitcoin Thunderbolt v2 operator runtime daemon"
+description = "Fail-closed Bitcoin Thunderbolt operator runtime daemon"
 repository.workspace = true
 default-run = "thunderboltd"
 

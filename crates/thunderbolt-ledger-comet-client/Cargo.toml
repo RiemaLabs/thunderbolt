@@ -1,0 +1,40 @@
+[package]
+name = "thunderbolt-ledger-comet-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Crash-safe finalized Ledger client over authenticated CometBFT RPC"
+keywords = ["bitcoin", "cometbft", "ledger", "light-client"]
+categories = ["cryptography::cryptocurrencies", "network-programming"]
+
+[lints]
+workspace = true
+
+[dependencies]
+hex = "0.4.3"
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.145"
+sha2 = "0.10.9"
+thiserror = "2.0.16"
+thunderbolt-cometbft = { path = "../thunderbolt-cometbft" }
+thunderbolt-cometbft-client = { path = "../thunderbolt-cometbft-client" }
+thunderbolt-cometbft-rpc = { path = "../thunderbolt-cometbft-rpc" }
+thunderbolt-ledger = { path = "../thunderbolt-ledger" }
+thunderbolt-ledger-rpc = { path = "../thunderbolt-ledger-rpc" }
+tokio = { version = "1.48.0", features = ["rt"] }
+
+[dev-dependencies]
+base64 = "0.22.1"
+bitcoin = { version = "0.32.5", features = ["serde"] }
+ed25519-consensus = "2.1.0"
+proptest = "1.7.0"
+secp256k1 = { version = "0.31.1", features = ["rand"] }
+tempfile = "3.27.0"
+tendermint = "0.40.4"
+tendermint-light-client-verifier = "0.40.4"
+thunderbolt-cometbft-rpc = { path = "../thunderbolt-cometbft-rpc", features = ["regtest"] }
+thunderbolt-ledger-abci = { path = "../thunderbolt-ledger-abci" }
+thunderbolt-wire = { path = "../thunderbolt-wire" }
+tokio = { version = "1.48.0", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

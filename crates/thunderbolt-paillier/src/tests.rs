@@ -35,7 +35,7 @@ assert_impl_all!(Ciphertext3072: Clone, core::fmt::Debug, Send, Sync);
 assert_impl_all!(ProofOpeningResponse3072: Clone, core::fmt::Debug, Send, Sync);
 assert_impl_all!(ChaCha20Rng: ZeroizeOnDrop);
 
-fn secret_key() -> &'static SecretKey3072 {
+pub(crate) fn secret_key() -> &'static SecretKey3072 {
     static KEY: OnceLock<SecretKey3072> = OnceLock::new();
     KEY.get_or_init(|| {
         let mut key_rng = ChaCha20Rng::from_seed([0x41; 32]);

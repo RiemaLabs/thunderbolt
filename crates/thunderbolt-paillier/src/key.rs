@@ -280,6 +280,22 @@ impl PublicKey3072 {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn opening_for_timing_test(
+        &self,
+        fixed_ciphertext: &Ciphertext3072,
+        nonce: EncryptionNonce3072,
+    ) -> Result<Encryption3072> {
+        self.ensure_ciphertext_key(fixed_ciphertext, "timing ciphertext")?;
+        self.ensure_nonce_key(&nonce, "timing nonce")?;
+        self.validate_nonce_value(nonce.expose())?;
+        Ok(Encryption3072 {
+            key_modulus: self.to_bytes(),
+            ciphertext: fixed_ciphertext.clone(),
+            nonce,
+        })
+    }
+
     /// Adds two encrypted plaintexts homomorphically.
     pub fn add(&self, left: &Ciphertext3072, right: &Ciphertext3072) -> Result<Ciphertext3072> {
         self.ensure_ciphertext_key(left, "left ciphertext")?;
@@ -686,6 +702,47 @@ impl SecretKey3072 {
                 .retrieve(),
         );
         Ok(SecretPlaintext3072::new(*plaintext, self.public_key.to_bytes()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn decryption_key_for_timing_test(&self, class: u8) -> Result<Self> {
+        if class == 0 {
+            return Ok(Self {
+                p: self.p,
+                q: self.q,
+                lambda: self.lambda,
+                mu: self.mu,
+                public_key: self.public_key.clone(),
+            });
+        }
+        if class != 1 {
+            return Err(PaillierError::ArithmeticInvariant {
+                reason: "the timing-test decryption-key class must be zero or one",
+            });
+        }
+        let lambda = Zeroizing::new(self.lambda.wrapping_add(&self.lambda));
+        if !bool::from(lambda.is_nonzero() & lambda.ct_lt(self.public_key.n.as_ref())) {
+            return Err(PaillierError::ArithmeticInvariant {
+                reason: "the doubled timing-test Carmichael exponent exceeded N",
+            });
+        }
+        let mu = Zeroizing::new(
+            self.public_key
+                .modulus_form(&lambda)
+                .invert()
+                .into_option()
+                .ok_or(PaillierError::ArithmeticInvariant {
+                    reason: "the doubled timing-test Carmichael exponent was not invertible",
+                })?
+                .retrieve(),
+        );
+        Ok(Self {
+            p: self.p,
+            q: self.q,
+            lambda: *lambda,
+            mu: *mu,
+            public_key: self.public_key.clone(),
+        })
     }
 }
 

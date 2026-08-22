@@ -1,6 +1,6 @@
 # Thunderbolt signed rollback-floor application
 
-`thunderbolt-floor-app` is the deterministic v2 application state machine for
+`thunderbolt-floor-app` is the deterministic application state machine for
 an independent rollback-floor Ledger. It is not a local `RollbackFloorStore`
 backend and does not grant consensus finality by itself.
 
@@ -10,7 +10,7 @@ Genesis fixes a bounded registry from the digest of each complete
 `VaultIdentity` to one exact x-only BIP340 operator key. The registry and a
 nonzero consensus-profile digest are hashed into the genesis digest and every
 application hash. There is no runtime registry mutation, rotation, or recovery
-API; adding governance requires a separately specified protocol version.
+API; adding governance requires a separately specified protocol change.
 
 Every CAS wraps the canonical `FloorCasRequest` from `thunderbolt-floor` with
 the registered actor key, a nonzero 32-byte audit/correlation nonce, one exact
@@ -100,12 +100,12 @@ and recomputes the complete block input digest before exposing state or proofs.
 
 ## Deployment boundary
 
-Mainnet identities are rejected until an independent audit. The floor registry
-uses the closed `thunderbolt-keystore` identity network domain, which contains
-Regtest, Signet, Testnet3, and Mainnet only; Bitcoin Testnet4 is structurally
-unrepresentable and therefore cannot be admitted accidentally. This matches the
-current Holder, Committee, and runtime policy until the keystore gains a
-distinct Testnet4 identity tag.
+Mainnet identities are currently rejected by the application policy. The floor
+registry uses the closed `thunderbolt-keystore` identity network domain, which
+contains Regtest, Signet, Testnet3, and Mainnet only; Bitcoin Testnet4 is
+structurally unrepresentable and therefore cannot be admitted accidentally.
+This matches the current Holder, Committee, and runtime policy until the
+keystore gains a distinct Testnet4 identity tag.
 
 This crate does not implement CometBFT networking, quorum verification, a
 permissive local floor, or a same-host trust shortcut. A finality verifier must

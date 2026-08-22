@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Versioned transport-neutral control-plane codec for Bitcoin Thunderbolt Ledger v2"
+description = "Bounded transport-neutral control-plane codec for the Bitcoin Thunderbolt Ledger"
 keywords = ["bitcoin", "ledger", "protocol", "rpc"]
 categories = ["cryptography::cryptocurrencies", "encoding"]
 

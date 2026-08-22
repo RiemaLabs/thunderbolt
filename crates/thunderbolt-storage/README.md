@@ -23,12 +23,11 @@ transaction.
 `append_verified_proposal` is the service-facing write path. It rejects any
 client-supplied evidence before the callback, computes a stable proposal digest,
 and deduplicates both that digest and the channel-scoped idempotency key under
-the writer lock. The asserted actor is persisted for audit and conflict
-reporting only. An actor-scoped request-ID namespace remains protocol-v2 design
-work. Exact retries return the original outcome; reuse of an idempotency key for
-a different proposal fails before expensive verification. For a new proposal,
-the callback runs inside that transaction and returns node-produced evidence. A
-verifier error or write failure rolls back every related row.
+the writer lock. The asserted actor is stored only for diagnostics and conflict
+reporting. Exact retries return the original outcome; reuse of an idempotency
+key for a different proposal fails before expensive verification. For a new
+proposal, the callback runs inside that transaction and returns node-produced
+evidence. A verifier error or write failure rolls back every related row.
 
 `append_entry` remains available for trusted import and regression tooling. It
 expects a fully verified entry and does not perform cryptographic verification.

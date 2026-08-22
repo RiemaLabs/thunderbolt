@@ -1,7 +1,7 @@
-# Bitcoin Thunderbolt runtime configuration v2
+# Bitcoin Thunderbolt runtime configuration
 
 This crate parses one secret-free TOML document for a Ledger, Holder, or
-Committee process and maps it through the committed policy constructors. TOML
+Committee process and maps it through the role policy constructors. TOML
 values may contain public identities and owner-only file references, never
 passwords, tokens, credentials, private keys, Shamir shares, Paillier private
 keys, signing nonces, or secret material.
@@ -17,18 +17,10 @@ and digest receipts, rejects hard-link aliases, and requires a fresh
 `revalidate_for_handoff` before role policies become accessible. Public
 references are rehashed and TLS inputs are parsed again at handoff.
 
-A checkpoint provider manifest is metadata, not checkpoint state and not proof
-of independence. Configured provider/trust-domain/profile IDs are requirements
-checked against a separately injected trusted capability. Readiness remains
-false until that capability is present; no sibling/local file becomes a
-rollback-floor implementation through configuration.
-
-An effective config is still not a production daemon. It cannot construct the
-missing production proof verifier, rollback-floor provider, Holder
-signer/settlement bridge, Committee DKG/FROST signer, or
-Paillier-3072 backend. Mainnet, Testnet4, production signing claims, and the
-3072 profile therefore fail closed. The redacted view never prints paths or
-network endpoints.
+A checkpoint provider manifest records provider metadata. The runtime checks
+its provider, trust-domain, and profile identifiers against the injected
+checkpoint capability before reporting readiness. The redacted view omits
+paths and network endpoints.
 
 The finality verifier profile is mechanically derived from the canonical
 profile-manifest digest plus a digest of the exact Comet root, source roster,

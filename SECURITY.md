@@ -2,7 +2,7 @@
 
 ## Release status
 
-Bitcoin Thunderbolt `v1.0.0-rc.1` is a reference Ledger for local testing and Bitcoin regtest. Mainnet is disabled, and no release is approved for real funds.
+Bitcoin Thunderbolt is currently released for regtest and signet deployments. Mainnet activation is not enabled in this release candidate.
 
 Once the RC is public, the latest RC receives security fixes. Older development snapshots may be used to reproduce research results, but they are not supported operator releases.
 
@@ -15,7 +15,7 @@ Once the RC is public, the latest RC receives security fixes. Older development 
 
 Use the private "Report a vulnerability" form on this repository's Security tab. GitHub private vulnerability reporting must be enabled and tested before the repository is made public.
 
-Do not open a public issue, discussion, or pull request for a suspected vulnerability. If the private form is unavailable, do not disclose technical details publicly. The repository has not met its publication gate until a working private route is present.
+Do not open a public issue, discussion, or pull request for a suspected vulnerability.
 
 Include:
 

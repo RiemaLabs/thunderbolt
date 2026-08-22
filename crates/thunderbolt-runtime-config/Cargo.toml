@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Unified secret-free v2 operator configuration for Bitcoin Thunderbolt"
+description = "Unified operator configuration for Bitcoin Thunderbolt"
 keywords = ["bitcoin", "configuration", "operator", "thunderbolt"]
 categories = ["config", "cryptography::cryptocurrencies"]
 

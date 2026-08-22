@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Versioned, bounded public wire messages for Bitcoin Thunderbolt"
+description = "Bounded public proof messages for Bitcoin Thunderbolt"
 
 [lints]
 workspace = true

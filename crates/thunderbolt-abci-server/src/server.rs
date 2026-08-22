@@ -22,7 +22,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use tendermint_abci::Application;
 
 use crate::config::{ServerConfig, ServerEndpoint};
-use crate::dispatch::{dispatch_frame, DispatchFailure};
+use crate::dispatch::{decode_frame, dispatch_value, DecodeFailure, DispatchFailure};
 use crate::fatal::{FatalServerEvent, FatalServerHandler, FatalServerKind};
 use crate::framing::{read_frame, write_frame, TimedStream};
 use crate::semaphore::{Permit, PermitPool};
@@ -68,6 +68,15 @@ impl ShutdownHandle {
     #[must_use]
     pub fn is_shutdown(&self) -> bool {
         self.shared.shutdown.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tracked_worker_count(&self) -> Result<usize> {
+        self.shared
+            .workers
+            .lock()
+            .map(|workers| workers.len())
+            .map_err(|_| ServerError::WorkerPanicked)
     }
 }
 
@@ -318,10 +327,26 @@ fn connection_loop<A: Application>(
         if shared.shutdown.load(Ordering::Acquire) {
             return;
         }
+        let decode_deadline = match Instant::now().checked_add(shared.config.deadlines().decode()) {
+            Some(deadline) => deadline,
+            None => fatal(&shared, FatalServerKind::WorkerInvariant, Some(connection_id)),
+        };
+        let request_decode_item_limit = shared.config.limits().max_request_decode_items();
+        let request = match decode_frame(&inbound.bytes, request_decode_item_limit, decode_deadline) {
+            Ok(request) => request,
+            Err(DecodeFailure::Client | DecodeFailure::Deadline) => {
+                let _ = stream.shutdown_both();
+                return;
+            }
+            Err(DecodeFailure::Panicked) => {
+                begin_shutdown(&shared);
+                let _ = stream.shutdown_both();
+                fatal(&shared, FatalServerKind::WorkerInvariant, Some(connection_id));
+            }
+        };
         let (sender, receiver) = mpsc::sync_channel(1);
         let handler_application = Arc::clone(&application);
         let response_cap = shared.config.limits().response_frame_bytes();
-        let request_decode_item_limit = shared.config.limits().max_request_decode_items();
         let handler_deadline = match Instant::now().checked_add(shared.config.deadlines().handler()) {
             Some(deadline) => deadline,
             None => fatal(&shared, FatalServerKind::WorkerInvariant, Some(connection_id)),
@@ -329,14 +354,13 @@ fn connection_loop<A: Application>(
         let handler = match thread::Builder::new()
             .name(format!("thunderbolt-abci-handler-{connection_id}"))
             .spawn(move || {
-                let outcome = dispatch_frame(
+                let outcome = dispatch_value(
                     || match handler_application.lock() {
                         Ok(application) => Ok(application.clone()),
                         Err(_) => Err(DispatchFailure::Server),
                     },
-                    inbound.bytes,
+                    request,
                     response_cap,
-                    request_decode_item_limit,
                 );
                 let _ = sender.send(HandlerOutcome {
                     outcome,
@@ -346,7 +370,6 @@ fn connection_loop<A: Application>(
             Ok(handle) => handle,
             Err(_) => fatal(&shared, FatalServerKind::WorkerInvariant, Some(connection_id)),
         };
-        register_worker(&shared, handler, Some(connection_id));
         let remaining = match handler_deadline.checked_duration_since(Instant::now()) {
             Some(remaining) if !remaining.is_zero() => remaining,
             _ => {
@@ -373,6 +396,11 @@ fn connection_loop<A: Application>(
                 fatal(&shared, FatalServerKind::WorkerInvariant, Some(connection_id));
             }
         };
+        if handler.join().is_err() {
+            begin_shutdown(&shared);
+            let _ = stream.shutdown_both();
+            fatal(&shared, FatalServerKind::WorkerInvariant, Some(connection_id));
+        }
         let HandlerOutcome {
             outcome,
             _permit: permit,
@@ -400,6 +428,7 @@ fn connection_loop<A: Application>(
                     return;
                 }
             }
+            #[cfg(test)]
             Err(DispatchFailure::Client) => {
                 let _ = stream.shutdown_both();
                 return;
@@ -554,9 +583,12 @@ enum LocalStream {
 impl LocalStream {
     fn configure(&self) -> io::Result<()> {
         match self {
-            Self::Tcp(stream) => stream.set_nodelay(true),
+            Self::Tcp(stream) => {
+                stream.set_nonblocking(false)?;
+                stream.set_nodelay(true)
+            }
             #[cfg(unix)]
-            Self::Unix(_) => Ok(()),
+            Self::Unix(stream) => stream.set_nonblocking(false),
         }
     }
 

@@ -1,24 +1,17 @@
-# Bitcoin Thunderbolt operator runtime shell v2
+# Bitcoin Thunderbolt operator runtime
 
-`thunderbolt-runtime` is a fail-closed stepping stone between the committed
-runtime configuration and future production Ledger, Holder, and Committee
-services. It is not release completion and cannot make the current missing
-cryptographic or external trust capabilities available.
-
-Each `LedgerSupervisor`, `HolderSupervisor`, or `CommitteeSupervisor` consumes
-the matching fresh `RuntimeHandoff`, retains it for the supervisor lifetime,
-checks a mandatory role-typed handler against the exact runtime-manifest and
-finality-verifier profiles plus the complete public deployment identity, and
-holds an exclusive owner-only process lock inside the audited data directory.
-There is no default handler, demo mode, accept-all verifier, or profile
-downgrade.
+`thunderbolt-runtime` provides the role-aware lifecycle supervisor used by
+Ledger, Holder, and Committee processes. Each supervisor consumes the matching
+fresh `RuntimeHandoff`, retains it for its lifetime, validates the role handler
+against the runtime-manifest and finality profiles plus the public deployment
+identity, and holds an exclusive owner-only process lock in the data directory.
 
 The process lock contains the exact role, public deployment identity, runtime
 and finality profiles, and a durable clean/running/dirty marker. An unclean
 prior lifetime adds the immutable `dirty_restart_recovery_required` blocker and
 remains sticky across an ordinary stop. A mismatched or malformed marker fails
-construction. Clearing either condition requires a separate reviewed recovery
-procedure; no runtime control method can clear it.
+construction. Clearing either condition requires a separate recovery procedure;
+no runtime control method can clear it.
 
 A dirty restart is a hard lifecycle gate, not only a readiness indication.
 `Start` and `Drain` return a stable conflict without invoking the role handler.
@@ -31,12 +24,9 @@ This makes an exact ambiguous `Stop` retry safe across process restart without
 requiring the actor-lifetime RequestId ledger to survive the restart.
 
 Liveness and readiness are independent. Liveness reports only whether the
-bounded lifecycle actor is being polled. This stepping-stone version always
-emits `NotReady`, even while the role handler is running. A future release must
-add an explicit reviewed capability-attestation transition before it can emit
-`Ready`; merely removing a blocker cannot enable readiness. This release also
-carries the non-production profile blocker plus role-specific missing
-capabilities.
+bounded lifecycle actor is being polled. The current supervisor always emits
+`NotReady`; role integration must add an explicit capability-attestation
+transition before it can emit `Ready`.
 
 The caller continuously polls `RuntimeSupervisor::run`. Fixed `Start`, `Drain`,
 and `Stop` hooks execute serially through an eight-command mailbox under
@@ -52,12 +42,11 @@ conflicts; new IDs fail closed when the ledger is full. Dropping or timing out a
 caller cancels the in-flight hook, restores the prior state, and leaves that ID
 retryable. If hook completion and caller cancellation become ready together,
 completion wins and the result is cached before any replay. A crash discards
-the in-memory ledger but activates the hard dirty
-gate, so no retry can reapply a hook before a future reviewed recovery path.
+the in-memory ledger but activates the hard dirty gate, so no retry can reapply
+a hook before an explicit recovery path.
 
-`RuntimeControl` implements the existing owner-only `ControlHandler` contract
-but binds no Unix socket or other listener. It accepts only empty-payload
+`RuntimeControl` implements the owner-only `ControlHandler` contract, which
+`thunderboltd` exposes through a local Unix socket. It accepts the
 `runtime.status`, `runtime.redacted_config`, `runtime.blockers`,
-`runtime.drain`, and `runtime.stop` methods. It exposes no start command, raw
-protocol mutation, secret material, filesystem path, network endpoint, or
-caller-provided time.
+`runtime.drain`, and `runtime.stop` methods with empty payloads. It does not
+expose protocol mutations or secret material.

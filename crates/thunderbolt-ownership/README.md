@@ -6,11 +6,10 @@ This crate implements exactly the paper relation
 
 The prover demonstrates knowledge of the current Holder scalar `x` for the
 public anchor `X`, using the configured anchor base `H`. This is the ownership
-proof required by the Finalize flow in Sections 4.2 and 5.1 of the accepted
-paper.
+proof used by the Finalize flow in Sections 4.2 and 5.1 of the protocol paper.
 
-`FinalizeSigningContext` is derived from a validated protocol-v2
-`ChannelSnapshotV2`, an immutable operator-owned anchor-suite registry, the
+`FinalizeSigningContext` is derived from a validated `ChannelSnapshotV2`, an
+immutable operator-owned anchor-suite registry, the
 signature-authenticated Holder key, and the exact closing transaction. It
 commits the Ledger chain and stable channel context, exact snapshot-state hash,
 step (including zero), fixed lock key `P`, registered anchor suite and base,

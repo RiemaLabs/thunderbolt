@@ -22,7 +22,7 @@ const DEFAULT_DATA_DIR: &str = "data";
 #[command(
     name = "thunderboltd-legacy-v1",
     version,
-    about = "Legacy version 1 Bitcoin Thunderbolt reference Ledger"
+    about = "Non-default HTTP compatibility daemon for the reference Ledger"
 )]
 struct Cli {
     /// Path to the node's TOML configuration.

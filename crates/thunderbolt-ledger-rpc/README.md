@@ -1,6 +1,7 @@
-# Thunderbolt Ledger RPC v2
+# Thunderbolt Ledger RPC
 
-This crate defines the versioned control-plane messages shared by Ledger clients and server adapters. It does not open sockets, choose HTTP or gRPC, authenticate peers, execute consensus, or verify a validator quorum.
+This crate defines the bounded transport-neutral messages shared by Ledger
+clients and server adapters.
 
 ## Trust boundary
 
@@ -89,7 +90,12 @@ consensus finality separately.
 
 A production server adapter must authenticate clients, set deadlines and body limits before allocation, preserve explicit ambiguity for potentially committed writes, and avoid retrying non-idempotent submissions as if they had failed cleanly.
 
-A production finality verifier must pin its trust root and verifier profile, validate the intended Ledger or floor chain, prove validator quorum or light-client continuity, bind the adjacent committing header and app hash, verify application-version-two inclusion for the exact claim, and persist trusted-header progress safely. Capability issuance first requires exact equality between the receipt's profile ID and the verifier's declared profile. These consensus details are deployment design, not claims made by the research paper or by this codec.
+A finality verifier pins its trust root and verifier profile, validates the
+intended Ledger or floor chain, proves validator quorum or light-client
+continuity, binds the adjacent committing header and application hash, verifies
+application-version inclusion for the exact claim, and persists trusted-header
+progress. It issues a capability only when the receipt profile matches the
+verifier profile.
 
 Finalized entry bundles never carry or duplicate a full `ExecutedBlockV2`.
 They contain only its validated compact commitment, one exact entry, the entry's

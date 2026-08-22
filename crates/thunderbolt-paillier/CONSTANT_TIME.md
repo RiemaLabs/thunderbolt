@@ -70,11 +70,18 @@ an already compromised process.
 
 ## Verification program
 
+The repository now contains opt-in ignored Welch-t experiments and a locked
+O0/O3 assembly/direct-call-graph scanner. Their methodology and reviewed
+allowlists are in [CT_EVIDENCE.md](CT_EVIDENCE.md). Default tests compile but do
+not execute the timing experiments.
+
 Before integration:
 
-1. Inspect optimized assembly on x86_64 and AArch64 at O0 and O3/release.
-2. Run dudect fixed-vs-random plaintext encryption and ciphertext decryption
-   classes for at least 10 minutes per target.
+1. Re-run both scanner self-tests and the isolated-package O0/O3 scanner on
+   every production x86_64 and AArch64 target after the source, compiler, and
+   lock are frozen.
+2. Extend the included Welch-t experiments to at least 10 minutes per target
+   and reproduce them with upstream dudect.
 3. Use Timecop or an equivalent dynamic taint tool to investigate any signal.
 4. Re-run after compiler, `crypto-bigint`, `crypto-primes`, or target changes.
 5. Obtain an independent review of Paillier composition, exact division,

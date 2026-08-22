@@ -5,7 +5,7 @@ Holder or by one independently operated Threshold Committee member. It stores
 only participant-local secret material. The Thunderbolt Ledger must never open
 or copy this vault.
 
-The version-2 on-disk format uses Argon2id to derive a key from an operator
+The on-disk format uses Argon2id to derive a key from an operator
 password, followed by XChaCha20-Poly1305 authenticated encryption. The
 authenticated context binds the format version, Bitcoin network, deployment
 identifier, positive committee epoch, exact committee-descriptor digest,

@@ -42,13 +42,13 @@ If consensus is unclear, two uninvolved maintainers decide after the discussion 
 - Protocol, cryptography, signing, authorization, storage migration, and Bitcoin settlement changes require two approvals, including one focused reviewer for the affected area.
 - A maintainer must not bypass failing required checks.
 - Emergency fixes use the same review standard when possible. If immediate private action is needed, a second security responder must approve the release before publication.
-- Force pushes to protected release branches are forbidden except for an approved history-sanitization event with a recorded ref manifest.
+- Force pushes to protected release branches are forbidden.
 
 A correct test result does not settle a design objection about the threat model or fail-closed behavior.
 
 ## Releases
 
-The release manager follows [Release process](docs/release-process.md). No single person should both produce and provide the only verification of release artifacts. Stable `v1.0.0` requires the mainnet gates and external audit; maintainers cannot waive those requirements through ordinary review.
+The release manager follows [Release process](docs/release-process.md). No single person should both produce and provide the only verification of release artifacts. A stable release requires the mainnet gates and external audit; maintainers cannot waive those requirements through ordinary review.
 
 ## Adding maintainers
 

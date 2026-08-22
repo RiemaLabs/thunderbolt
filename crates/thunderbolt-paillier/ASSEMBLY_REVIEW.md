@@ -1,55 +1,77 @@
-# Release assembly review
+# Assembly and call-graph review
 
 Review date: 2026-08-22
 
-Status: macOS release-instruction scan complete for the Stage-A candidate.
-Linux, O0, data-flow, and dynamic timing gates remain open; this is not
-constant-time clearance.
+Status: reproducible O0/O3 scanners and opt-in statistical harnesses are
+present. This evidence is not production constant-time clearance.
 
-The release gate must record the exact source commit, Rust toolchain, target,
-CPU, optimization settings, and dependency lock. Review both x86_64 and AArch64
-release assembly for plaintext ingress, encrypt, decrypt, homomorphic
-operations, consuming proof-opening combination, and the response-equation
-paths.
+## Reproducible gate
 
-Minimum commands:
+Run `scripts/ct-scan-self-test.sh` and
+`scripts/ct-input-manifest-self-test.sh`, then invoke
+`scripts/ct-assembly-scan.sh TARGET O0|O3 OUTPUT_DIRECTORY`. The gate records:
 
-```bash
-cargo rustc --locked --release -p thunderbolt-paillier --lib -- --emit=asm
-uv run /path/to/constant-time-analysis/ct_analyzer/analyzer.py \
-  --arch arm64 --opt-level O3 crates/thunderbolt-paillier/src/lib.rs
-uv run /path/to/constant-time-analysis/ct_analyzer/analyzer.py \
-  --arch x86_64 --opt-level O3 crates/thunderbolt-paillier/src/lib.rs
-```
+- the exact standalone Cargo archive, registry-only dependency lock, vendored
+  sources/build scripts, crate-local profile/config, scanner, compiler and
+  compiler libraries, selected linker/SDK inputs, target, host, and
+  optimization level;
+- emitted assembly plus its SHA-256 digest;
+- all ten required secret-path roots and their reachable Rust call graph;
+- every reviewed public-parameter division and allowed variable-time symbol;
+  and
+- every narrowly allowed unresolved OS-randomness/public-ordering dispatch.
 
-Every division, conditional branch, table access, and variable shift must be
-traced to public data, fixed loop structure, fresh randomness, or an explicitly
-offline operation. A clean instruction scan is necessary but insufficient;
-complete the statistical and dynamic program in `CONSTANT_TIME.md`.
+The compile runs outside the repository with isolated Cargo state, a sanitized
+environment, frozen offline resolution, and matching full pre/post input
+manifests. This prevents workspace profiles, Cargo config, path patches, or a
+concurrent live-workspace edit from silently changing the compiled input after
+the package boundary. It fails on a missing root, unreviewed reachable integer,
+SSE, AVX, or x87 division/square root, unexpected `vartime` reference, named
+compiler-division helper, or unresolved indirect control transfer. Reviewed unresolved Linux O3
+sites are bound to one of the exact retained/current assembly
+SHA/compiler/target/level/site sets. O0 and O3 both disable dependency debug
+assertions and retain overflow checks; the distinction is ordinary compiler
+optimization. See
+[CT_EVIDENCE.md](CT_EVIDENCE.md) for the exact allowlist and its source-level
+data-flow justification.
 
-## Stage-A results
+## macOS matrix
 
-Toolchain: Rust 1.90.0, LLVM 20.1.8. Native target:
-`aarch64-apple-darwin`. Cross target: `x86_64-apple-darwin`. Both used the
-workspace release profile with thin LTO and overflow checks. The scan ran on an
-uncommitted Stage-A candidate while the shared workspace HEAD and dependency
-lock were changing in parallel; it must be repeated after the crate and
-root-owned dependency lock are frozen.
+The current Stage-A candidate was scanned with Rust 1.90.0 / LLVM 20.1.8 on:
 
-The crate was compiled to assembly for both targets. The exact symbol bodies
-for plaintext ingress, `PublicKey3072::encrypt`, homomorphic add/subtract/public
-exponentiation, `consume_proof_openings`, `response_lhs`,
-`SecretKey3072::decrypt`, and the exact `L` division helper contained no
-AArch64 `udiv`/`sdiv`/floating division and no x86_64
-`div`/`idiv`/floating-division instructions. Whole-file division instructions
-mapped to FIPS probable-prime validation and `generate_prime`, both explicitly
-offline.
+| Target | Level | Result |
+|---|---|---|
+| `x86_64-apple-darwin` | O0 | pass |
+| `x86_64-apple-darwin` | O3 | pass |
+| `aarch64-apple-darwin` | O0 | pass |
+| `aarch64-apple-darwin` | O3 | pass |
 
-The scan does not establish that every conditional branch or memory access is
-secret-independent. RustCrypto exponentiation, inversion, division, and
-Montgomery multiplication remain dependency code whose documented
-constant-time contract and target restrictions are part of the argument.
-Automated analysis could not run because the configured skill's analyzer script
-and `uv` executable were unavailable in this environment. The manual result is
-therefore a release-candidate input, not a proof or external audit. No Linux
-target, O0, conditional-branch/data-flow, dudect, or Timecop result exists yet.
+At O3 the secret arithmetic produced no reachable hardware division. O0 kept
+dependency helpers out of line. Its reviewed divisions used only public
+bit-length, limb-count, and fixed SafeGCD shift/iteration parameters; the gate
+prints each occurrence. The only reviewed variable-time sampling path remains
+fresh rejection sampling below public `N`.
+
+## Linux evidence
+
+The authorized Linux x86_64 run, exact hashes, resource ceilings, statistical
+outputs, and cleanup record are stored under `evidence/`. The committed record
+must be read together with the raw-result hashes; no timing result is promoted
+to a proof or production claim.
+
+The current strict scanner was applied offline to the retained hash-verified
+Linux and macOS assemblies. Those committed `evidence/postscan/` reports
+supersede the scanner verdicts produced during the original remote commands.
+
+## Limitations
+
+Assembly call-graph reachability does not establish that every branch or memory
+access is secret-independent. RustCrypto exponentiation, inversion, exact
+division, and Montgomery multiplication remain dependency code whose
+documented contract and target restrictions are part of the argument. The
+scanner's x86_64 function-pointer propagation is deliberately narrow and any
+new unresolved transfer fails closed.
+
+The statistical tests can detect a signal but cannot prove its absence. Longer
+upstream-dudect campaigns, Timecop/Valgrind secret-taint testing, production
+CPU/OS replication, and external cryptographic review remain open.

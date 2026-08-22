@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Hardened JSON control plane and reference ledger node for Bitcoin Thunderbolt"
+description = "JSON regression harness for Bitcoin Thunderbolt protocol storage"
 repository.workspace = true
 
 [dependencies]

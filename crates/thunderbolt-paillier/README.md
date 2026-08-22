@@ -1,7 +1,7 @@
 # thunderbolt-paillier
 
-This crate is the isolated Stage-A arithmetic backend for Thunderbolt protocol
-version 2. It implements one parameter set only:
+This crate is the fixed-width arithmetic backend for Bitcoin Thunderbolt. It
+implements one parameter set:
 
 - two distinct 1536-bit prime factors;
 - an exact 3072-bit Paillier modulus `N`;
@@ -72,14 +72,15 @@ Persist it only inside an authenticated encrypted keystore. Loading reruns FIPS
 probable-prime checks and rechecks factor width, distinctness, minimum distance,
 and the derived exact-width modulus before constructing a key.
 
-## Status
+## Integration status
 
-Stage A is arithmetic evidence, not production activation. Core and wire still
-use their existing fail-closed v2 boundary. Before integration, this crate
-requires independent cryptographic review, cross-architecture constant-time
-evidence, protocol key-validity design, and real proof transcript vectors.
-The crate cannot itself guarantee that offline APIs run before a daemon starts
-listening; that startup/process separation is a mandatory integration gate.
+This crate is not yet wired into core, wire, role services, or the operator
+runtime. Integration must bind keys to the committee registry and fixed proof
+transcripts, and must keep offline key operations separate from daemon startup.
 
-See [CONSTANT_TIME.md](CONSTANT_TIME.md), [LICENSE_BOUNDARY.md](LICENSE_BOUNDARY.md),
-and [ASSEMBLY_REVIEW.md](ASSEMBLY_REVIEW.md).
+Welch-t timing experiments and isolated O0/O3 assembly scans are described in
+[CT_EVIDENCE.md](CT_EVIDENCE.md).
+
+See [CONSTANT_TIME.md](CONSTANT_TIME.md),
+[LICENSE_BOUNDARY.md](LICENSE_BOUNDARY.md), and
+[ASSEMBLY_REVIEW.md](ASSEMBLY_REVIEW.md).

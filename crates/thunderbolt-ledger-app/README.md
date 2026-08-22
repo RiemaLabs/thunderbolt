@@ -1,7 +1,7 @@
 # Thunderbolt Ledger application
 
 `thunderbolt-ledger-app` is the crash-safe SQLite application layer for the
-standalone Bitcoin Thunderbolt version 2 contracts. It combines:
+Bitcoin Thunderbolt Ledger contract. It combines:
 
 - BIP340-authenticated `SignedProposalV2` values from `thunderbolt-ledger`;
 - deterministic block metadata, application hashes, and Merkle proofs;
@@ -17,12 +17,12 @@ application-hash, and monotonic-time continuity before execution.
 Consensus deployments must set `ApplicationOptions.consensus_profile_digest`.
 The schema stores that immutable 32-byte value alongside the chain ID and
 reducer limits and rejects a reopen under a different verifier/deployment
-profile. A version-one database can bind a profile only while its durable head
-is still empty; an executed unprofiled database fails closed instead of being
-retroactively assigned new proof policy.
+profile. An unprofiled database can bind a profile only while its durable head
+is still empty; an executed unprofiled database cannot be assigned a new proof
+policy.
 
-The application version is `2`. A future ABCI `Info` and `InitChain` boundary
-must report that exact value. Execution at consensus height `H` returns the
+The ABCI adapter reports the application version defined by this contract.
+Execution at consensus height `H` returns the
 application hash committed by the CometBFT header at height `H + 1`; the hash
 is never relabeled as belonging to the next executed application block.
 
@@ -62,7 +62,6 @@ block is canonically decoded and successor-validated. Range reads are limited
 to 64 blocks and 23 MiB of canonical block-array bytes. They fail rather than
 returning an empty or provider-truncated page.
 
-This crate is not a network, consensus engine, ABCI server, finality verifier,
-wallet, or role runtime. `ExecutedBlockV2`, its application hash, and its Merkle
-proofs establish deterministic execution only. A future consensus integration
-must verify finality separately before exposing a finality capability.
+`thunderbolt-ledger-abci` exposes this application to CometBFT, and
+`thunderbolt-ledger-comet-client` verifies finality before returning finalized
+entries. This crate handles deterministic execution and storage.

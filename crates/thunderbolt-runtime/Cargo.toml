@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Fail-closed role-typed operator runtime shell for Bitcoin Thunderbolt v2"
+description = "Role-aware operator runtime for Bitcoin Thunderbolt"
 keywords = ["bitcoin", "operator", "runtime", "thunderbolt"]
 categories = ["cryptography::cryptocurrencies"]
 

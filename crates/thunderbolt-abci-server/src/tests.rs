@@ -80,6 +80,7 @@ fn deadlines() -> Result<ServerDeadlines> {
         Duration::from_millis(500),
         Duration::from_millis(250),
         Duration::from_secs(3),
+        Duration::from_secs(1),
         Duration::from_secs(2),
         Duration::from_secs(3),
         Duration::from_secs(5),
@@ -231,6 +232,58 @@ fn parallel_clients_share_the_bounded_server() -> TestResult<()> {
 }
 
 #[test]
+fn per_request_handlers_are_joined_without_worker_registry_growth() -> TestResult<()> {
+    let server = start(tcp_config()?, EchoApplication, PanicFatal)?;
+    let shutdown = server.shutdown_handle();
+    let BoundEndpoint::Tcp(address) = *server.endpoint() else {
+        return Err("expected TCP endpoint".into());
+    };
+    let mut stream = TcpStream::connect(address)?;
+    let request = encode_request(request::Value::Echo(RequestEcho {
+        message: "reap".to_owned(),
+    }))?;
+    for _ in 0..256 {
+        stream.write_all(&request)?;
+        assert!(matches!(
+            read_response(&mut stream)?.value,
+            Some(response::Value::Echo(_))
+        ));
+    }
+    assert_eq!(shutdown.tracked_worker_count()?, 1);
+    drop(stream);
+    server.shutdown_and_join();
+    Ok(())
+}
+
+#[test]
+fn expired_decode_budget_closes_only_the_client_connection() -> TestResult<()> {
+    let decode_bound = ServerDeadlines::new(
+        Duration::from_millis(5),
+        Duration::from_secs(2),
+        Duration::from_millis(200),
+        Duration::from_millis(100),
+        Duration::from_secs(1),
+        Duration::from_nanos(1),
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+    )?;
+    let server = start(tcp_config_with(limits()?, decode_bound)?, EchoApplication, PanicFatal)?;
+    let shutdown = server.shutdown_handle();
+    let BoundEndpoint::Tcp(address) = *server.endpoint() else {
+        return Err("expected TCP endpoint".into());
+    };
+    let mut stream = TcpStream::connect(address)?;
+    stream.write_all(&encode_request(request::Value::Echo(RequestEcho {
+        message: "decode deadline".to_owned(),
+    }))?)?;
+    assert_connection_closed(&mut stream)?;
+    assert!(!shutdown.is_shutdown());
+    server.shutdown_and_join();
+    Ok(())
+}
+
+#[test]
 fn partial_frame_is_cancelled_by_shutdown() -> TestResult<()> {
     let server = start(tcp_config()?, EchoApplication, PanicFatal)?;
     let BoundEndpoint::Tcp(address) = server.endpoint() else {
@@ -252,6 +305,7 @@ fn shutdown_wakes_a_long_listener_poll_immediately() -> TestResult<()> {
         Duration::from_secs(1),
         Duration::from_millis(250),
         Duration::from_secs(2),
+        Duration::from_secs(1),
         Duration::from_secs(1),
         Duration::from_secs(1),
         Duration::from_secs(1),
@@ -591,6 +645,7 @@ fn slow_header_and_payload_are_cancelled_without_stopping_server() -> TestResult
         Duration::from_millis(75),
         Duration::from_millis(50),
         Duration::from_millis(100),
+        Duration::from_millis(75),
         Duration::from_secs(1),
         Duration::from_secs(1),
         Duration::from_secs(2),
@@ -603,6 +658,16 @@ fn slow_header_and_payload_are_cancelled_without_stopping_server() -> TestResult
     let BoundEndpoint::Tcp(address) = *server.endpoint() else {
         return Err("expected TCP endpoint".into());
     };
+
+    let mut delayed = TcpStream::connect(address)?;
+    std::thread::sleep(Duration::from_millis(100));
+    delayed.write_all(&encode_request(request::Value::Echo(RequestEcho {
+        message: "delayed but within idle deadline".to_owned(),
+    }))?)?;
+    assert!(matches!(
+        read_response(&mut delayed)?.value,
+        Some(response::Value::Echo(_))
+    ));
 
     let mut idle = TcpStream::connect(address)?;
     std::thread::sleep(Duration::from_millis(375));
@@ -803,6 +868,7 @@ fn fatal_boundary_subprocess_entry() -> TestResult<()> {
         Duration::from_millis(100),
         Duration::from_millis(50),
         Duration::from_millis(250),
+        Duration::from_millis(100),
         Duration::from_millis(250),
         Duration::from_millis(50),
         Duration::from_millis(100),
@@ -1085,6 +1151,7 @@ fn remote_bind_and_unbounded_resource_profiles_are_unrepresentable() -> TestResu
             Duration::from_secs(1),
             Duration::from_secs(1),
             Duration::from_secs(2),
+            Duration::from_secs(1),
             Duration::from_secs(1),
             Duration::from_secs(1),
             Duration::from_secs(1),

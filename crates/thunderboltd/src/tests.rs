@@ -107,7 +107,17 @@ fn default_help_exposes_only_check_and_start() {
     let help = Cli::command().render_long_help().to_string();
     assert!(help.contains("check"));
     assert!(help.contains("start"));
-    for forbidden in ["init", "demo", "HTTP", "submit", "legacy-v1"] {
+    for forbidden in [
+        "init",
+        "demo",
+        "HTTP",
+        "submit",
+        "legacy",
+        "v1",
+        "v2",
+        "version 1",
+        "version 2",
+    ] {
         assert!(!help.contains(forbidden), "default help leaked {forbidden}");
     }
 }

@@ -1,121 +1,80 @@
 # Threat model
 
-This threat model follows the accepted Thunderbolt paper and adds the operational risks of a real daemon deployment. It applies to the base protocol. Optional overlays in the paper are outside the `v1.0.0-rc.1` scope.
+This threat model covers the base Thunderbolt protocol and its operator processes.
 
 ## Assets
 
-- Holder secrets and credentials
-- committee shares and threshold-signing nonce material
-- the fixed Taproot lock key and funding UTXO
-- the current public anchor and channel sequence
-- invoice freshness and uniqueness
-- committed Ledger history
-- local databases, backups, control credentials, and configuration
-- release artifacts and update-signing keys
+- Holder ownership secrets and credentials
+- committee shares and signing nonces
+- the fixed channel lock key and funded Bitcoin UTXO
+- ordered Ledger history and application state
+- participant vaults, backups, and rollback checkpoints
+- validator, transport, and release signing keys
 
 ## Security properties
 
-Ownership security
-: Only the current Holder, together with the required committee threshold, can transfer ownership or finalize the channel.
+### Ownership
 
-Fixed-key integrity
-: Off-chain transfers rotate Holder and committee shares without changing the Bitcoin lock key.
+Only the current Holder with a valid credential can authorize the next transfer or participate in settlement.
 
-Transfer correctness
-: A valid transfer gives the Recipient a usable next-Holder secret and applies the matching committee update.
+### Committee threshold
 
-Liveness
-: Transfer and Finalize complete when at least `t` committee members are honest, responsive, and able to reach a Ledger that includes valid entries.
+Fewer than the configured threshold of committee members cannot reconstruct committee authority or finalize alone.
 
-Operational integrity
-: A daemon restart, duplicate request, delayed message, or Bitcoin reorganization must not create a second accepted state or reuse signing material.
+### Fixed Bitcoin binding
+
+Every operation remains bound to the same network, genesis hash, funding outpoint, deployment, committee, and proof suite.
+
+### Ledger order
+
+Committed entries are immutable, globally ordered, and retrievable. Participants verify consensus finality before acting on an entry.
+
+### Rollback resistance
+
+A copied or restored participant vault cannot produce accepted output from an older checkpoint.
+
+### Crash safety
+
+A restart either resumes the committed transition or rejects the ambiguous state. It does not acknowledge an operation that may not be durable.
 
 ## Adversaries
 
-The protocol considers an adversary that may corrupt any number of past or future Holders and at most `t - 1` of the `n` committee members. The paper uses a static-corruption model. A deployment must not silently claim protection against stronger adaptive corruption without a separate analysis.
+The design considers:
 
-The implementation also assumes hostile network clients, malformed proofs, replayed events, equivocation attempts, compromised control credentials, unavailable peers, disk faults, process crashes, and a Bitcoin chain reorganization.
-
-An attacker may:
-
-- submit malformed, oversized, duplicate, stale, or out-of-order messages
-- publish inconsistent invoice material or an unusable transfer credential
-- replay an entry across channels, steps, networks, or protocol versions
-- compromise a minority of committee nodes
-- delay, censor, or reorder messages at the transport layer
-- crash a daemon between signing, persistence, and response
-- steal an unencrypted database or backup
-- try to make two daemon instances use the same identity
-- compromise a build or release pipeline
+- a malicious Holder or Recipient
+- up to the protocol fault bound of corrupted committee members
+- Byzantine Ledger validators within the configured CometBFT assumption
+- unavailable, stale, equivocating, or misconfigured RPC peers
+- malformed or oversized network input
+- a local database writer without access to independent checkpoints
+- process crashes at durable transition boundaries
+- an operator mistake that copies state, reuses an identity, or mixes deployment files
 
 ## Trust assumptions
 
-Committee threshold
-: At most `t - 1` committee members are corrupted. At least `t` honest members remain responsive for liveness. Each member runs an independent process and protects its own share.
+- Bitcoin consensus and the configured Bitcoin Core view are correct after the chosen confirmation policy.
+- At least the required committee threshold is honest and available.
+- CometBFT satisfies its validator fault assumption and the client starts from an authentic trust root.
+- The external rollback-floor and trust-checkpoint providers are independent and authentic.
+- Host administrators protect process credentials and do not deliberately extract live secrets from memory.
+- Cryptographic parameter registries and deployment manifests are provisioned authentically.
 
-Thunderbolt Ledger
-: For each channel, the Ledger provides append-only persistence, a single committed order, and eventual inclusion and retrieval of valid entries. A simple single-process reference Ledger is suitable for development only unless the operator accepts its weaker trust model.
+## Boundaries
 
-Cryptography
-: The proofs rely on elliptic-curve discrete-log hardness, the Paillier Decisional Composite Residuosity assumption, and Fiat-Shamir in the random-oracle model. The implementation also depends on a correct CSPRNG, domain separation, canonical encoding, constant-time secret handling where required, and safe dependency versions.
+Actor signatures authenticate proposals but do not prove finality. Merkle proofs authenticate entries to an application hash but do not authenticate the validator decision. TLS authenticates a network peer but does not authorize a protocol transition.
 
-Bitcoin Chain
-: Operators use a validated Bitcoin backend and a confirmation policy suitable for the selected network. Reorganizations and replacement transactions are expected events, not exceptional assumptions.
+The system combines these boundaries in order: canonical request, actor signature, deterministic execution, Merkle inclusion, consensus finality, role verification, local atomic persistence, and external checkpoint advancement.
 
-Host and operator
-: The operating system, process isolation, file permissions, clock, entropy source, backup handling, and release verification are part of the trusted computing base.
+## Availability
 
-## Required defenses
+Thunderbolt requires a responsive committee threshold, Ledger quorum, Bitcoin backend, and checkpoint providers. If one is unavailable, role services stop advancing rather than accepting weaker evidence.
 
-- Bind every proof and signature to protocol version, Bitcoin network, channel, step, invoice, and prior event.
-- Authenticate protocol entries independently of TLS.
-- Use strict parsing, canonical encoding, size limits, deadlines, bounded queues, and proof-verification concurrency limits.
-- Make every mutation idempotent and return the committed sequence and event hash.
-- Persist events, secret updates, and outbound work atomically.
-- Encrypt secrets and backups at rest and keep keys outside ordinary configuration files.
-- Persist signing sessions before emitting partial signatures and permanently consume nonce material.
-- Reject simultaneous use of one identity database.
-- Track Bitcoin confirmations and roll state back only through an explicit reorganization procedure.
-- Redact secrets, credentials, raw proofs where sensitive, and personal data from logs and metrics.
-- Sign release artifacts and publish checksums and a software bill of materials.
+Admission, proposal scanning, proof work, history replay, and query serialization are bounded. Operator deployments must also configure CometBFT mempool, fee, rate, connection, and block limits to match the application profile.
 
-## Known limits and exclusions
+## Privacy
 
-- Mainnet is disabled in `v1.0.0-rc.1`.
-- The runnable server is a single reference Ledger. It does not implement the paper's Byzantine Ledger fault model.
-- The node library can inject trusted version 1 Invoice and Transfer verification into its atomic append path. The shipped daemon does not configure that verifier and does not use the standalone version 2 Ledger, reducer, or role adapters. It has no production Open, Bitcoin, quorum-receipt, or committee service path, and its optional regtest demo mode inserts synthetic verification attestations.
-- Control uses bearer-authenticated loopback HTTP. The reserved Unix socket, remote control, and metrics are not implemented.
-- Manual SQLite backups are verified but not encrypted by the daemon.
-- The RC wire codec fixes Paillier values at 2048 bits, while the accepted paper evaluates 3072-bit Paillier.
-- Version 2 has BIP340 actor-signed proposals and a reducer with bounded concurrent Invoices, but these are standalone libraries without daemon, ABCI, persistence, or finality integration. The active runtime remains version 1.
-- Executed version 2 blocks, application hashes, and Merkle proofs establish deterministic execution only. They do not authenticate validator consensus.
-- Holder and committee rollback protection depends on an exact checkpoint in an independently authenticated store. The repository has no production store or killed-between-persistence-and-checkpoint recovery procedure.
-- Exact anchored backups can be restored, but retained Holder and committee histories still need compaction or epoch rotation.
-- Open has no reviewed DKG or provisioning ceremony that establishes the distributed committee state and its relationship to `P`.
-- Finalize has no concrete `R_own` proof or audited combined-key Holder plus FROST implementation under `P`.
-- Finalize is committee-dependent in the base protocol.
-- The unilateral-exit overlay described in the paper is not implemented.
-- Off-chain splitting is not implemented. A transfer moves ownership of the whole locked UTXO.
-- The protocol does not route Lightning payments and does not speak the BOLT wire protocols.
-- The base design does not promise unlinkability. Ledger observers can see channel activity and timing.
-- Availability fails if fewer than `t` committee members can respond or if the Ledger fails its inclusion and retrieval guarantees.
-- A threshold breach can authorize theft. Threshold cryptography distributes trust but does not remove it.
-- Endpoint compromise can expose the current Holder secret before the protocol has a chance to protect it.
-- The paper's proofs do not establish correctness of storage, transport, Bitcoin integration, deployment automation, or operator procedures.
+Thunderbolt keeps participant secrets out of the Ledger, but the base protocol does not promise transaction unlinkability. Operators should assume that public channel identifiers, timing, Ledger entries, and Bitcoin funding and settlement transactions can be correlated.
 
-## Abuse cases that must be tested
+## Exclusions
 
-1. Reuse an invoice identifier in one channel and across two channels.
-2. Replay a valid transfer on a different network or protocol version.
-3. Submit two transfers against the same Holder state.
-4. Start Finalize while a transfer waits for committee acknowledgements.
-5. Deliver valid entries in different orders to different nodes.
-6. Crash after a database commit but before the response, then retry the request.
-7. Crash after creating threshold nonce material and before producing a partial signature.
-8. Corrupt or omit one committee refresh share.
-9. Stall enough committee members to fall below threshold.
-10. Reorganize the funding or finalization transaction.
-11. Restore an old backup over newer channel state.
-12. Send a proof or event at every configured size and concurrency boundary.
-
-Changes to the trust assumptions, proof bindings, event order, signing flow, or recovery rules require an update to this document in the same pull request.
+The base release transfers ownership of a whole locked UTXO. Routed Lightning payments, unilateral-exit overlays, off-chain splitting, host compromise, and denial of service beyond the documented quorum and resource assumptions are outside this threat model.

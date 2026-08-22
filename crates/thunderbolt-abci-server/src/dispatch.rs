@@ -1,4 +1,5 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::time::Instant;
 
 use prost::Message as _;
 use tendermint_abci::Application;
@@ -7,11 +8,47 @@ use tendermint_proto::v0_38::abci::{request, response, Request, Response};
 use crate::preflight::preflight_request;
 
 pub(crate) enum DispatchFailure {
+    #[cfg(test)]
     Client,
     Server,
     Panicked,
 }
 
+pub(crate) enum DecodeFailure {
+    Client,
+    Deadline,
+    Panicked,
+}
+
+pub(crate) fn decode_frame(
+    frame: &[u8],
+    request_decode_item_limit: usize,
+    deadline: Instant,
+) -> std::result::Result<request::Value, DecodeFailure> {
+    match catch_unwind(AssertUnwindSafe(|| {
+        if Instant::now() >= deadline {
+            return Err(DecodeFailure::Deadline);
+        }
+        let _decoded_items = preflight_request(frame, request_decode_item_limit).map_err(|()| DecodeFailure::Client)?;
+        if Instant::now() >= deadline {
+            return Err(DecodeFailure::Deadline);
+        }
+        let mut remaining = frame;
+        let request = Request::decode(&mut remaining).map_err(|_| DecodeFailure::Client)?;
+        if Instant::now() >= deadline {
+            return Err(DecodeFailure::Deadline);
+        }
+        if !remaining.is_empty() {
+            return Err(DecodeFailure::Client);
+        }
+        request.value.ok_or(DecodeFailure::Client)
+    })) {
+        Ok(result) => result,
+        Err(_) => Err(DecodeFailure::Panicked),
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn dispatch_frame<A, F>(
     application: F,
     frame: Vec<u8>,
@@ -22,33 +59,43 @@ where
     A: Application,
     F: FnOnce() -> std::result::Result<A, DispatchFailure>,
 {
+    let value = decode_frame(
+        &frame,
+        request_decode_item_limit,
+        Instant::now() + std::time::Duration::from_secs(10),
+    )
+    .map_err(|_| DispatchFailure::Client)?;
+    dispatch_value(application, value, response_cap)
+}
+
+pub(crate) fn dispatch_value<A, F>(
+    application: F,
+    value: request::Value,
+    response_cap: usize,
+) -> std::result::Result<Vec<u8>, DispatchFailure>
+where
+    A: Application,
+    F: FnOnce() -> std::result::Result<A, DispatchFailure>,
+{
     match catch_unwind(AssertUnwindSafe(|| {
-        dispatch_inner(application, &frame, response_cap, request_decode_item_limit)
+        dispatch_value_inner(application, value, response_cap)
     })) {
         Ok(result) => result,
         Err(_) => Err(DispatchFailure::Panicked),
     }
 }
 
-fn dispatch_inner<A, F>(
+fn dispatch_value_inner<A, F>(
     application: F,
-    frame: &[u8],
+    request: request::Value,
     response_cap: usize,
-    request_decode_item_limit: usize,
 ) -> std::result::Result<Vec<u8>, DispatchFailure>
 where
     A: Application,
     F: FnOnce() -> std::result::Result<A, DispatchFailure>,
 {
-    let _decoded_items = preflight_request(frame, request_decode_item_limit).map_err(|()| DispatchFailure::Client)?;
-    let mut remaining = frame;
-    let request = Request::decode(&mut remaining).map_err(|_| DispatchFailure::Client)?;
-    if !remaining.is_empty() {
-        return Err(DispatchFailure::Client);
-    }
-    let value = request.value.ok_or(DispatchFailure::Client)?;
     let application = application()?;
-    let value = match value {
+    let value = match request {
         request::Value::Echo(value) => response::Value::Echo(application.echo(value)),
         request::Value::Flush(_) => response::Value::Flush(application.flush()),
         request::Value::Info(value) => response::Value::Info(application.info(value)),

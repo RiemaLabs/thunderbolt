@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Versioned wire and append-only ledger state types for Bitcoin Thunderbolt"
+description = "Bounded wire and append-only Ledger state types for Bitcoin Thunderbolt"
 keywords = ["bitcoin", "protocol", "ledger", "state-machine"]
 categories = ["cryptography::cryptocurrencies", "network-programming"]
 

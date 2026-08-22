@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Trusted ledger-to-proof verification bridge for Bitcoin Thunderbolt"
+description = "Proof verification bridge for Bitcoin Thunderbolt regression tooling"
 keywords = ["bitcoin", "cryptography", "protocol", "verification"]
 categories = ["cryptography::cryptocurrencies"]
 
