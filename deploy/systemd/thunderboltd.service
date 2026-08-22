@@ -1,6 +1,6 @@
 [Unit]
 Description=Bitcoin Thunderbolt node daemon
-Documentation=https://github.com/RiemaLabs/thunderbolt-lib/tree/release/open_source/docs
+Documentation=https://github.com/RiemaLabs/thunderbolt/tree/release/open_source/docs
 Wants=network-online.target
 After=network-online.target
 StartLimitIntervalSec=60

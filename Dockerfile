@@ -16,7 +16,7 @@ FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639
 
 ARG VERSION=1.0.0
 ARG REVISION=unknown
-ARG SOURCE=https://github.com/RiemaLabs/thunderbolt-lib
+ARG SOURCE=https://github.com/RiemaLabs/thunderbolt
 
 LABEL org.opencontainers.image.title="Bitcoin Thunderbolt" \
       org.opencontainers.image.description="Fail-closed Bitcoin Thunderbolt operator runtime, Floor node, and local control CLI" \

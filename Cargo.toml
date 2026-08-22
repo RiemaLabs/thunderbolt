@@ -41,7 +41,7 @@ version = "1.0.0"
 edition = "2021"
 rust-version = "1.90"
 license = "Apache-2.0"
-repository = "https://github.com/RiemaLabs/thunderbolt-lib"
+repository = "https://github.com/RiemaLabs/thunderbolt"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

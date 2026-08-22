@@ -1,6 +1,6 @@
 [Unit]
 Description=Bitcoin Thunderbolt rollback-floor node
-Documentation=https://github.com/RiemaLabs/thunderbolt-lib/tree/release/open_source/crates/thunderbolt-floor-node
+Documentation=https://github.com/RiemaLabs/thunderbolt/tree/release/open_source/crates/thunderbolt-floor-node
 Wants=network-online.target
 After=network-online.target
 StartLimitIntervalSec=60s

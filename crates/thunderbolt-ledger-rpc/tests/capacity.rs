@@ -332,7 +332,7 @@ fn point() -> Result<PointHex, Box<dyn std::error::Error>> {
 
 fn modulus(seed: u8) -> Result<PaillierModulusBytesV2, Box<dyn std::error::Error>> {
     let mut bytes = vec![0_u8; PAILLIER_V2_MODULUS_BYTES];
-    bytes[0] = 0x40 | (seed & 0x3f);
+    bytes[0] = 0x80 | (seed & 0x7f);
     bytes[PAILLIER_V2_MODULUS_BYTES - 1] = seed | 1;
     Ok(PaillierModulusBytesV2::from_bytes("capacity modulus", bytes)?)
 }
