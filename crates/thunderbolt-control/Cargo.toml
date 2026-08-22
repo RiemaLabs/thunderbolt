@@ -1,0 +1,28 @@
+[package]
+name = "thunderbolt-control"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Owner-only local control plane for Bitcoin Thunderbolt daemons"
+keywords = ["bitcoin", "ipc", "protocol", "unix"]
+categories = ["network-programming"]
+
+[lints]
+workspace = true
+
+[dependencies]
+futures-util = "0.3.34"
+getrandom = "0.3.4"
+rustix = { version = "1.1.4", features = ["process"] }
+thiserror = "2.0.16"
+tokio = { version = "1.47", features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+zeroize = "1.8.2"
+
+[dev-dependencies]
+proptest = "1.9.0"
+static_assertions = "1.1.0"
+tempfile = "3.27.0"
+tokio = { version = "1.47", features = ["macros", "rt-multi-thread"] }

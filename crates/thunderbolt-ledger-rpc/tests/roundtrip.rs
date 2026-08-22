@@ -83,17 +83,14 @@ fn representative_responses_round_trip_canonically() -> Result<(), Box<dyn std::
         },
     )?));
 
-    let history = RpcResponseV2::History(HistoryResponseV2::new(
-        &HistoryRequestV2::new(
-            thunderbolt_ledger::ChannelContextIdV2::from_bytes(
-                proposal_request.signed_proposal().body().channel().context_id()?,
-            )?,
-            HistoryCursorV2::new(common::ledger_chain(), 1, 0, thunderbolt_ledger::AppHashV2::zero())?,
-            HistoryPageLimitV2::new(4)?,
-        ),
-        Vec::new(),
-        None,
-    )?);
+    let history_query = HistoryRequestV2::new(
+        thunderbolt_ledger::ChannelContextIdV2::from_bytes(
+            proposal_request.signed_proposal().body().channel().context_id()?,
+        )?,
+        HistoryCursorV2::new(common::ledger_chain(), 1, 0, thunderbolt_ledger::AppHashV2::zero())?,
+        HistoryPageLimitV2::new(4)?,
+    );
+    let history = RpcResponseV2::History(HistoryResponseV2::new(&history_query, Vec::new(), None)?);
 
     let floor_request = common::floor_request(9);
     let floor = RpcResponseV2::RollbackFloorCas(RollbackFloorCasResponseV2::new(
@@ -103,9 +100,20 @@ fn representative_responses_round_trip_canonically() -> Result<(), Box<dyn std::
         },
     )?);
 
-    for response in [submit, channel, request_status, history, floor] {
+    let pairs = [
+        (submit, RpcRequestV2::SubmitProposal(proposal_request.clone())),
+        (channel, RpcRequestV2::ChannelStatus(channel_query.clone())),
+        (request_status, RpcRequestV2::RequestStatus(status_query.clone())),
+        (history, RpcRequestV2::History(history_query)),
+        (
+            floor,
+            RpcRequestV2::RollbackFloorCas(RollbackFloorCasRequestV2::new(floor_request)),
+        ),
+    ];
+    for (response, request) in pairs {
         let encoded = response.to_canonical_bytes()?;
-        assert_eq!(RpcResponseV2::from_canonical_bytes(&encoded)?, response);
+        let correlated = RpcResponseV2::from_canonical_bytes_for(&encoded, &request)?;
+        assert_eq!(correlated.response(), &response);
         assert_eq!(response.to_canonical_bytes()?, encoded);
     }
     Ok(())
@@ -125,7 +133,9 @@ fn finalized_floor_outcome_round_trips_under_separate_profile() -> Result<(), Bo
         },
     )?);
     let encoded = response.to_canonical_bytes()?;
-    assert_eq!(RpcResponseV2::from_canonical_bytes(&encoded)?, response);
+    let rpc_request = RpcRequestV2::RollbackFloorCas(RollbackFloorCasRequestV2::new(request));
+    let correlated = RpcResponseV2::from_canonical_bytes_for(&encoded, &rpc_request)?;
+    assert_eq!(correlated.response(), &response);
     Ok(())
 }
 

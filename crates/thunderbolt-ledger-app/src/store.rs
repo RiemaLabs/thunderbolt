@@ -39,6 +39,10 @@ pub struct ApplicationOptions {
     pub busy_timeout: Duration,
     /// Deterministic version 2 reducer limits.
     pub protocol_limits: ProtocolLimitsV2,
+    /// Immutable consensus-profile digest. ABCI deployments must set this to a
+    /// digest covering verifier identity, deployment descriptor, reducer
+    /// limits, and adapter resource policy.
+    pub consensus_profile_digest: Option<[u8; 32]>,
 }
 
 impl Default for ApplicationOptions {
@@ -46,6 +50,7 @@ impl Default for ApplicationOptions {
         Self {
             busy_timeout: DEFAULT_BUSY_TIMEOUT,
             protocol_limits: ProtocolLimitsV2::default(),
+            consensus_profile_digest: None,
         }
     }
 }
@@ -239,6 +244,46 @@ pub struct StoredRequestV2 {
     first_block_index: u32,
 }
 
+/// One channel lookup and the exact durable head observed in the same SQLite
+/// read transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelHeadReadV2 {
+    status: ApplicationStatusV2,
+    channel: Option<ChannelSnapshotV2>,
+}
+
+impl ChannelHeadReadV2 {
+    /// Returns the exact durable head paired with the lookup.
+    pub const fn status(&self) -> &ApplicationStatusV2 {
+        &self.status
+    }
+
+    /// Returns the channel snapshot present at that head, if any.
+    pub const fn channel(&self) -> Option<&ChannelSnapshotV2> {
+        self.channel.as_ref()
+    }
+}
+
+/// One actor-request lookup and the exact durable head observed in the same
+/// SQLite read transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestHeadReadV2 {
+    status: ApplicationStatusV2,
+    request: Option<StoredRequestV2>,
+}
+
+impl RequestHeadReadV2 {
+    /// Returns the exact durable head paired with the lookup.
+    pub const fn status(&self) -> &ApplicationStatusV2 {
+        &self.status
+    }
+
+    /// Returns the request mapping present at that head, if any.
+    pub const fn request(&self) -> Option<&StoredRequestV2> {
+        self.request.as_ref()
+    }
+}
+
 impl StoredRequestV2 {
     /// Returns the stable channel context.
     pub const fn channel_context_id(&self) -> &ChannelContextIdV2 {
@@ -291,6 +336,7 @@ pub struct LedgerApplication {
     path: PathBuf,
     chain_id: LedgerChainIdV2,
     reducer: V2Reducer,
+    consensus_profile_digest: Option<[u8; 32]>,
     connection: Mutex<Connection>,
 }
 
@@ -320,13 +366,20 @@ impl LedgerApplication {
         let mut connection = Connection::open_with_flags(&path, flags)?;
         connection.busy_timeout(options.busy_timeout)?;
         connection.pragma_update(None, "foreign_keys", true)?;
-        migrations::migrate(&mut connection, &path, &chain_id, options.protocol_limits)?;
+        migrations::migrate(
+            &mut connection,
+            &path,
+            &chain_id,
+            options.protocol_limits,
+            options.consensus_profile_digest,
+        )?;
         configure_durability(&connection, options.busy_timeout)?;
         validate_head(&connection, &chain_id)?;
         Ok(Self {
             path,
             chain_id,
             reducer,
+            consensus_profile_digest: options.consensus_profile_digest,
             connection: Mutex::new(connection),
         })
     }
@@ -339,6 +392,17 @@ impl LedgerApplication {
     /// Returns the configured Ledger chain ID.
     pub const fn ledger_chain_id(&self) -> &LedgerChainIdV2 {
         &self.chain_id
+    }
+
+    /// Returns the reducer limits bound into the durable application identity.
+    pub const fn protocol_limits(&self) -> ProtocolLimitsV2 {
+        self.reducer.limits()
+    }
+
+    /// Returns the immutable consensus-profile digest, if this application was
+    /// created for a consensus adapter.
+    pub const fn consensus_profile_digest(&self) -> Option<&[u8; 32]> {
+        self.consensus_profile_digest.as_ref()
     }
 
     /// Returns the current durable execution head.
@@ -383,6 +447,46 @@ impl LedgerApplication {
                 outcome,
             }
         });
+        rollback_preview(transaction, result)
+    }
+
+    /// Atomically previews one next-height mempool candidate against the exact
+    /// current durable head.
+    ///
+    /// The synthetic admission time is the current committed time, or one
+    /// millisecond for an empty genesis head. Final proposal processing must
+    /// still repeat verification at the actual consensus time. Head loading,
+    /// input construction, reservation, reduction, and rollback all occur
+    /// under one SQLite writer transaction, so a concurrent commit cannot race
+    /// the admission check.
+    pub fn preview_next_block_for_admission<V: LedgerApplicationVerifierV2>(
+        &self,
+        proposals: Vec<SignedProposalV2>,
+        verifier: &V,
+    ) -> Result<PreparedBlockV2> {
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let result = (|| {
+            let head = load_head(&transaction)?;
+            let height = head
+                .status
+                .last_height()
+                .checked_add(1)
+                .ok_or(ApplicationError::IntegerRange("admission block height"))?;
+            let input = BlockInputV2::new(
+                self.chain_id.clone(),
+                height,
+                head.status.last_block_time_ms().max(1),
+                head.status.last_app_hash().clone(),
+                proposals,
+            )?;
+            let saved_input = input.clone();
+            let outcome = apply_block_locked(&transaction, &self.reducer, &self.chain_id, input, verifier)?;
+            Ok(PreparedBlockV2 {
+                input: saved_input,
+                outcome,
+            })
+        })();
         rollback_preview(transaction, result)
     }
 
@@ -432,6 +536,19 @@ impl LedgerApplication {
         load_channel(&connection, context.as_bytes()).map(|loaded| loaded.map(|channel| channel.snapshot))
     }
 
+    /// Loads one channel and its exact durable head in a single rollback-only
+    /// SQLite read transaction.
+    pub fn channel_at_head(&self, context: &ChannelContextIdV2) -> Result<ChannelHeadReadV2> {
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let result = (|| {
+            let status = load_status(&transaction)?;
+            let channel = load_channel(&transaction, context.as_bytes())?.map(|loaded| loaded.snapshot);
+            Ok(ChannelHeadReadV2 { status, channel })
+        })();
+        rollback_preview(transaction, result)
+    }
+
     /// Loads one durable actor-scoped request mapping.
     pub fn request(
         &self,
@@ -446,6 +563,29 @@ impl LedgerApplication {
             participant.as_bytes(),
             request.as_bytes(),
         )
+    }
+
+    /// Loads one actor request and its exact durable head in a single
+    /// rollback-only SQLite read transaction.
+    pub fn request_at_head(
+        &self,
+        channel: &ChannelContextIdV2,
+        participant: &ParticipantIdV2,
+        request: &RequestDigestV2,
+    ) -> Result<RequestHeadReadV2> {
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let result = (|| {
+            let status = load_status(&transaction)?;
+            let request = load_request(
+                &transaction,
+                channel.as_bytes(),
+                participant.as_bytes(),
+                request.as_bytes(),
+            )?;
+            Ok(RequestHeadReadV2 { status, request })
+        })();
+        rollback_preview(transaction, result)
     }
 
     /// Generates an ordered inclusion proof from a stored executed block.
@@ -743,10 +883,13 @@ fn load_status(connection: &Connection) -> Result<ApplicationStatusV2> {
     }
     Ok(ApplicationStatusV2 {
         application_version,
-        ledger_chain_id: LedgerChainIdV2::new(row.1)?,
+        ledger_chain_id: durable_value("stored Ledger chain id", LedgerChainIdV2::new(row.1))?,
         last_height: from_sql_u64("last height", row.2)?,
         last_block_time_ms: from_sql_u64("last block time", row.3)?,
-        last_app_hash: AppHashV2::from_bytes(blob_32("last app hash", row.4)?)?,
+        last_app_hash: durable_value(
+            "stored last application hash",
+            AppHashV2::from_bytes(blob_32("last app hash", row.4)?),
+        )?,
     })
 }
 
@@ -786,7 +929,7 @@ fn load_channel(connection: &Connection, context: &[u8; 32]) -> Result<Option<Lo
         .optional()?;
     row.map(|(snapshot, executed_entry)| {
         let snapshot: ChannelSnapshotV2 = decode_json(&snapshot, "channel snapshot")?;
-        snapshot.validate()?;
+        durable_value("stored channel snapshot", snapshot.validate())?;
         let executed_entry: ExecutedEntryV2 = decode_json(&executed_entry, "executed entry")?;
         Ok(LoadedChannel {
             snapshot,
@@ -813,10 +956,16 @@ fn load_request(
         .optional()?;
     row.map(|(entry_hash, height, index)| {
         Ok(StoredRequestV2 {
-            channel_context_id: ChannelContextIdV2::from_bytes(channel)?,
-            participant_id: ParticipantIdV2::from_bytes(participant)?,
-            request_digest: RequestDigestV2::from_bytes(request)?,
-            entry_hash: EntryHashV2::from_bytes(blob_32("request entry hash", entry_hash)?)?,
+            channel_context_id: durable_value(
+                "stored request channel context",
+                ChannelContextIdV2::from_bytes(channel),
+            )?,
+            participant_id: durable_value("stored request participant", ParticipantIdV2::from_bytes(participant))?,
+            request_digest: durable_value("stored request digest", RequestDigestV2::from_bytes(request))?,
+            entry_hash: durable_value(
+                "stored request entry hash",
+                EntryHashV2::from_bytes(blob_32("request entry hash", entry_hash)?),
+            )?,
             first_height: from_sql_u64("request height", height)?,
             first_block_index: from_sql_u32("request block index", index)?,
         })
@@ -839,7 +988,12 @@ fn lookup_request_hash(
         )
         .optional()?;
     bytes
-        .map(|value| EntryHashV2::from_bytes(blob_32("request entry hash", value)?).map_err(ApplicationError::from))
+        .map(|value| {
+            durable_value(
+                "stored request entry hash",
+                EntryHashV2::from_bytes(blob_32("request entry hash", value)?),
+            )
+        })
         .transpose()
 }
 
@@ -1340,6 +1494,10 @@ fn rollback_preview<T>(transaction: Transaction<'_>, result: Result<T>) -> Resul
 fn decode_json<T: serde::de::DeserializeOwned>(bytes: &[u8], label: &str) -> Result<T> {
     serde_json::from_slice(bytes)
         .map_err(|error| ApplicationError::CorruptData(format!("invalid {label} JSON: {error}")))
+}
+
+fn durable_value<T, E: std::fmt::Display>(label: &str, value: std::result::Result<T, E>) -> Result<T> {
+    value.map_err(|error| ApplicationError::CorruptData(format!("{label} is invalid: {error}")))
 }
 
 fn blob_32(label: &str, value: Vec<u8>) -> Result<[u8; 32]> {

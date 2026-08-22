@@ -1,7 +1,10 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
+use std::time::Duration;
 
 use bitcoin::Network;
 use bytes::Bytes;
@@ -23,13 +26,13 @@ use thunderbolt_ledger::{
 };
 use thunderbolt_ledger_app::{ApplicationOptions, LedgerApplication};
 use thunderbolt_protocol::v2::{
-    ChannelEventV2, ExternalVerifierV2, FinalizeVerificationRequestV2, InvoiceVerificationRequestV2, OpenEventV2,
-    OpenVerificationRequestV2, TransferVerificationRequestV2,
+    ChannelEventV2, ExternalVerifierV2, FinalizeVerificationRequestV2, InvoiceEventV2, InvoiceVerificationRequestV2,
+    OpenEventV2, OpenVerificationRequestV2, TransferVerificationRequestV2,
 };
 use thunderbolt_protocol::Artifact;
 use thunderbolt_wire::{
     AnchorParameterSuiteIdV2, BitcoinGenesisHashV2, ChannelBindingV2, CommitteeDescriptorDigestV2, FundingOutpointV2,
-    ProtocolSuiteIdV2,
+    HexBytes, ProtocolSuiteIdV2,
 };
 
 use super::*;
@@ -38,6 +41,23 @@ const CHAIN_ID: &str = "thunderbolt-abci-regtest-1";
 
 #[derive(Debug, Default)]
 struct AcceptAll;
+
+#[derive(Debug, Default)]
+struct RejectPoison;
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PanicFatal;
+
+#[derive(Debug)]
+struct ToggleVerifier {
+    reject_contextual: Arc<AtomicBool>,
+}
+
+impl FatalAbciHandler for PanicFatal {
+    fn terminate(&self, failure: FatalAbciFailure) -> ! {
+        std::panic::panic_any(failure)
+    }
+}
 
 impl ExternalVerifierV2 for AcceptAll {
     type Error = ();
@@ -55,6 +75,105 @@ impl ExternalVerifierV2 for AcceptAll {
     }
 
     fn verify_finalize(&self, _request: FinalizeVerificationRequestV2<'_>) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+impl ExternalVerifierV2 for RejectPoison {
+    type Error = ();
+
+    fn verify_open(&self, request: OpenVerificationRequestV2<'_>) -> std::result::Result<(), Self::Error> {
+        if request.event.open_proof.as_bytes() == [0xff] {
+            Err(())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn verify_invoice(&self, _request: InvoiceVerificationRequestV2<'_>) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn verify_transfer(&self, _request: TransferVerificationRequestV2<'_>) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn verify_finalize(&self, _request: FinalizeVerificationRequestV2<'_>) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+impl StaticAdmissionVerifierV2 for AcceptAll {
+    type Error = ();
+
+    fn verifier_profile_id(&self) -> [u8; 32] {
+        [0x41; 32]
+    }
+
+    fn deployment_descriptor(&self) -> [u8; 32] {
+        [0x51; 32]
+    }
+
+    fn verify_static(&self, _request: StaticAdmissionRequestV2<'_>) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+impl StaticAdmissionVerifierV2 for RejectPoison {
+    type Error = ();
+
+    fn verifier_profile_id(&self) -> [u8; 32] {
+        [0x42; 32]
+    }
+
+    fn deployment_descriptor(&self) -> [u8; 32] {
+        [0x51; 32]
+    }
+
+    fn verify_static(&self, request: StaticAdmissionRequestV2<'_>) -> std::result::Result<(), Self::Error> {
+        match request.event() {
+            ChannelEventV2::Open(event) if event.open_proof.as_bytes() == [0xff] => Err(()),
+            _ => Ok(()),
+        }
+    }
+}
+
+impl ExternalVerifierV2 for ToggleVerifier {
+    type Error = ();
+
+    fn verify_open(&self, _request: OpenVerificationRequestV2<'_>) -> std::result::Result<(), Self::Error> {
+        if self.reject_contextual.load(Ordering::SeqCst) {
+            Err(())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn verify_invoice(&self, _request: InvoiceVerificationRequestV2<'_>) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn verify_transfer(&self, _request: TransferVerificationRequestV2<'_>) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn verify_finalize(&self, _request: FinalizeVerificationRequestV2<'_>) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+impl StaticAdmissionVerifierV2 for ToggleVerifier {
+    type Error = ();
+
+    fn verifier_profile_id(&self) -> [u8; 32] {
+        [0x43; 32]
+    }
+
+    fn deployment_descriptor(&self) -> [u8; 32] {
+        [0x51; 32]
+    }
+
+    fn verify_static(&self, _request: StaticAdmissionRequestV2<'_>) -> std::result::Result<(), Self::Error> {
         Ok(())
     }
 }
@@ -99,15 +218,33 @@ fn keypair(index: u64) -> Keypair {
 }
 
 fn signed_open(channel_byte: u8, actor: u64) -> SignedProposalV2 {
+    signed_open_custom(channel_byte, actor, 0, [channel_byte; 16], 4)
+}
+
+fn signed_open_with_proof(channel_byte: u8, actor: u64, proof_byte: u8) -> SignedProposalV2 {
+    signed_open_custom(channel_byte, actor, 0, [channel_byte; 16], proof_byte)
+}
+
+fn signed_open_custom(
+    channel_byte: u8,
+    actor: u64,
+    sequence: u64,
+    request_nonce: [u8; 16],
+    proof_byte: u8,
+) -> SignedProposalV2 {
     let keypair = keypair(actor);
     let (public, _) = keypair.x_only_public_key();
-    let event = open_event();
+    let mut event = open_event();
+    let ChannelEventV2::Open(open) = &mut event else {
+        panic!("Open test event changed variant");
+    };
+    open.open_proof = Artifact::new([proof_byte]).expect("artifact");
     let body = ProposalBodyV2::new(
         chain_id(),
         binding(channel_byte),
-        0,
+        sequence,
         EntryHashV2::zero(),
-        ClientRequestNonceV2::from_bytes([channel_byte; 16]).expect("request nonce"),
+        ClientRequestNonceV2::from_bytes(request_nonce).expect("request nonce"),
         ActorKeyAlgorithmV2::Bip340V1,
         ActorPublicKeyV2::from_bytes(public.serialize()).expect("public key"),
         ActorRoleV2::Holder,
@@ -124,8 +261,100 @@ fn signed_open(channel_byte: u8, actor: u64) -> SignedProposalV2 {
     .expect("signed proposal")
 }
 
+fn signed_absent_channel_invoice(request_index: u32) -> SignedProposalV2 {
+    let actor = 40_u64;
+    let keypair = keypair(actor);
+    let (public, _) = keypair.x_only_public_key();
+    let event = ChannelEventV2::Invoice(InvoiceEventV2 {
+        invoice_id: HexBytes::from_bytes("invoice id", request_index.to_be_bytes()).expect("invoice id"),
+        holder_step: 0,
+        recipient_encryption_key: Artifact::new([5]).expect("artifact"),
+        public_delta: Artifact::new([6]).expect("artifact"),
+        recipient_ciphertext: Artifact::new([7]).expect("artifact"),
+        committee_package: Artifact::new([8]).expect("artifact"),
+        invoice_proof: Artifact::new([9]).expect("artifact"),
+        expires_at_ms: 10_000,
+    });
+    let mut nonce = [0_u8; 16];
+    nonce[0] = 1;
+    nonce[12..].copy_from_slice(&request_index.to_be_bytes());
+    let body = ProposalBodyV2::new(
+        chain_id(),
+        binding(40),
+        1,
+        EntryHashV2::from_bytes([0x77; 32]).expect("predecessor"),
+        ClientRequestNonceV2::from_bytes(nonce).expect("request nonce"),
+        ActorKeyAlgorithmV2::Bip340V1,
+        ActorPublicKeyV2::from_bytes(public.serialize()).expect("public key"),
+        ActorRoleV2::Recipient,
+        event.kind(),
+        CanonicalEventV2::from_bytes(event.canonical_bytes().expect("event bytes")).expect("canonical event"),
+    )
+    .expect("proposal body");
+    let digest = body.proposal_digest().expect("proposal digest");
+    let signature = Secp256k1::signing_only().sign_schnorr_no_aux_rand(digest.as_bytes(), &keypair);
+    SignedProposalV2::new(
+        body,
+        ActorSignatureV2::from_bytes(signature.to_byte_array()).expect("signature"),
+    )
+    .expect("signed proposal")
+}
+
+fn signed_invoice_after_open(open: &SignedProposalV2, request_index: u32, expires_at_ms: u64) -> SignedProposalV2 {
+    let actor = 60_u64;
+    let keypair = keypair(actor);
+    let (public, _) = keypair.x_only_public_key();
+    let event = ChannelEventV2::Invoice(InvoiceEventV2 {
+        invoice_id: HexBytes::from_bytes("invoice id", request_index.to_be_bytes()).expect("invoice id"),
+        holder_step: 0,
+        recipient_encryption_key: Artifact::new([5]).expect("artifact"),
+        public_delta: Artifact::new([6]).expect("artifact"),
+        recipient_ciphertext: Artifact::new([7]).expect("artifact"),
+        committee_package: Artifact::new([8]).expect("artifact"),
+        invoice_proof: Artifact::new([9]).expect("artifact"),
+        expires_at_ms,
+    });
+    let mut nonce = [0_u8; 16];
+    nonce[0] = 1;
+    nonce[12..].copy_from_slice(&request_index.to_be_bytes());
+    let body = ProposalBodyV2::new(
+        chain_id(),
+        open.body().channel().clone(),
+        1,
+        open.body().entry_hash().expect("Open entry hash"),
+        ClientRequestNonceV2::from_bytes(nonce).expect("request nonce"),
+        ActorKeyAlgorithmV2::Bip340V1,
+        ActorPublicKeyV2::from_bytes(public.serialize()).expect("public key"),
+        ActorRoleV2::Recipient,
+        event.kind(),
+        CanonicalEventV2::from_bytes(event.canonical_bytes().expect("event bytes")).expect("canonical event"),
+    )
+    .expect("proposal body");
+    let digest = body.proposal_digest().expect("proposal digest");
+    let signature = Secp256k1::signing_only().sign_schnorr_no_aux_rand(digest.as_bytes(), &keypair);
+    SignedProposalV2::new(
+        body,
+        ActorSignatureV2::from_bytes(signature.to_byte_array()).expect("signature"),
+    )
+    .expect("signed proposal")
+}
+
 fn transaction(proposal: &SignedProposalV2) -> Bytes {
     serde_json::to_vec(proposal).expect("canonical transaction").into()
+}
+
+fn resign(proposal: &SignedProposalV2, actor: u64, nonce: u32) -> SignedProposalV2 {
+    let body = proposal.body().clone();
+    let digest = body.proposal_digest().expect("proposal digest");
+    let mut auxiliary = [0_u8; 32];
+    auxiliary[28..].copy_from_slice(&nonce.to_be_bytes());
+    let signature =
+        Secp256k1::signing_only().sign_schnorr_with_aux_rand(digest.as_bytes(), &keypair(actor), &auxiliary);
+    SignedProposalV2::new(
+        body,
+        ActorSignatureV2::from_bytes(signature.to_byte_array()).expect("signature"),
+    )
+    .expect("resigned proposal")
 }
 
 fn timestamp(milliseconds: u64) -> Timestamp {
@@ -168,13 +397,34 @@ fn finalize_request(txs: Vec<Bytes>, height: i64, time_ms: u64) -> RequestFinali
     }
 }
 
-fn adapter(directory: &TempDir) -> Result<ThunderboltLedgerAbci<AcceptAll>> {
+fn adapter(directory: &TempDir) -> Result<ThunderboltLedgerAbci<AcceptAll, PanicFatal>> {
+    adapter_with(directory, AcceptAll)
+}
+
+fn adapter_with<V>(directory: &TempDir, verifier: V) -> Result<ThunderboltLedgerAbci<V, PanicFatal>>
+where
+    V: LedgerApplicationVerifierV2 + StaticAdmissionVerifierV2 + Send + Sync + 'static,
+{
+    let limits = thunderbolt_protocol::v2::ProtocolLimitsV2::default();
+    let profile = ConsensusProfileV2::from_verifier(&chain_id(), limits, &verifier)?;
     let application = LedgerApplication::open(
         directory.path().join("ledger-abci.sqlite3"),
         chain_id(),
-        ApplicationOptions::default(),
+        ApplicationOptions {
+            protocol_limits: limits,
+            consensus_profile_digest: Some(*profile.as_bytes()),
+            ..ApplicationOptions::default()
+        },
     )?;
-    ThunderboltLedgerAbci::new(application, AcceptAll)
+    ThunderboltLedgerAbci::new(application, verifier, PanicFatal)
+}
+
+fn capture_fatal<T>(action: impl FnOnce() -> T) -> FatalAbciFailure {
+    let payload = match catch_unwind(AssertUnwindSafe(action)) {
+        Ok(_) => panic!("fatal handler returned"),
+        Err(payload) => payload,
+    };
+    *payload.downcast::<FatalAbciFailure>().expect("fatal handler payload")
 }
 
 #[test]
@@ -190,6 +440,7 @@ fn info_and_init_chain_pin_chain_and_application_version() -> Result<()> {
     let response = app.init_chain(RequestInitChain {
         chain_id: CHAIN_ID.to_owned(),
         initial_height: 1,
+        app_state_bytes: app.consensus_profile().genesis_app_state_bytes()?.into(),
         consensus_params: Some(ConsensusParams {
             version: Some(VersionParams {
                 app: APPLICATION_VERSION,
@@ -213,10 +464,65 @@ fn info_and_init_chain_pin_chain_and_application_version() -> Result<()> {
         app.try_init_chain(RequestInitChain {
             chain_id: "wrong-chain".to_owned(),
             initial_height: 1,
+            app_state_bytes: app.consensus_profile().genesis_app_state_bytes()?.into(),
             ..RequestInitChain::default()
         }),
         Err(AbciAdapterError::InvalidRequest(_))
     ));
+    assert!(matches!(
+        app.try_init_chain(RequestInitChain {
+            chain_id: CHAIN_ID.to_owned(),
+            initial_height: 1,
+            app_state_bytes: b"wrong-profile".to_vec().into(),
+            ..RequestInitChain::default()
+        }),
+        Err(AbciAdapterError::InvalidRequest(_))
+    ));
+    assert!(matches!(
+        app.try_init_chain(RequestInitChain {
+            chain_id: CHAIN_ID.to_owned(),
+            initial_height: 1,
+            app_state_bytes: app.consensus_profile().genesis_app_state_bytes()?.into(),
+            validators: vec![Default::default(); MAX_COMMIT_VOTES + 1],
+            ..RequestInitChain::default()
+        }),
+        Err(AbciAdapterError::InvalidRequest(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn consensus_profile_has_a_golden_digest_and_changes_with_identity_or_limits() -> Result<()> {
+    let limits = thunderbolt_protocol::v2::ProtocolLimitsV2::default();
+    let profile = ConsensusProfileV2::from_verifier(&chain_id(), limits, &AcceptAll)?;
+    assert_eq!(
+        profile.as_bytes(),
+        &[
+            0xd9, 0xfd, 0xa2, 0xe1, 0x0c, 0xb6, 0xad, 0x3d, 0x38, 0x32, 0xc9, 0x15, 0xa8, 0xad, 0x3b, 0xad, 0x56, 0x67,
+            0xbe, 0x52, 0xbc, 0xd5, 0xa5, 0x67, 0x7f, 0x6e, 0x8c, 0xdb, 0xb2, 0x84, 0x84, 0x04,
+        ]
+    );
+    assert_ne!(
+        profile,
+        ConsensusProfileV2::from_verifier(&chain_id(), limits, &RejectPoison)?
+    );
+    assert_ne!(
+        profile,
+        ConsensusProfileV2::from_verifier(
+            &chain_id(),
+            thunderbolt_protocol::v2::ProtocolLimitsV2::new(
+                limits.max_entries_per_channel + 1,
+                limits.max_pending_invoices,
+                limits.max_invoice_ttl_ms,
+            )
+            .expect("mutated limits"),
+            &AcceptAll,
+        )?
+    );
+    assert_ne!(
+        profile,
+        ConsensusProfileV2::from_verifier(&LedgerChainIdV2::new("different-profile-chain")?, limits, &AcceptAll,)?
+    );
     Ok(())
 }
 
@@ -254,6 +560,266 @@ fn check_prepare_and_process_preserve_order_without_mutation() -> Result<()> {
 }
 
 #[test]
+fn prepare_charges_all_scanned_values_and_skips_nonfitting_front_value() -> Result<()> {
+    let directory = TempDir::new().map_err(|_| AbciAdapterError::InvalidRequest("tempdir"))?;
+    let app = adapter(&directory)?;
+    let valid = transaction(&signed_open(32, 32));
+    let nonfitting = Bytes::from(vec![0x7b; valid.len() + 1]);
+    let prepared = app.prepare_proposal(RequestPrepareProposal {
+        max_tx_bytes: i64::try_from(valid.len()).expect("budget"),
+        txs: vec![nonfitting, valid.clone()],
+        height: 1,
+        time: Some(timestamp(1_000)),
+        next_validators_hash: vec![0x55; 32].into(),
+        proposer_address: vec![0x66; 20].into(),
+        ..RequestPrepareProposal::default()
+    });
+    assert_eq!(prepared.txs, vec![valid.clone()]);
+
+    let mut exhausted = vec![Bytes::from_static(b"x"); MAX_PREPARE_SCAN_TRANSACTIONS];
+    exhausted.push(valid);
+    let bounded = app.prepare_proposal(RequestPrepareProposal {
+        max_tx_bytes: i64::try_from(MAX_BLOCK_TRANSACTION_BYTES).expect("budget"),
+        txs: exhausted,
+        height: 1,
+        time: Some(timestamp(1_000)),
+        next_validators_hash: vec![0x55; 32].into(),
+        proposer_address: vec![0x66; 20].into(),
+        ..RequestPrepareProposal::default()
+    });
+    assert!(bounded.txs.is_empty());
+    Ok(())
+}
+
+#[test]
+fn fairness_cursor_is_explicitly_process_local_and_resets_on_restart() -> Result<()> {
+    let directory = TempDir::new().map_err(|_| AbciAdapterError::InvalidRequest("tempdir"))?;
+    let app = adapter(&directory)?;
+    *app.inner.prepare_cursor.lock().expect("cursor") = 123;
+    drop(app);
+    let restarted = adapter(&directory)?;
+    assert_eq!(*restarted.inner.prepare_cursor.lock().expect("cursor"), 0);
+    Ok(())
+}
+
+#[test]
+fn contextual_checktx_writer_contention_terminates_instead_of_succeeding() -> Result<()> {
+    let directory = TempDir::new().map_err(|_| AbciAdapterError::InvalidRequest("tempdir"))?;
+    let path = directory.path().join("contended.sqlite3");
+    let limits = thunderbolt_protocol::v2::ProtocolLimitsV2::default();
+    let profile = ConsensusProfileV2::from_verifier(&chain_id(), limits, &AcceptAll)?;
+    let application = LedgerApplication::open(
+        &path,
+        chain_id(),
+        ApplicationOptions {
+            busy_timeout: Duration::from_millis(25),
+            protocol_limits: limits,
+            consensus_profile_digest: Some(*profile.as_bytes()),
+        },
+    )?;
+    let app = ThunderboltLedgerAbci::new(application, AcceptAll, PanicFatal)?;
+    let external = rusqlite::Connection::open(path).map_err(thunderbolt_ledger_app::ApplicationError::from)?;
+    external
+        .execute_batch("BEGIN IMMEDIATE")
+        .map_err(thunderbolt_ledger_app::ApplicationError::from)?;
+    let failure = capture_fatal(|| {
+        app.check_tx(RequestCheckTx {
+            tx: transaction(&signed_open(42, 42)),
+            r#type: 0,
+        })
+    });
+    assert_eq!(failure.stage(), FatalAbciStage::CheckTx);
+    external
+        .execute_batch("ROLLBACK")
+        .map_err(thunderbolt_ledger_app::ApplicationError::from)?;
+    Ok(())
+}
+
+#[test]
+fn logical_request_dedupes_distinct_signatures_and_recheck_evicts_after_commit() -> Result<()> {
+    let directory = TempDir::new().map_err(|_| AbciAdapterError::InvalidRequest("tempdir"))?;
+    let app = adapter(&directory)?;
+    let proposal = signed_open(30, 30);
+    let admitted = transaction(&proposal);
+    assert_eq!(
+        app.check_tx(RequestCheckTx {
+            tx: admitted.clone(),
+            r#type: 0,
+        })
+        .code,
+        OK_CODE
+    );
+    assert_eq!(
+        app.check_tx(RequestCheckTx {
+            tx: admitted.clone(),
+            r#type: 1,
+        })
+        .code,
+        OK_CODE
+    );
+    for nonce in 1..=u32::try_from(MAX_PREPARE_PREVIEW_WORK + 1).expect("bounded nonce") {
+        assert_ne!(
+            app.check_tx(RequestCheckTx {
+                tx: transaction(&resign(&proposal, 30, nonce)),
+                r#type: 0,
+            })
+            .code,
+            OK_CODE
+        );
+    }
+
+    let prepared = app.prepare_proposal(RequestPrepareProposal {
+        max_tx_bytes: i64::try_from(admitted.len()).expect("budget"),
+        txs: vec![admitted.clone()],
+        height: 1,
+        time: Some(timestamp(1_000)),
+        next_validators_hash: vec![0x55; 32].into(),
+        proposer_address: vec![0x66; 20].into(),
+        ..RequestPrepareProposal::default()
+    });
+    assert_eq!(prepared.txs, vec![admitted.clone()]);
+    let finalized = app.finalize_block(finalize_request(prepared.txs, 1, 1_000));
+    assert_eq!(finalized.tx_results.len(), 1);
+    let _ = app.commit();
+    assert_ne!(
+        app.check_tx(RequestCheckTx {
+            tx: admitted,
+            r#type: 1,
+        })
+        .code,
+        OK_CODE
+    );
+    for nonce in 1..=u32::try_from(MAX_PREPARE_PREVIEW_WORK + 1).expect("bounded nonce") {
+        assert_ne!(
+            app.check_tx(RequestCheckTx {
+                tx: transaction(&resign(&proposal, 30, nonce)),
+                r#type: 1,
+            })
+            .code,
+            OK_CODE
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn proposer_skips_poison_proof_and_valid_transaction_still_progresses() -> Result<()> {
+    let directory = TempDir::new().map_err(|_| AbciAdapterError::InvalidRequest("tempdir"))?;
+    let app = adapter_with(&directory, RejectPoison)?;
+    let poison = transaction(&signed_open_with_proof(20, 20, 0xff));
+    let valid = transaction(&signed_open(21, 21));
+    for check_type in [0, 1] {
+        for _ in 0..=MAX_PREPARE_PREVIEW_WORK {
+            assert_ne!(
+                app.check_tx(RequestCheckTx {
+                    tx: poison.clone(),
+                    r#type: check_type,
+                })
+                .code,
+                OK_CODE
+            );
+        }
+    }
+    let prepared = app.prepare_proposal(RequestPrepareProposal {
+        max_tx_bytes: i64::try_from(valid.len()).expect("budget"),
+        txs: vec![valid.clone()],
+        height: 1,
+        time: Some(timestamp(1_000)),
+        next_validators_hash: vec![0x55; 32].into(),
+        proposer_address: vec![0x66; 20].into(),
+        ..RequestPrepareProposal::default()
+    });
+    assert_eq!(prepared.txs, vec![valid.clone()]);
+    assert_eq!(
+        app.process_proposal(process_request(prepared.txs.clone(), 1, 1_000))
+            .status,
+        response_process_proposal::ProposalStatus::Accept as i32
+    );
+    let finalized = app.finalize_block(finalize_request(prepared.txs, 1, 1_000));
+    assert_eq!(finalized.tx_results.len(), 1);
+    assert_eq!(finalized.tx_results[0].code, OK_CODE);
+    let _ = app.commit();
+    assert_eq!(app.info(RequestInfo::default()).last_block_height, 1);
+    assert_ne!(app.check_tx(RequestCheckTx { tx: valid, r#type: 1 }).code, OK_CODE);
+    Ok(())
+}
+
+#[test]
+fn contextual_check_evicts_full_invalid_prefix_and_valid_request_progresses() -> Result<()> {
+    let directory = TempDir::new().map_err(|_| AbciAdapterError::InvalidRequest("tempdir"))?;
+    let app = adapter(&directory)?;
+    for index in 0..u32::try_from(MAX_PREPARE_SCAN_TRANSACTIONS).expect("scan count") {
+        let invalid = transaction(&signed_absent_channel_invoice(index));
+        assert_ne!(app.check_tx(RequestCheckTx { tx: invalid, r#type: 0 }).code, OK_CODE);
+    }
+
+    let valid = transaction(&signed_open(41, 41));
+    assert_eq!(
+        app.check_tx(RequestCheckTx {
+            tx: valid.clone(),
+            r#type: 0,
+        })
+        .code,
+        OK_CODE
+    );
+    let prepared = app.prepare_proposal(RequestPrepareProposal {
+        max_tx_bytes: i64::try_from(valid.len()).expect("budget"),
+        txs: vec![valid.clone()],
+        height: 1,
+        time: Some(timestamp(1_000)),
+        next_validators_hash: vec![0x55; 32].into(),
+        proposer_address: vec![0x66; 20].into(),
+        ..RequestPrepareProposal::default()
+    });
+    assert_eq!(prepared.txs, vec![valid]);
+    Ok(())
+}
+
+#[test]
+fn rotating_prepare_window_cannot_hide_valid_suffix_behind_near_expiry_prefix() -> Result<()> {
+    let directory = TempDir::new().map_err(|_| AbciAdapterError::InvalidRequest("tempdir"))?;
+    let app = adapter(&directory)?;
+    let open = signed_open(60, 61);
+    let _ = app.try_finalize_block(finalize_request(vec![transaction(&open)], 1, 1_000))?;
+    let _ = app.try_commit()?;
+
+    let mut transactions = Vec::with_capacity(MAX_PREPARE_SCAN_TRANSACTIONS + 1);
+    for index in 0..u32::try_from(MAX_PREPARE_SCAN_TRANSACTIONS).expect("scan count") {
+        let expiring = transaction(&signed_invoice_after_open(&open, index, 1_001));
+        if index == 0 {
+            assert_eq!(
+                app.check_tx(RequestCheckTx {
+                    tx: expiring.clone(),
+                    r#type: 0,
+                })
+                .code,
+                OK_CODE
+            );
+        }
+        transactions.push(expiring);
+    }
+    let valid = transaction(&signed_open(61, 62));
+    transactions.push(valid.clone());
+    let request = RequestPrepareProposal {
+        max_tx_bytes: i64::try_from(MAX_BLOCK_TRANSACTION_BYTES).expect("budget"),
+        txs: transactions,
+        height: 2,
+        time: Some(timestamp(1_001)),
+        next_validators_hash: vec![0x55; 32].into(),
+        proposer_address: vec![0x66; 20].into(),
+        ..RequestPrepareProposal::default()
+    };
+    assert!(app.prepare_proposal(request.clone()).txs.is_empty());
+    let second_round = app.prepare_proposal(request);
+    assert_eq!(second_round.txs, vec![valid]);
+    assert_eq!(
+        app.process_proposal(process_request(second_round.txs, 2, 1_001)).status,
+        response_process_proposal::ProposalStatus::Accept as i32
+    );
+    Ok(())
+}
+
+#[test]
 fn finalize_stages_and_commit_alone_advances_the_durable_head() -> Result<()> {
     let directory = TempDir::new().map_err(|_| AbciAdapterError::InvalidRequest("tempdir"))?;
     let app = adapter(&directory)?;
@@ -270,8 +836,199 @@ fn finalize_stages_and_commit_alone_advances_the_durable_head() -> Result<()> {
     let info = app.info(RequestInfo::default());
     assert_eq!(info.last_block_height, 1);
     assert_eq!(info.last_block_app_hash, finalized.app_hash);
-    assert_eq!(app.commit().retain_height, 0);
-    assert_eq!(app.info(RequestInfo::default()).last_block_height, 1);
+    Ok(())
+}
+
+#[test]
+fn every_missing_or_duplicate_commit_fails_closed() -> Result<()> {
+    let directory = TempDir::new().map_err(|_| AbciAdapterError::InvalidRequest("tempdir"))?;
+    let app = adapter(&directory)?;
+    assert!(matches!(app.try_commit(), Err(AbciAdapterError::MissingStagedBlock)));
+    assert_eq!(app.try_info(RequestInfo::default())?.last_block_height, 0);
+
+    let finalized = app.try_finalize_block(finalize_request(Vec::new(), 1, 1_000))?;
+    assert_eq!(finalized.app_hash.len(), 32);
+    let _ = app.try_commit()?;
+    let committed = app.try_info(RequestInfo::default())?;
+    assert!(matches!(app.try_commit(), Err(AbciAdapterError::MissingStagedBlock)));
+    assert_eq!(app.try_info(RequestInfo::default())?, committed);
+
+    let reopened = adapter(&directory)?;
+    assert!(matches!(
+        reopened.try_commit(),
+        Err(AbciAdapterError::MissingStagedBlock)
+    ));
+    assert_eq!(reopened.try_info(RequestInfo::default())?, committed);
+    Ok(())
+}
+
+#[test]
+fn precommit_reverification_failure_terminates_before_response() -> Result<()> {
+    let directory = TempDir::new().map_err(|_| AbciAdapterError::InvalidRequest("tempdir"))?;
+    let rejection = Arc::new(AtomicBool::new(false));
+    let app = adapter_with(
+        &directory,
+        ToggleVerifier {
+            reject_contextual: Arc::clone(&rejection),
+        },
+    )?;
+    let finalized = app.finalize_block(finalize_request(vec![transaction(&signed_open(31, 31))], 1, 1_000));
+    assert_eq!(finalized.app_hash.len(), 32);
+    rejection.store(true, Ordering::SeqCst);
+    let failure = capture_fatal(|| app.commit());
+    assert_eq!(failure.stage(), FatalAbciStage::Commit);
+    assert_eq!(app.try_info(RequestInfo::default())?.last_block_height, 0);
+    Ok(())
+}
+
+#[test]
+fn postcommit_ambiguity_terminates_and_restart_resolves_durable_head() -> Result<()> {
+    let directory = TempDir::new().map_err(|_| AbciAdapterError::InvalidRequest("tempdir"))?;
+    let app = adapter(&directory)?;
+    let finalized = app.finalize_block(finalize_request(Vec::new(), 1, 1_000));
+    assert_eq!(finalized.app_hash.len(), 32);
+    app.fail_after_next_commit_for_test();
+    let failure = capture_fatal(|| app.commit());
+    assert_eq!(failure.stage(), FatalAbciStage::Commit);
+    drop(app);
+
+    let restarted = adapter(&directory)?;
+    assert_eq!(restarted.try_info(RequestInfo::default())?.last_block_height, 1);
+    Ok(())
+}
+
+#[test]
+fn info_storage_failure_terminates_instead_of_returning_height_zero() -> Result<()> {
+    let directory = TempDir::new().map_err(|_| AbciAdapterError::InvalidRequest("tempdir"))?;
+    let path = directory.path().join("ledger-abci.sqlite3");
+    let app = adapter(&directory)?;
+    let external = rusqlite::Connection::open(path).map_err(thunderbolt_ledger_app::ApplicationError::from)?;
+    external
+        .execute_batch("DROP TABLE application_state")
+        .map_err(thunderbolt_ledger_app::ApplicationError::from)?;
+    let failure = capture_fatal(|| app.info(RequestInfo::default()));
+    assert_eq!(failure.stage(), FatalAbciStage::Info);
+    Ok(())
+}
+
+#[test]
+fn semantically_invalid_stored_snapshot_terminates_query() -> Result<()> {
+    let directory = TempDir::new().map_err(|_| AbciAdapterError::InvalidRequest("tempdir"))?;
+    let path = directory.path().join("ledger-abci.sqlite3");
+    let app = adapter(&directory)?;
+    let proposal = signed_open(50, 50);
+    let context = ChannelContextIdV2::from_bytes(proposal.body().channel().context_id().expect("context"))?;
+    let _ = app.try_finalize_block(finalize_request(vec![transaction(&proposal)], 1, 1_000))?;
+    let _ = app.try_commit()?;
+    let external = rusqlite::Connection::open(path).map_err(thunderbolt_ledger_app::ApplicationError::from)?;
+    let bytes: Vec<u8> = external
+        .query_row(
+            "SELECT snapshot_json FROM channel_snapshots WHERE channel_context_id = ?1",
+            [context.as_bytes().as_slice()],
+            |row| row.get(0),
+        )
+        .map_err(thunderbolt_ledger_app::ApplicationError::from)?;
+    let mut value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    value["capacity_sat"] = serde_json::Value::from(0_u64);
+    external
+        .execute(
+            "UPDATE channel_snapshots SET snapshot_json = ?1 WHERE channel_context_id = ?2",
+            rusqlite::params![serde_json::to_vec(&value)?, context.as_bytes().as_slice()],
+        )
+        .map_err(thunderbolt_ledger_app::ApplicationError::from)?;
+    let failure = capture_fatal(|| {
+        app.query(RequestQuery {
+            data: context.as_bytes().to_vec().into(),
+            path: QUERY_CHANNEL_PATH.to_owned(),
+            ..RequestQuery::default()
+        })
+    });
+    assert_eq!(failure.stage(), FatalAbciStage::Query);
+    Ok(())
+}
+
+#[test]
+fn malformed_stored_request_terminates_query_and_checktx() -> Result<()> {
+    for check_path in [false, true] {
+        let directory = TempDir::new().map_err(|_| AbciAdapterError::InvalidRequest("tempdir"))?;
+        let path = directory.path().join("ledger-abci.sqlite3");
+        let app = adapter(&directory)?;
+        let proposal = signed_open(51, 51);
+        let context = ChannelContextIdV2::from_bytes(proposal.body().channel().context_id().expect("context"))?;
+        let participant = proposal.body().participant_id()?;
+        let request_digest = proposal.body().request_id().digest().clone();
+        let transaction = transaction(&proposal);
+        let _ = app.try_finalize_block(finalize_request(vec![transaction.clone()], 1, 1_000))?;
+        let _ = app.try_commit()?;
+        let external = rusqlite::Connection::open(path).map_err(thunderbolt_ledger_app::ApplicationError::from)?;
+        external
+            .execute_batch(
+                "PRAGMA ignore_check_constraints = ON;
+                 DROP TRIGGER request_index_no_update;",
+            )
+            .map_err(thunderbolt_ledger_app::ApplicationError::from)?;
+        external
+            .execute(
+                "UPDATE request_index SET entry_hash = x'01'
+                 WHERE channel_context_id = ?1 AND participant_id = ?2 AND request_digest = ?3",
+                rusqlite::params![
+                    context.as_bytes().as_slice(),
+                    participant.as_bytes().as_slice(),
+                    request_digest.as_bytes().as_slice(),
+                ],
+            )
+            .map_err(thunderbolt_ledger_app::ApplicationError::from)?;
+        let failure = if check_path {
+            capture_fatal(|| {
+                app.check_tx(RequestCheckTx {
+                    tx: transaction,
+                    r#type: 1,
+                })
+            })
+        } else {
+            let mut key = Vec::with_capacity(96);
+            key.extend_from_slice(context.as_bytes());
+            key.extend_from_slice(participant.as_bytes());
+            key.extend_from_slice(request_digest.as_bytes());
+            capture_fatal(|| {
+                app.query(RequestQuery {
+                    data: key.into(),
+                    path: QUERY_REQUEST_PATH.to_owned(),
+                    ..RequestQuery::default()
+                })
+            })
+        };
+        assert_eq!(
+            failure.stage(),
+            if check_path {
+                FatalAbciStage::CheckTx
+            } else {
+                FatalAbciStage::Query
+            }
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn installed_verifier_must_match_the_durable_consensus_profile() -> Result<()> {
+    let directory = TempDir::new().map_err(|_| AbciAdapterError::InvalidRequest("tempdir"))?;
+    let path = directory.path().join("profile-mismatch.sqlite3");
+    let limits = thunderbolt_protocol::v2::ProtocolLimitsV2::default();
+    let expected = ConsensusProfileV2::from_verifier(&chain_id(), limits, &AcceptAll)?;
+    let application = LedgerApplication::open(
+        path,
+        chain_id(),
+        ApplicationOptions {
+            protocol_limits: limits,
+            consensus_profile_digest: Some(*expected.as_bytes()),
+            ..ApplicationOptions::default()
+        },
+    )?;
+    assert!(matches!(
+        ThunderboltLedgerAbci::new(application, RejectPoison, PanicFatal),
+        Err(AbciAdapterError::InvalidRequest(_))
+    ));
     Ok(())
 }
 
@@ -317,11 +1074,8 @@ fn invalid_decided_block_fails_closed_without_committing() -> Result<()> {
         processed.status,
         response_process_proposal::ProposalStatus::Reject as i32
     );
-    let finalized = app.finalize_block(finalize_request(vec![invalid], 1, 1_000));
-    assert!(finalized.app_hash.is_empty());
-    assert_eq!(finalized.tx_results.len(), 1);
-    assert_ne!(finalized.tx_results[0].code, OK_CODE);
-    let _ = app.commit();
+    let failure = capture_fatal(|| app.finalize_block(finalize_request(vec![invalid], 1, 1_000)));
+    assert_eq!(failure.stage(), FatalAbciStage::FinalizeBlock);
     assert_eq!(app.try_info(RequestInfo::default())?.last_block_height, 0);
     Ok(())
 }
@@ -407,9 +1161,9 @@ fn bounded_queries_return_status_block_channel_request_and_execution_proof() -> 
     proof_key.extend_from_slice(&1_u64.to_be_bytes());
     proof_key.extend_from_slice(&0_u32.to_be_bytes());
     let proof = app.query(RequestQuery {
-        data: proof_key.into(),
+        data: proof_key.clone().into(),
         path: QUERY_PROOF_PATH.to_owned(),
-        prove: true,
+        prove: false,
         ..RequestQuery::default()
     });
     assert_eq!(proof.code, OK_CODE);
@@ -418,7 +1172,53 @@ fn bounded_queries_return_status_block_channel_request_and_execution_proof() -> 
         serde_json::from_slice::<serde_json::Value>(&proof.value)?["execution_only"],
         true
     );
+    let confused = app.query(RequestQuery {
+        data: proof_key.into(),
+        path: QUERY_PROOF_PATH.to_owned(),
+        prove: true,
+        ..RequestQuery::default()
+    });
+    assert_ne!(confused.code, OK_CODE);
+    assert!(confused.proof_ops.is_none());
     Ok(())
+}
+
+#[test]
+fn channel_query_never_pairs_a_new_object_with_an_old_head() -> Result<()> {
+    let directory = TempDir::new().map_err(|_| AbciAdapterError::InvalidRequest("tempdir"))?;
+    let app = adapter(&directory)?;
+    let proposal = signed_open(33, 33);
+    let context = ChannelContextIdV2::from_bytes(proposal.body().channel().context_id().expect("context"))?;
+    let query = RequestQuery {
+        data: context.as_bytes().to_vec().into(),
+        path: QUERY_CHANNEL_PATH.to_owned(),
+        ..RequestQuery::default()
+    };
+    let _ = app.try_finalize_block(finalize_request(vec![transaction(&proposal)], 1, 1_000))?;
+    let committer = app.clone();
+    let handle = thread::spawn(move || committer.try_commit());
+    for _ in 0..128 {
+        match app.try_query(query.clone()) {
+            Ok(response) => {
+                let value: serde_json::Value = serde_json::from_slice(&response.value)?;
+                assert_eq!(value["committed_application_height"], 1);
+            }
+            Err(AbciAdapterError::NotFound("channel")) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let _ = handle
+        .join()
+        .map_err(|_| AbciAdapterError::InvalidRequest("commit thread panicked"))??;
+    Ok(())
+}
+
+#[test]
+fn bounded_json_writer_stops_before_exceeding_its_limit() {
+    let mut writer = BoundedJsonWriter::new(8);
+    assert!(serde_json::to_writer(&mut writer, &vec![0_u8; 64]).is_err());
+    assert!(writer.exceeded);
+    assert!(writer.bytes.len() <= 8);
 }
 
 #[test]
@@ -479,6 +1279,14 @@ fn snapshots_and_vote_extensions_fail_closed() -> Result<()> {
     assert!(app.extend_vote(RequestExtendVote::default()).vote_extension.is_empty());
     assert_eq!(
         app.verify_vote_extension(RequestVerifyVoteExtension::default()).status,
+        response_verify_vote_extension::VerifyStatus::Accept as i32
+    );
+    assert_eq!(
+        app.verify_vote_extension(RequestVerifyVoteExtension {
+            vote_extension: Bytes::from_static(b"unsupported"),
+            ..RequestVerifyVoteExtension::default()
+        })
+        .status,
         response_verify_vote_extension::VerifyStatus::Reject as i32
     );
     Ok(())
@@ -497,9 +1305,9 @@ fn explicit_oversize_requests_fail_without_panicking_or_allocating_unbounded_res
         .code,
         OK_CODE
     );
-    let finalized = app.finalize_block(finalize_request(vec![Bytes::new(); MAX_BLOCK_ENTRIES + 1], 1, 1_000));
-    assert!(finalized.app_hash.is_empty());
-    assert_eq!(finalized.tx_results.len(), MAX_BLOCK_ENTRIES);
+    let failure =
+        capture_fatal(|| app.finalize_block(finalize_request(vec![Bytes::new(); MAX_BLOCK_ENTRIES + 1], 1, 1_000)));
+    assert_eq!(failure.stage(), FatalAbciStage::FinalizeBlock);
     Ok(())
 }
 

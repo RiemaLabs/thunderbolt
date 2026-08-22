@@ -9,7 +9,7 @@ use crate::{ApplicationError, Result};
 
 pub(crate) const APPLICATION_ID: i64 = 0x5442_4c41; // "TBLA"
 /// Latest schema version understood by this crate.
-pub const CURRENT_SCHEMA_VERSION: i64 = 1;
+pub const CURRENT_SCHEMA_VERSION: i64 = 2;
 
 const MIGRATION_1: &str = r#"
 CREATE TABLE schema_migrations (
@@ -105,14 +105,21 @@ CREATE TRIGGER invoice_history_no_delete BEFORE DELETE ON invoice_history
 BEGIN SELECT RAISE(ABORT, 'invoice history is immutable'); END;
 "#;
 
+const MIGRATION_2: &str = r#"
+ALTER TABLE application_state
+ADD COLUMN consensus_profile_digest BLOB
+CHECK (consensus_profile_digest IS NULL OR length(consensus_profile_digest) = 32);
+"#;
+
 pub(crate) fn migrate(
     connection: &mut Connection,
     path: &Path,
     chain_id: &LedgerChainIdV2,
     limits: ProtocolLimitsV2,
+    consensus_profile_digest: Option<[u8; 32]>,
 ) -> Result<()> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let result = migrate_locked(&transaction, path, chain_id, limits);
+    let result = migrate_locked(&transaction, path, chain_id, limits, consensus_profile_digest);
     match result {
         Ok(()) => transaction.commit().map_err(ApplicationError::from),
         Err(error) => match transaction.rollback() {
@@ -130,9 +137,10 @@ fn migrate_locked(
     path: &Path,
     chain_id: &LedgerChainIdV2,
     limits: ProtocolLimitsV2,
+    consensus_profile_digest: Option<[u8; 32]>,
 ) -> Result<()> {
     let application_id: i64 = connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
-    let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let mut version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if application_id != 0 && application_id != APPLICATION_ID {
         return Err(ApplicationError::WrongApplication {
             path: path.to_path_buf(),
@@ -182,10 +190,30 @@ fn migrate_locked(
             ],
         )?;
         connection.pragma_update(None, "application_id", APPLICATION_ID)?;
-        connection.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
+        connection.pragma_update(None, "user_version", 1_i64)?;
+        version = 1;
+    }
+    if version < 2 {
+        connection.execute_batch(MIGRATION_2)?;
+        connection.execute(
+            "INSERT INTO schema_migrations(version, name, checksum) VALUES (2, ?1, ?2)",
+            params!["bind consensus profile", migration_checksum(MIGRATION_2).as_slice()],
+        )?;
+        connection.pragma_update(None, "user_version", 2_i64)?;
+    }
+    if let Some(digest) = consensus_profile_digest {
+        connection.execute(
+            "UPDATE application_state
+             SET consensus_profile_digest = ?1
+             WHERE singleton = 1
+               AND consensus_profile_digest IS NULL
+               AND last_height = 0
+               AND NOT EXISTS(SELECT 1 FROM blocks)",
+            [digest.as_slice()],
+        )?;
     }
     verify_migration(connection)?;
-    verify_configuration(connection, chain_id, limits)
+    verify_configuration(connection, chain_id, limits, consensus_profile_digest)
 }
 
 pub(crate) fn verify_current(connection: &Connection) -> Result<()> {
@@ -206,26 +234,45 @@ pub(crate) fn verify_current(connection: &Connection) -> Result<()> {
 }
 
 fn verify_migration(connection: &Connection) -> Result<()> {
-    let checksum: Option<Vec<u8>> = connection
-        .query_row(
-            "SELECT checksum FROM schema_migrations WHERE version = 1 AND name = ?1",
-            ["initial v2 Ledger application"],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if checksum.as_deref() != Some(migration_checksum(MIGRATION_1).as_slice()) {
-        return Err(ApplicationError::MigrationChecksumMismatch { version: 1 });
+    for (version, name, sql) in [
+        (1_i64, "initial v2 Ledger application", MIGRATION_1),
+        (2_i64, "bind consensus profile", MIGRATION_2),
+    ] {
+        let checksum: Option<Vec<u8>> = connection
+            .query_row(
+                "SELECT checksum FROM schema_migrations WHERE version = ?1 AND name = ?2",
+                params![version, name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if checksum.as_deref() != Some(migration_checksum(sql).as_slice()) {
+            return Err(ApplicationError::MigrationChecksumMismatch { version });
+        }
     }
     Ok(())
 }
 
-fn verify_configuration(connection: &Connection, chain_id: &LedgerChainIdV2, limits: ProtocolLimitsV2) -> Result<()> {
-    let stored: (i64, String, i64, i64, i64) = connection.query_row(
+fn verify_configuration(
+    connection: &Connection,
+    chain_id: &LedgerChainIdV2,
+    limits: ProtocolLimitsV2,
+    consensus_profile_digest: Option<[u8; 32]>,
+) -> Result<()> {
+    let stored: (i64, String, i64, i64, i64, Option<Vec<u8>>) = connection.query_row(
         "SELECT application_version, ledger_chain_id, max_entries_per_channel,
-                max_pending_invoices, max_invoice_ttl_ms
+                max_pending_invoices, max_invoice_ttl_ms, consensus_profile_digest
          FROM application_state WHERE singleton = 1",
         [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        },
     )?;
     let requested = (
         chain_id.as_str(),
@@ -238,6 +285,7 @@ fn verify_configuration(connection: &Connection, chain_id: &LedgerChainIdV2, lim
         || stored.2 != requested.1
         || stored.3 != requested.2
         || stored.4 != requested.3
+        || stored.5.as_deref() != consensus_profile_digest.as_ref().map(<[u8; 32]>::as_slice)
     {
         return Err(ApplicationError::ConfigurationMismatch);
     }

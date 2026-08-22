@@ -3,7 +3,7 @@ mod common;
 use thunderbolt_ledger_rpc::{
     AdmissionRejectionV2, AdmissionStatusV2, ChannelStatusRequestV2, HistoryCursorV2, RequestLifecycleV2,
     RequestStatusRequestV2, RequestStatusResponseV2, RollbackFloorCasRequestV2, RpcCodecError, RpcRequestV2,
-    RpcResponseV2, SubmitProposalRequestV2, SubmitProposalResponseV2, MAX_RPC_REQUEST_BYTES,
+    RpcResponseV2, SubmitProposalRequestV2, SubmitProposalResponseV2, MAX_RPC_REQUEST_BYTES, MAX_RPC_RESPONSE_BYTES,
 };
 
 #[test]
@@ -49,6 +49,24 @@ fn oversized_request_is_rejected_before_parsing() {
             limit: MAX_RPC_REQUEST_BYTES,
         })
     ));
+}
+
+#[test]
+fn oversized_escaped_response_is_rejected_before_json_parsing() -> Result<(), Box<dyn std::error::Error>> {
+    let request = RpcRequestV2::ChannelStatus(ChannelStatusRequestV2::new(
+        common::ledger_chain(),
+        thunderbolt_ledger::ChannelContextIdV2::from_bytes([0x77; 32])?,
+    ));
+    let mut oversized = b"{\"api_version\":2,\"response\":\"".to_vec();
+    oversized.extend_from_slice("\\u0061".repeat(MAX_RPC_RESPONSE_BYTES / 6 + 1).as_bytes());
+    assert!(matches!(
+        RpcResponseV2::from_canonical_bytes_for(oversized, &request),
+        Err(RpcCodecError::BodyTooLarge {
+            direction: "response",
+            limit: MAX_RPC_RESPONSE_BYTES,
+        })
+    ));
+    Ok(())
 }
 
 #[test]
@@ -118,14 +136,19 @@ fn cursor_rejects_zero_height_and_genesis_hash_mismatch() -> Result<(), Box<dyn 
 
 #[test]
 fn uppercase_fixed_hex_is_not_canonical() -> Result<(), Box<dyn std::error::Error>> {
+    let request = SubmitProposalRequestV2::new(common::ledger_chain(), common::signed_open(3))?;
     let response = RpcResponseV2::SubmitProposal(SubmitProposalResponseV2::new(
-        &SubmitProposalRequestV2::new(common::ledger_chain(), common::signed_open(3))?,
+        &request,
         AdmissionStatusV2::AlreadyKnown,
     )?);
     let mut value: serde_json::Value = serde_json::from_slice(&response.to_canonical_bytes()?)?;
     let entry_hash = value["response"]["result"]["entry_hash"].as_str().ok_or("entry hash")?;
     value["response"]["result"]["entry_hash"] = serde_json::Value::String(entry_hash.to_uppercase());
-    assert!(RpcResponseV2::from_canonical_bytes(serde_json::to_vec(&value)?).is_err());
+    assert!(RpcResponseV2::from_canonical_bytes_for(
+        serde_json::to_vec(&value)?,
+        &RpcRequestV2::SubmitProposal(request),
+    )
+    .is_err());
     Ok(())
 }
 
@@ -148,11 +171,16 @@ fn unknown_status_cannot_be_replayed_across_complete_request_keys() -> Result<()
         original.request_digest().clone(),
     );
     assert!(response.validate_for(&other).is_err());
-    assert!(RpcResponseV2::RequestStatus(Box::new(response))
-        .validate_for(&RpcRequestV2::ChannelStatus(ChannelStatusRequestV2::new(
+    let encoded = RpcResponseV2::RequestStatus(Box::new(response.clone())).to_canonical_bytes()?;
+    assert!(RpcResponseV2::from_canonical_bytes_for(&encoded, &RpcRequestV2::RequestStatus(original.clone()),).is_ok());
+    assert!(RpcResponseV2::from_canonical_bytes_for(&encoded, &RpcRequestV2::RequestStatus(other),).is_err());
+    assert!(RpcResponseV2::from_canonical_bytes_for(
+        encoded,
+        &RpcRequestV2::ChannelStatus(ChannelStatusRequestV2::new(
             common::ledger_chain(),
             original.channel_context_id().clone(),
-        )))
-        .is_err());
+        )),
+    )
+    .is_err());
     Ok(())
 }

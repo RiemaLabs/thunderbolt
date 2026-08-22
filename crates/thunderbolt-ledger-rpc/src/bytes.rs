@@ -12,7 +12,7 @@ use thunderbolt_protocol::Artifact;
 use thunderbolt_wire::{CanonicalDigest as _, ChannelBindingV2, InvoiceId, ValidateWire as _};
 
 use crate::error::RedactedDebug;
-use crate::primitives::decode_hex_bounded;
+use crate::primitives::{deserialize_hex_bounded, FixedHex32Wire};
 use crate::{FinalityVerifierProfileIdV2, Result, RpcCodecError};
 
 /// Maximum canonical materialized channel-state bytes returned by one status query.
@@ -32,6 +32,11 @@ const STATE_DOMAIN: &[u8] = b"bitcoin-thunderbolt/protocol-state/v2";
 /// Full state decoding remains the protocol crate's responsibility; a finality
 /// verifier must prove that these exact bytes are included in the committed
 /// application state.
+///
+/// ```compile_fail
+/// use thunderbolt_ledger_rpc::SnapshotBytesV2;
+/// let _: SnapshotBytesV2 = serde_json::from_slice(b"\"00\"").unwrap();
+/// ```
 #[derive(Clone, PartialEq, Eq)]
 pub struct SnapshotBytesV2(Vec<u8>);
 
@@ -212,16 +217,12 @@ impl Serialize for SnapshotBytesV2 {
     }
 }
 
-impl<'de> Deserialize<'de> for SnapshotBytesV2 {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let text = String::deserialize(deserializer)?;
-        let bytes =
-            decode_hex_bounded("snapshot_bytes", &text, 1, MAX_SNAPSHOT_BYTES).map_err(serde::de::Error::custom)?;
-        Self::from_canonical_bytes(bytes).map_err(serde::de::Error::custom)
-    }
+pub(crate) fn deserialize_snapshot_bytes<'de, D>(deserializer: D) -> std::result::Result<SnapshotBytesV2, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let bytes = deserialize_hex_bounded(deserializer, "snapshot_bytes", 1, MAX_SNAPSHOT_BYTES)?;
+    SnapshotBytesV2::from_canonical_bytes(bytes).map_err(serde::de::Error::custom)
 }
 
 /// Opaque, bounded consensus proof returned by a concrete Ledger adapter.
@@ -240,20 +241,21 @@ pub struct OpaqueConsensusReceiptV2 {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OpaqueConsensusReceiptInput {
-    verifier_profile_id: FinalityVerifierProfileIdV2,
-    bytes: String,
+    verifier_profile_id: FixedHex32Wire,
+    #[serde(deserialize_with = "deserialize_consensus_receipt_bytes")]
+    bytes: Vec<u8>,
 }
 
-impl<'de> Deserialize<'de> for OpaqueConsensusReceiptV2 {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let input = OpaqueConsensusReceiptInput::deserialize(deserializer)?;
-        let bytes = decode_hex_bounded("consensus_receipt", &input.bytes, 1, MAX_CONSENSUS_RECEIPT_BYTES)
-            .map_err(serde::de::Error::custom)?;
-        Self::new(input.verifier_profile_id, bytes).map_err(serde::de::Error::custom)
-    }
+pub(crate) fn deserialize_opaque_consensus_receipt<'de, D>(
+    deserializer: D,
+) -> std::result::Result<OpaqueConsensusReceiptV2, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let input = OpaqueConsensusReceiptInput::deserialize(deserializer)?;
+    let profile = FinalityVerifierProfileIdV2::from_bytes(input.verifier_profile_id.into_bytes())
+        .map_err(serde::de::Error::custom)?;
+    OpaqueConsensusReceiptV2::new(profile, input.bytes).map_err(serde::de::Error::custom)
 }
 
 impl OpaqueConsensusReceiptV2 {
@@ -300,6 +302,13 @@ where
     serializer.serialize_str(&hex::encode(bytes))
 }
 
+fn deserialize_consensus_receipt_bytes<'de, D>(deserializer: D) -> std::result::Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_hex_bounded(deserializer, "consensus_receipt", 1, MAX_CONSENSUS_RECEIPT_BYTES)
+}
+
 /// Opaque token used only to causally resolve a potentially committed floor CAS.
 #[derive(Clone, PartialEq, Eq)]
 pub struct AmbiguityTokenV2(Vec<u8>);
@@ -342,21 +351,17 @@ impl Serialize for AmbiguityTokenV2 {
     }
 }
 
-impl<'de> Deserialize<'de> for AmbiguityTokenV2 {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let text = String::deserialize(deserializer)?;
-        let bytes = decode_hex_bounded(
-            "ambiguity_token",
-            &text,
-            MIN_AMBIGUITY_TOKEN_BYTES,
-            MAX_AMBIGUITY_TOKEN_BYTES,
-        )
-        .map_err(serde::de::Error::custom)?;
-        Self::new(bytes).map_err(serde::de::Error::custom)
-    }
+pub(crate) fn deserialize_ambiguity_token<'de, D>(deserializer: D) -> std::result::Result<AmbiguityTokenV2, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let bytes = deserialize_hex_bounded(
+        deserializer,
+        "ambiguity_token",
+        MIN_AMBIGUITY_TOKEN_BYTES,
+        MAX_AMBIGUITY_TOKEN_BYTES,
+    )?;
+    AmbiguityTokenV2::new(bytes).map_err(serde::de::Error::custom)
 }
 
 struct SnapshotReader<'a> {

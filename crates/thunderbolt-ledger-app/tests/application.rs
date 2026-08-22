@@ -267,6 +267,32 @@ fn committed_block_restarts_and_replays_exactly() -> Result<(), Box<dyn Error>> 
 }
 
 #[test]
+fn channel_and_request_reads_are_bound_to_one_exact_head() -> Result<(), Box<dyn Error>> {
+    let directory = TempDir::new()?;
+    let app = application(&directory)?;
+    let open = open_proposal(26);
+    let context = thunderbolt_ledger::ChannelContextIdV2::from_bytes(open.body().channel().context_id()?)?;
+    let participant = open.body().participant_id()?;
+    let request_digest = open.body().request_id().digest().clone();
+    let before_channel = app.channel_at_head(&context)?;
+    let before_request = app.request_at_head(&context, &participant, &request_digest)?;
+    assert_eq!(before_channel.status().last_height(), 0);
+    assert!(before_channel.channel().is_none());
+    assert_eq!(before_request.status().last_height(), 0);
+    assert!(before_request.request().is_none());
+
+    let committed = app.apply_block(block(1, 1_000, zero_app_hash(), vec![open])?, &AcceptAll)?;
+    let channel = app.channel_at_head(&context)?;
+    let request = app.request_at_head(&context, &participant, &request_digest)?;
+    assert_eq!(channel.status().last_height(), 1);
+    assert_eq!(channel.status().last_app_hash(), committed.block().app_hash());
+    assert!(channel.channel().is_some());
+    assert_eq!(request.status(), channel.status());
+    assert_eq!(request.request().ok_or("request")?.first_height(), 1);
+    Ok(())
+}
+
+#[test]
 fn actor_request_replay_in_a_new_block_skips_external_verification() -> Result<(), Box<dyn Error>> {
     let directory = TempDir::new()?;
     let app = application(&directory)?;
@@ -567,6 +593,47 @@ fn schema_reopen_pins_chain_and_protocol_limits() -> Result<(), Box<dyn Error>> 
             chain_id(),
             ApplicationOptions {
                 protocol_limits: ProtocolLimitsV2::new(501, 4, 60_000)?,
+                ..ApplicationOptions::default()
+            },
+        ),
+        Err(ApplicationError::ConfigurationMismatch)
+    ));
+
+    let profiled_path = directory.path().join("profiled.sqlite3");
+    let profile = [0x51; 32];
+    let profiled = LedgerApplication::open(
+        &profiled_path,
+        chain_id(),
+        ApplicationOptions {
+            consensus_profile_digest: Some(profile),
+            ..ApplicationOptions::default()
+        },
+    )?;
+    assert_eq!(profiled.consensus_profile_digest(), Some(&profile));
+    drop(profiled);
+    assert!(matches!(
+        LedgerApplication::open(
+            &profiled_path,
+            chain_id(),
+            ApplicationOptions {
+                consensus_profile_digest: Some([0x52; 32]),
+                ..ApplicationOptions::default()
+            },
+        ),
+        Err(ApplicationError::ConfigurationMismatch)
+    ));
+
+    let executed_unprofiled_path = directory.path().join("executed-unprofiled.sqlite3");
+    let executed_unprofiled =
+        LedgerApplication::open(&executed_unprofiled_path, chain_id(), ApplicationOptions::default())?;
+    let _ = executed_unprofiled.apply_block(block(1, 1_000, zero_app_hash(), Vec::new())?, &AcceptAll)?;
+    drop(executed_unprofiled);
+    assert!(matches!(
+        LedgerApplication::open(
+            &executed_unprofiled_path,
+            chain_id(),
+            ApplicationOptions {
+                consensus_profile_digest: Some(profile),
                 ..ApplicationOptions::default()
             },
         ),

@@ -23,11 +23,17 @@
 
 mod error;
 
+use std::collections::{HashSet, VecDeque};
 use std::fmt;
+use std::io::{self, Write};
 use std::sync::{Arc, Mutex, MutexGuard};
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use tendermint_abci::Application;
 use tendermint_proto::v0_38::abci::{
     response_apply_snapshot_chunk, response_offer_snapshot, response_process_proposal, response_verify_vote_extension,
@@ -41,12 +47,12 @@ use tendermint_proto::v0_38::abci::{
 use tendermint_proto::v0_38::types::{AbciParams, ConsensusParams, VersionParams};
 use thunderbolt_ledger::{
     ActorSignatureV2, AppHashV2, ChannelContextIdV2, ParticipantIdV2, PendingBlockV2, ProposalBodyV2, RequestDigestV2,
-    SignedProposalV2, MAX_BLOCK_ENTRIES,
+    SignedProposalV2, MAX_BLOCK_ENTRIES, MAX_BLOCK_EVENT_BYTES,
 };
 use thunderbolt_ledger_app::{
     ApplicationStatusV2, BlockInputV2, LedgerApplication, LedgerApplicationVerifierV2, PreparedBlockV2,
 };
-use thunderbolt_protocol::v2::ChannelSnapshotV2;
+use thunderbolt_protocol::v2::{ChannelEventV2, ChannelSnapshotV2, ProtocolLimitsV2};
 
 pub use error::{AbciAdapterError, Result};
 pub use thunderbolt_ledger_app::APPLICATION_VERSION_V2;
@@ -82,19 +88,227 @@ pub const MAX_QUERY_RESPONSE_BYTES: usize = 24 * 1024 * 1024;
 pub const MAX_MISBEHAVIOR_RECORDS: usize = 64;
 /// Maximum validator votes accepted in one commit-info value.
 pub const MAX_COMMIT_VOTES: usize = 64;
+/// Maximum cumulative proposal entries re-executed while greedily constructing
+/// one fully previewed proposer block.
+pub const MAX_PREPARE_PREVIEW_WORK: usize = 4_096;
+/// Maximum raw transactions examined by one `PrepareProposal` call, including
+/// malformed, duplicate, oversized, or otherwise rejected values.
+pub const MAX_PREPARE_SCAN_TRANSACTIONS: usize = 4_096;
+/// Maximum raw bytes examined by one `PrepareProposal` call, including every
+/// rejected value.
+pub const MAX_PREPARE_SCAN_BYTES: usize = 32 * 1024 * 1024;
+/// Maximum permanent static-admission rejections cached across ABCI clones.
+pub const MAX_STATIC_REJECTION_CACHE_ENTRIES: usize = 4_096;
 
 const OK_CODE: u32 = 0;
+
+/// Time- and state-independent signed proposal presented for static proof
+/// admission before it may enter or remain in the CometBFT mempool.
+#[derive(Clone, Copy, Debug)]
+pub struct StaticAdmissionRequestV2<'a> {
+    proposal: &'a SignedProposalV2,
+    event: &'a ChannelEventV2,
+}
+
+impl<'a> StaticAdmissionRequestV2<'a> {
+    /// Returns the signature-verified proposal and complete stable binding.
+    pub const fn proposal(&self) -> &'a SignedProposalV2 {
+        self.proposal
+    }
+
+    /// Returns the exact typed event carrying the proof artifacts.
+    pub const fn event(&self) -> &'a ChannelEventV2 {
+        self.event
+    }
+}
+
+/// Deterministic static proof-admission boundary for `CheckTx` and proposer
+/// filtering.
+///
+/// Implementations must reject permanently malformed cryptographic statements
+/// without consulting a clock, mutable channel state, a network, or client
+/// evidence. Checks that intrinsically require consensus time or prior state
+/// remain in `LedgerApplicationVerifierV2` and run during rollback preview.
+pub trait StaticAdmissionVerifierV2 {
+    /// Implementation-specific rejection detail, never committed or returned
+    /// to an untrusted client.
+    type Error;
+
+    /// Returns the immutable identity of the installed static/contextual proof
+    /// implementation and verification-key policy.
+    fn verifier_profile_id(&self) -> [u8; 32];
+
+    /// Returns the immutable deployment/committee descriptor authenticated by
+    /// this verifier.
+    fn deployment_descriptor(&self) -> [u8; 32];
+
+    /// Verifies time- and state-independent proof validity.
+    fn verify_static(&self, request: StaticAdmissionRequestV2<'_>) -> std::result::Result<(), Self::Error>;
+}
+
+/// ABCI stage that encountered a failure which cannot be represented by an
+/// ordinary protocol response without risking consensus/application drift.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FatalAbciStage {
+    /// Durable handshake information could not be read.
+    Info,
+    /// Genesis identity or initialization failed.
+    InitChain,
+    /// A read query encountered storage corruption or another fatal runtime
+    /// failure.
+    Query,
+    /// Mempool admission encountered a fatal runtime failure.
+    CheckTx,
+    /// Proposer construction encountered a fatal runtime failure.
+    PrepareProposal,
+    /// Deterministic proposal processing encountered a fatal runtime failure.
+    ProcessProposal,
+    /// A decided block could not be staged exactly.
+    FinalizeBlock,
+    /// Commit was missing, failed, or became ambiguous.
+    Commit,
+}
+
+/// Redacted fatal failure passed to the configured supervisor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FatalAbciFailure {
+    stage: FatalAbciStage,
+    code: &'static str,
+}
+
+impl FatalAbciFailure {
+    /// Returns the ABCI stage that must be restarted/replayed.
+    pub const fn stage(&self) -> FatalAbciStage {
+        self.stage
+    }
+
+    /// Returns a stable redacted failure code.
+    pub const fn code(&self) -> &'static str {
+        self.code
+    }
+}
+
+/// Supervised fatal boundary for infallible `tendermint-abci` callbacks.
+///
+/// Implementations must close the ABCI session or terminate the application
+/// process and never return. This prevents CometBFT from observing an ordinary
+/// successful response after storage or commit ambiguity.
+pub trait FatalAbciHandler: Send + Sync + 'static {
+    /// Terminates the current ABCI session/process for handshake recovery.
+    fn terminate(&self, failure: FatalAbciFailure) -> !;
+}
+
+/// Fatal handler that terminates the complete application process.
+#[derive(Clone, Copy, Debug)]
+pub struct ProcessExitFatalHandler {
+    exit_code: u8,
+}
+
+impl ProcessExitFatalHandler {
+    /// Constructs a process-exit handler. Zero is rejected because fatal exits
+    /// must never look successful to a supervisor.
+    pub fn new(exit_code: u8) -> Result<Self> {
+        if exit_code == 0 {
+            return Err(AbciAdapterError::InvalidRequest(
+                "fatal process exit code must be nonzero",
+            ));
+        }
+        Ok(Self { exit_code })
+    }
+}
+
+impl FatalAbciHandler for ProcessExitFatalHandler {
+    fn terminate(&self, failure: FatalAbciFailure) -> ! {
+        eprintln!(
+            "fatal ABCI failure: stage={:?} code={}",
+            failure.stage(),
+            failure.code()
+        );
+        std::process::exit(i32::from(self.exit_code));
+    }
+}
+
+/// Immutable digest binding every replica to one verifier/deployment/resource
+/// profile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ConsensusProfileV2 {
+    digest: [u8; 32],
+}
+
+impl ConsensusProfileV2 {
+    /// Derives a canonical profile from the exact chain, verifier identity,
+    /// deployment descriptor, reducer limits, and compiled ABCI resource
+    /// limits.
+    pub fn from_verifier<V: StaticAdmissionVerifierV2>(
+        ledger_chain_id: &thunderbolt_ledger::LedgerChainIdV2,
+        protocol_limits: ProtocolLimitsV2,
+        verifier: &V,
+    ) -> Result<Self> {
+        let pending_invoices = u64::try_from(protocol_limits.max_pending_invoices)
+            .map_err(|_| AbciAdapterError::InvalidRequest("pending Invoice limit exceeds u64"))?;
+        let chain_len = u64::try_from(ledger_chain_id.as_str().len())
+            .map_err(|_| AbciAdapterError::InvalidRequest("Ledger chain id length exceeds u64"))?;
+        let mut hasher = Sha256::new();
+        hasher.update(b"bitcoin-thunderbolt/abci-consensus-profile/v2");
+        hasher.update(chain_len.to_be_bytes());
+        hasher.update(ledger_chain_id.as_str().as_bytes());
+        hasher.update(verifier.verifier_profile_id());
+        hasher.update(verifier.deployment_descriptor());
+        hasher.update(protocol_limits.max_entries_per_channel.to_be_bytes());
+        hasher.update(pending_invoices.to_be_bytes());
+        hasher.update(protocol_limits.max_invoice_ttl_ms.to_be_bytes());
+        for value in [
+            APPLICATION_VERSION,
+            MAX_TRANSACTION_BYTES as u64,
+            MAX_BLOCK_TRANSACTION_BYTES as u64,
+            MAX_QUERY_REQUEST_BYTES as u64,
+            MAX_QUERY_RESPONSE_BYTES as u64,
+            MAX_PREPARE_PREVIEW_WORK as u64,
+            MAX_PREPARE_SCAN_TRANSACTIONS as u64,
+            MAX_PREPARE_SCAN_BYTES as u64,
+            MAX_MISBEHAVIOR_RECORDS as u64,
+            MAX_COMMIT_VOTES as u64,
+            MAX_BLOCK_ENTRIES as u64,
+            MAX_BLOCK_EVENT_BYTES as u64,
+            MAX_STATIC_REJECTION_CACHE_ENTRIES as u64,
+        ] {
+            hasher.update(value.to_be_bytes());
+        }
+        Ok(Self {
+            digest: hasher.finalize().into(),
+        })
+    }
+
+    /// Returns the exact durable/genesis digest.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.digest
+    }
+
+    /// Returns the canonical JSON bytes required in CometBFT genesis
+    /// `app_state` and delivered as `InitChain.app_state_bytes`.
+    pub fn genesis_app_state_bytes(&self) -> Result<Vec<u8>> {
+        #[derive(Serialize)]
+        struct GenesisProfile<'a> {
+            application_version: u64,
+            consensus_profile_digest: &'a [u8; 32],
+        }
+        Ok(serde_json::to_vec(&GenesisProfile {
+            application_version: APPLICATION_VERSION,
+            consensus_profile_digest: &self.digest,
+        })?)
+    }
+}
 
 /// Clone-safe ABCI application backed by one synchronized Ledger application.
 ///
 /// Every clone shares the durable SQLite handle, verifier capability, staged
 /// block, and fail-closed fault state. The verifier must be deterministic and
 /// side-effect free as required by `LedgerApplicationVerifierV2`.
-pub struct ThunderboltLedgerAbci<V> {
-    inner: Arc<Shared<V>>,
+pub struct ThunderboltLedgerAbci<V, F> {
+    inner: Arc<Shared<V, F>>,
 }
 
-impl<V> Clone for ThunderboltLedgerAbci<V> {
+impl<V, F> Clone for ThunderboltLedgerAbci<V, F> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
@@ -102,7 +316,7 @@ impl<V> Clone for ThunderboltLedgerAbci<V> {
     }
 }
 
-impl<V> fmt::Debug for ThunderboltLedgerAbci<V> {
+impl<V, F> fmt::Debug for ThunderboltLedgerAbci<V, F> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ThunderboltLedgerAbci")
@@ -112,16 +326,88 @@ impl<V> fmt::Debug for ThunderboltLedgerAbci<V> {
     }
 }
 
-struct Shared<V> {
+struct Shared<V, F> {
     application: LedgerApplication,
     verifier: V,
+    fatal_handler: F,
+    consensus_profile: ConsensusProfileV2,
     runtime: Mutex<RuntimeState>,
+    static_rejections: Mutex<StaticRejectionCache>,
+    mempool_admissions: Mutex<MempoolAdmissionCache>,
+    prepare_cursor: Mutex<usize>,
+    #[cfg(test)]
+    fail_after_commit: AtomicBool,
 }
 
 #[derive(Default)]
 struct RuntimeState {
     staged: Option<StagedBlock>,
     faulted: bool,
+}
+
+#[derive(Default)]
+struct StaticRejectionCache {
+    order: VecDeque<AdmissionKey>,
+    entries: HashSet<AdmissionKey>,
+}
+
+impl StaticRejectionCache {
+    fn contains(&self, key: &AdmissionKey) -> bool {
+        self.entries.contains(key)
+    }
+
+    fn insert(&mut self, key: AdmissionKey) {
+        if !self.entries.insert(key) {
+            return;
+        }
+        self.order.push_back(key);
+        while self.order.len() > MAX_STATIC_REJECTION_CACHE_ENTRIES {
+            if let Some(evicted) = self.order.pop_front() {
+                self.entries.remove(&evicted);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct AdmissionKey {
+    channel: [u8; 32],
+    participant: [u8; 32],
+    request: [u8; 32],
+    entry: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdmissionPurpose {
+    MempoolNew,
+    MempoolRecheck,
+    Prepare,
+    Consensus,
+}
+
+#[derive(Default)]
+struct MempoolAdmissionCache {
+    order: VecDeque<AdmissionKey>,
+    entries: std::collections::HashMap<AdmissionKey, [u8; 32]>,
+}
+
+impl MempoolAdmissionCache {
+    fn get(&self, key: &AdmissionKey) -> Option<&[u8; 32]> {
+        self.entries.get(key)
+    }
+
+    fn insert(&mut self, key: AdmissionKey, raw_digest: [u8; 32]) {
+        if self.entries.contains_key(&key) {
+            return;
+        }
+        self.entries.insert(key, raw_digest);
+        self.order.push_back(key);
+        while self.order.len() > MAX_STATIC_REJECTION_CACHE_ENTRIES {
+            if let Some(evicted) = self.order.pop_front() {
+                self.entries.remove(&evicted);
+            }
+        }
+    }
 }
 
 struct StagedBlock {
@@ -181,20 +467,59 @@ struct ProofQueryValue<'a> {
     proof: &'a thunderbolt_ledger::EntryMerkleProofV2,
 }
 
-impl<V> ThunderboltLedgerAbci<V>
+struct BoundedJsonWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl BoundedJsonWriter {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            limit,
+            exceeded: false,
+        }
+    }
+}
+
+impl Write for BoundedJsonWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let Some(next_len) = self.bytes.len().checked_add(bytes.len()) else {
+            self.exceeded = true;
+            return Err(io::Error::other("bounded JSON response length overflows"));
+        };
+        if next_len > self.limit {
+            self.exceeded = true;
+            return Err(io::Error::other("bounded JSON response exceeds limit"));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<V, F> ThunderboltLedgerAbci<V, F>
 where
-    V: LedgerApplicationVerifierV2 + Send + Sync + 'static,
+    V: LedgerApplicationVerifierV2 + StaticAdmissionVerifierV2 + Send + Sync + 'static,
+    F: FatalAbciHandler,
 {
     /// Constructs an ABCI adapter over an already opened, chain-scoped Ledger.
-    pub fn new(application: LedgerApplication, verifier: V) -> Result<Self> {
+    pub fn new(application: LedgerApplication, verifier: V, fatal_handler: F) -> Result<Self> {
         if application.application_version() != APPLICATION_VERSION || APPLICATION_VERSION != APPLICATION_VERSION_V2 {
             return Err(AbciAdapterError::InvalidRequest(
                 "Ledger and ABCI application versions differ",
             ));
         }
+        let consensus_profile =
+            ConsensusProfileV2::from_verifier(application.ledger_chain_id(), application.protocol_limits(), &verifier)?;
         let status = application.status()?;
         if status.application_version() != APPLICATION_VERSION
             || status.ledger_chain_id() != application.ledger_chain_id()
+            || application.consensus_profile_digest() != Some(consensus_profile.as_bytes())
         {
             return Err(AbciAdapterError::InvalidRequest(
                 "durable Ledger identity differs from the ABCI adapter",
@@ -204,7 +529,14 @@ where
             inner: Arc::new(Shared {
                 application,
                 verifier,
+                fatal_handler,
+                consensus_profile,
                 runtime: Mutex::new(RuntimeState::default()),
+                static_rejections: Mutex::new(StaticRejectionCache::default()),
+                mempool_admissions: Mutex::new(MempoolAdmissionCache::default()),
+                prepare_cursor: Mutex::new(0),
+                #[cfg(test)]
+                fail_after_commit: AtomicBool::new(false),
             }),
         })
     }
@@ -217,6 +549,12 @@ where
     /// Returns the fixed header application version.
     pub const fn application_version(&self) -> u64 {
         APPLICATION_VERSION
+    }
+
+    /// Returns the mechanically derived profile required by genesis and the
+    /// durable application identity.
+    pub fn consensus_profile(&self) -> &ConsensusProfileV2 {
+        &self.inner.consensus_profile
     }
 
     /// Builds a checked `Info` response from the durable head only.
@@ -249,9 +587,14 @@ where
                 "Thunderbolt Ledger v2 must start at height one",
             ));
         }
-        if !request.app_state_bytes.is_empty() {
+        if request.validators.len() > MAX_COMMIT_VOTES {
             return Err(AbciAdapterError::InvalidRequest(
-                "Thunderbolt InitChain app state must be empty",
+                "genesis validator count exceeds bound",
+            ));
+        }
+        if request.app_state_bytes.as_ref() != self.inner.consensus_profile.genesis_app_state_bytes()?.as_slice() {
+            return Err(AbciAdapterError::InvalidRequest(
+                "Thunderbolt InitChain consensus profile differs",
             ));
         }
         if let Some(parameters) = request.consensus_params.as_ref() {
@@ -288,9 +631,13 @@ where
     /// the full ordered block.
     pub fn try_check_tx(&self, request: RequestCheckTx) -> Result<ResponseCheckTx> {
         self.ensure_available()?;
-        let _ = CheckTxType::try_from(request.r#type)
+        let check_type = CheckTxType::try_from(request.r#type)
             .map_err(|_| AbciAdapterError::InvalidRequest("CheckTx type is unknown"))?;
-        let proposal = self.decode_transaction(request.tx.as_ref())?;
+        let purpose = match check_type {
+            CheckTxType::New => AdmissionPurpose::MempoolNew,
+            CheckTxType::Recheck => AdmissionPurpose::MempoolRecheck,
+        };
+        let proposal = self.admit_transaction(request.tx.as_ref(), purpose)?;
         let data = proposal.body().entry_hash()?.as_bytes().to_vec().into();
         let gas = i64::try_from(request.tx.len())
             .map_err(|_| AbciAdapterError::InvalidTransaction("transaction size exceeds i64"))?;
@@ -328,7 +675,36 @@ where
         )?;
         let mut selected = Vec::new();
         let mut selected_bytes = 0_usize;
-        for transaction in request.txs {
+        let mut preview_work = 0_usize;
+        let mut scanned_transactions = 0_usize;
+        let mut scanned_bytes = 0_usize;
+        let transaction_count = request.txs.len();
+        let mut cursor = self
+            .inner
+            .prepare_cursor
+            .lock()
+            .map_err(|_| AbciAdapterError::LockPoisoned)?;
+        if *cursor >= transaction_count {
+            *cursor = 0;
+        }
+        let start = *cursor;
+        for (index, transaction) in request.txs.into_iter().enumerate().skip(start) {
+            if scanned_transactions == MAX_PREPARE_SCAN_TRANSACTIONS {
+                break;
+            }
+            let Some(next_scanned_bytes) = scanned_bytes.checked_add(transaction.len()) else {
+                break;
+            };
+            if next_scanned_bytes > MAX_PREPARE_SCAN_BYTES {
+                break;
+            }
+            scanned_transactions = scanned_transactions.saturating_add(1);
+            scanned_bytes = next_scanned_bytes;
+            *cursor = if index.saturating_add(1) >= transaction_count {
+                0
+            } else {
+                index.saturating_add(1)
+            };
             if transaction.is_empty() || transaction.len() > MAX_TRANSACTION_BYTES {
                 continue;
             }
@@ -336,14 +712,51 @@ where
                 break;
             };
             if next_total > budget || next_total > MAX_BLOCK_TRANSACTION_BYTES {
-                break;
+                continue;
             }
-            let Ok(proposal) = self.decode_transaction(transaction.as_ref()) else {
+            let Ok(proposal) = self.admit_transaction(transaction.as_ref(), AdmissionPurpose::Prepare) else {
                 continue;
             };
-            if pending.push(proposal).is_err() {
+            let event = ChannelEventV2::from_canonical_bytes(proposal.body().event().as_bytes())
+                .map_err(|_| AbciAdapterError::InvalidTransaction("transaction event cannot be decoded"))?;
+            if matches!(
+                event,
+                ChannelEventV2::Invoice(ref invoice) if invoice.expires_at_ms <= block_time_ms
+            ) {
                 continue;
             }
+            let mut candidate = pending.clone();
+            if candidate.push(proposal).is_err() {
+                continue;
+            }
+            let candidate_work = candidate.proposals().len();
+            let Some(next_work) = preview_work.checked_add(candidate_work) else {
+                break;
+            };
+            if next_work > MAX_PREPARE_PREVIEW_WORK {
+                break;
+            }
+            let Ok(input) = BlockInputV2::new(
+                self.ledger_chain_id().clone(),
+                height,
+                block_time_ms,
+                status.last_app_hash().clone(),
+                candidate.proposals().to_vec(),
+            ) else {
+                continue;
+            };
+            preview_work = next_work;
+            match self.inner.application.preview_block(input, &self.inner.verifier) {
+                Ok(_) => {}
+                Err(error) => {
+                    let error = AbciAdapterError::Application(error);
+                    if error.is_fatal_runtime() {
+                        return Err(error);
+                    }
+                    continue;
+                }
+            }
+            pending = candidate;
             selected_bytes = next_total;
             selected.push(transaction);
             if selected.len() == MAX_BLOCK_ENTRIES {
@@ -416,15 +829,18 @@ where
         Ok(response)
     }
 
-    /// Atomically persists the currently staged block. With no staged block,
-    /// this is an idempotent no-op suitable for a duplicated `Commit` call.
+    /// Atomically persists the currently staged block.
+    ///
+    /// Any missing-stage call fails closed: CometBFT calls `Commit` exactly once
+    /// after `FinalizeBlock`, and crash recovery must replay `FinalizeBlock`
+    /// before attempting the commit again.
     pub fn try_commit(&self) -> Result<ResponseCommit> {
         let mut runtime = self.lock_runtime()?;
         if runtime.faulted {
             return Err(AbciAdapterError::Faulted);
         }
         let Some(staged) = runtime.staged.take() else {
-            return Ok(ResponseCommit { retain_height: 0 });
+            return Err(AbciAdapterError::MissingStagedBlock);
         };
         let expected_hash = staged.prepared.outcome().block().app_hash().clone();
         match self
@@ -432,7 +848,14 @@ where
             .application
             .commit_prepared_block(staged.prepared, &self.inner.verifier)
         {
-            Ok(outcome) if outcome.block().app_hash() == &expected_hash => Ok(ResponseCommit { retain_height: 0 }),
+            Ok(outcome) if outcome.block().app_hash() == &expected_hash => {
+                #[cfg(test)]
+                if self.inner.fail_after_commit.swap(false, Ordering::SeqCst) {
+                    runtime.faulted = true;
+                    return Err(AbciAdapterError::PostCommitAmbiguous);
+                }
+                Ok(ResponseCommit { retain_height: 0 })
+            }
             Ok(_) => {
                 runtime.faulted = true;
                 Err(AbciAdapterError::Application(
@@ -455,9 +878,9 @@ where
         if request.height < 0 {
             return Err(AbciAdapterError::InvalidRequest("query height is negative"));
         }
-        let status = self.inner.application.status()?;
         let (value, response_height) = match request.path.as_str() {
             QUERY_STATUS_PATH => {
+                let status = self.inner.application.status()?;
                 require_empty_data(request.data.as_ref())?;
                 if request.prove {
                     return Err(AbciAdapterError::InvalidRequest(
@@ -495,19 +918,16 @@ where
                         "channel query does not produce CometBFT ProofOps",
                     ));
                 }
-                require_current_query_height(request.height, status.last_height())?;
                 let context = ChannelContextIdV2::from_bytes(parse_array::<32>(request.data.as_ref(), "channel")?)?;
-                let snapshot = self
-                    .inner
-                    .application
-                    .channel_by_context(&context)?
-                    .ok_or(AbciAdapterError::NotFound("channel"))?;
+                let read = self.inner.application.channel_at_head(&context)?;
+                require_current_query_height(request.height, read.status().last_height())?;
+                let snapshot = read.channel().ok_or(AbciAdapterError::NotFound("channel"))?;
                 let value = ChannelQueryValue {
-                    committed_application_height: status.last_height(),
-                    committed_application_hash: status.last_app_hash(),
-                    snapshot: &snapshot,
+                    committed_application_height: read.status().last_height(),
+                    committed_application_hash: read.status().last_app_hash(),
+                    snapshot,
                 };
-                (encode_query_value(&value)?, status.last_height())
+                (encode_query_value(&value)?, read.status().last_height())
             }
             QUERY_REQUEST_PATH => {
                 if request.prove {
@@ -515,13 +935,13 @@ where
                         "request query does not produce CometBFT ProofOps",
                     ));
                 }
-                require_current_query_height(request.height, status.last_height())?;
                 let (channel, participant, request_digest) = parse_request_key(request.data.as_ref())?;
-                let stored = self
+                let read = self
                     .inner
                     .application
-                    .request(&channel, &participant, &request_digest)?
-                    .ok_or(AbciAdapterError::NotFound("request mapping"))?;
+                    .request_at_head(&channel, &participant, &request_digest)?;
+                require_current_query_height(request.height, read.status().last_height())?;
+                let stored = read.request().ok_or(AbciAdapterError::NotFound("request mapping"))?;
                 let value = RequestQueryValue {
                     channel_context_id: stored.channel_context_id(),
                     participant_id: stored.participant_id(),
@@ -530,9 +950,14 @@ where
                     first_height: stored.first_height(),
                     first_block_index: stored.first_block_index(),
                 };
-                (encode_query_value(&value)?, status.last_height())
+                (encode_query_value(&value)?, read.status().last_height())
             }
             QUERY_PROOF_PATH => {
+                if request.prove {
+                    return Err(AbciAdapterError::InvalidRequest(
+                        "execution proof is not a CometBFT ProofOps capability",
+                    ));
+                }
                 let (height, index) = parse_proof_key(request.data.as_ref())?;
                 require_exact_query_height(request.height, height)?;
                 let block = self
@@ -568,7 +993,7 @@ where
         })
     }
 
-    fn decode_transaction(&self, bytes: &[u8]) -> Result<SignedProposalV2> {
+    fn admit_transaction(&self, bytes: &[u8], purpose: AdmissionPurpose) -> Result<SignedProposalV2> {
         if bytes.is_empty() || bytes.len() > MAX_TRANSACTION_BYTES {
             return Err(AbciAdapterError::InvalidTransaction(
                 "transaction byte length is outside the bound",
@@ -590,18 +1015,56 @@ where
         let participant = body
             .participant_id()
             .map_err(|_| AbciAdapterError::InvalidTransaction("participant identity is invalid"))?;
+        let entry_hash = body
+            .entry_hash()
+            .map_err(|_| AbciAdapterError::InvalidTransaction("entry hash is invalid"))?;
+        let key = AdmissionKey {
+            channel: *channel.as_bytes(),
+            participant: *participant.as_bytes(),
+            request: *body.request_id().digest().as_bytes(),
+            entry: *entry_hash.as_bytes(),
+        };
+        if self
+            .inner
+            .static_rejections
+            .lock()
+            .map_err(|_| AbciAdapterError::LockPoisoned)?
+            .contains(&key)
+        {
+            return Err(AbciAdapterError::InvalidTransaction(
+                "logical request is in the static rejection cache",
+            ));
+        }
         if let Some(existing) = self
             .inner
             .application
             .request(&channel, &participant, body.request_id().digest())?
         {
-            let entry_hash = body
-                .entry_hash()
-                .map_err(|_| AbciAdapterError::InvalidTransaction("entry hash is invalid"))?;
             if existing.entry_hash() != &entry_hash {
                 return Err(AbciAdapterError::InvalidTransaction(
                     "actor request conflicts with durable mapping",
                 ));
+            }
+            if purpose != AdmissionPurpose::Consensus {
+                return Err(AbciAdapterError::InvalidTransaction(
+                    "actor request is already durably executed",
+                ));
+            }
+        }
+        let raw_digest: [u8; 32] = Sha256::digest(bytes).into();
+        if matches!(purpose, AdmissionPurpose::MempoolNew | AdmissionPurpose::MempoolRecheck) {
+            let cache = self
+                .inner
+                .mempool_admissions
+                .lock()
+                .map_err(|_| AbciAdapterError::LockPoisoned)?;
+            if let Some(existing_digest) = cache.get(&key) {
+                let rechecking_same = purpose == AdmissionPurpose::MempoolRecheck && existing_digest == &raw_digest;
+                if !rechecking_same {
+                    return Err(AbciAdapterError::InvalidTransaction(
+                        "logical request is already admitted to the mempool",
+                    ));
+                }
             }
         }
         let proposal = SignedProposalV2::new(envelope.body, envelope.signature)
@@ -613,7 +1076,55 @@ where
                 "transaction JSON is not canonical",
             ));
         }
+        let event = ChannelEventV2::from_canonical_bytes(proposal.body().event().as_bytes())
+            .map_err(|_| AbciAdapterError::InvalidTransaction("transaction event cannot be decoded"))?;
+        if self
+            .inner
+            .verifier
+            .verify_static(StaticAdmissionRequestV2 {
+                proposal: &proposal,
+                event: &event,
+            })
+            .is_err()
+        {
+            self.inner
+                .static_rejections
+                .lock()
+                .map_err(|_| AbciAdapterError::LockPoisoned)?
+                .insert(key);
+            return Err(AbciAdapterError::InvalidTransaction(
+                "transaction fails static proof admission",
+            ));
+        }
+        if matches!(purpose, AdmissionPurpose::MempoolNew | AdmissionPurpose::MempoolRecheck) {
+            self.preview_mempool_candidate(proposal.clone())?;
+            self.inner
+                .mempool_admissions
+                .lock()
+                .map_err(|_| AbciAdapterError::LockPoisoned)?
+                .insert(key, raw_digest);
+        }
         Ok(proposal)
+    }
+
+    fn preview_mempool_candidate(&self, proposal: SignedProposalV2) -> Result<()> {
+        match self
+            .inner
+            .application
+            .preview_next_block_for_admission(vec![proposal], &self.inner.verifier)
+        {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                let error = AbciAdapterError::Application(error);
+                if error.is_fatal_runtime() {
+                    Err(error)
+                } else {
+                    Err(AbciAdapterError::InvalidTransaction(
+                        "transaction is invalid against the current durable head",
+                    ))
+                }
+            }
+        }
     }
 
     fn block_input(
@@ -626,7 +1137,7 @@ where
         let (height, block_time_ms) = height_and_time(height, time)?;
         let proposals = transactions
             .iter()
-            .map(|transaction| self.decode_transaction(transaction.as_ref()))
+            .map(|transaction| self.admit_transaction(transaction.as_ref(), AdmissionPurpose::Consensus))
             .collect::<Result<Vec<_>>>()?;
         let status = self.inner.application.status()?;
         validate_next_or_replay_head(&status, height, block_time_ms)?;
@@ -664,6 +1175,19 @@ where
         if let Ok(mut runtime) = self.inner.runtime.lock() {
             runtime.faulted = true;
         }
+    }
+
+    fn terminate(&self, stage: FatalAbciStage, error: &AbciAdapterError) -> ! {
+        self.mark_faulted();
+        self.inner.fatal_handler.terminate(FatalAbciFailure {
+            stage,
+            code: error.public_log(),
+        })
+    }
+
+    #[cfg(test)]
+    fn fail_after_next_commit_for_test(&self) {
+        self.inner.fail_after_commit.store(true, Ordering::SeqCst);
     }
 }
 
@@ -712,40 +1236,23 @@ fn validate_prepare_shape(request: &RequestPrepareProposal) -> Result<(u64, u64)
     Ok(pair)
 }
 
-impl<V> Application for ThunderboltLedgerAbci<V>
+impl<V, F> Application for ThunderboltLedgerAbci<V, F>
 where
-    V: LedgerApplicationVerifierV2 + Send + Sync + 'static,
+    V: LedgerApplicationVerifierV2 + StaticAdmissionVerifierV2 + Send + Sync + 'static,
+    F: FatalAbciHandler,
 {
     fn info(&self, request: RequestInfo) -> ResponseInfo {
-        self.try_info(request).unwrap_or_else(|_| {
-            self.mark_faulted();
-            ResponseInfo {
-                data: APPLICATION_NAME.to_owned(),
-                version: env!("CARGO_PKG_VERSION").to_owned(),
-                app_version: APPLICATION_VERSION,
-                last_block_height: 0,
-                last_block_app_hash: Vec::new().into(),
-            }
-        })
+        match self.try_info(request) {
+            Ok(response) => response,
+            Err(error) => self.terminate(FatalAbciStage::Info, &error),
+        }
     }
 
     fn init_chain(&self, request: RequestInitChain) -> ResponseInitChain {
-        self.try_init_chain(request).unwrap_or_else(|_| {
-            self.mark_faulted();
-            ResponseInitChain {
-                consensus_params: Some(ConsensusParams {
-                    version: Some(VersionParams {
-                        app: APPLICATION_VERSION,
-                    }),
-                    abci: Some(AbciParams {
-                        vote_extensions_enable_height: 0,
-                    }),
-                    ..ConsensusParams::default()
-                }),
-                validators: Vec::new(),
-                app_hash: Vec::new().into(),
-            }
-        })
+        match self.try_init_chain(request) {
+            Ok(response) => response,
+            Err(error) => self.terminate(FatalAbciStage::InitChain, &error),
+        }
     }
 
     fn query(&self, request: RequestQuery) -> ResponseQuery {
@@ -754,42 +1261,51 @@ where
         } else {
             Bytes::new()
         };
-        self.try_query(request)
-            .unwrap_or_else(|error| query_error_response(key, &error))
+        match self.try_query(request) {
+            Ok(response) => response,
+            Err(error) if error.is_fatal_runtime() => self.terminate(FatalAbciStage::Query, &error),
+            Err(error) => query_error_response(key, &error),
+        }
     }
 
     fn check_tx(&self, request: RequestCheckTx) -> ResponseCheckTx {
-        self.try_check_tx(request)
-            .unwrap_or_else(|error| check_error_response(&error))
+        match self.try_check_tx(request) {
+            Ok(response) => response,
+            Err(error) if error.is_fatal_runtime() => self.terminate(FatalAbciStage::CheckTx, &error),
+            Err(error) => check_error_response(&error),
+        }
     }
 
     fn prepare_proposal(&self, request: RequestPrepareProposal) -> ResponsePrepareProposal {
-        self.try_prepare_proposal(request)
-            .unwrap_or(ResponsePrepareProposal { txs: Vec::new() })
+        match self.try_prepare_proposal(request) {
+            Ok(response) => response,
+            Err(error) if error.is_fatal_runtime() => self.terminate(FatalAbciStage::PrepareProposal, &error),
+            Err(_) => ResponsePrepareProposal { txs: Vec::new() },
+        }
     }
 
     fn process_proposal(&self, request: RequestProcessProposal) -> ResponseProcessProposal {
-        self.try_process_proposal(request).unwrap_or(ResponseProcessProposal {
-            status: response_process_proposal::ProposalStatus::Reject as i32,
-        })
+        match self.try_process_proposal(request) {
+            Ok(response) => response,
+            Err(error) if error.is_fatal_runtime() => self.terminate(FatalAbciStage::ProcessProposal, &error),
+            Err(_) => ResponseProcessProposal {
+                status: response_process_proposal::ProposalStatus::Reject as i32,
+            },
+        }
     }
 
     fn finalize_block(&self, request: RequestFinalizeBlock) -> ResponseFinalizeBlock {
-        let transaction_count = request.txs.len();
         match self.try_finalize_block(request) {
             Ok(response) => response,
-            Err(error) => {
-                self.mark_faulted();
-                failed_finalize_response(transaction_count, &error)
-            }
+            Err(error) => self.terminate(FatalAbciStage::FinalizeBlock, &error),
         }
     }
 
     fn commit(&self) -> ResponseCommit {
-        self.try_commit().unwrap_or_else(|_| {
-            self.mark_faulted();
-            ResponseCommit { retain_height: 0 }
-        })
+        match self.try_commit() {
+            Ok(response) => response,
+            Err(error) => self.terminate(FatalAbciStage::Commit, &error),
+        }
     }
 
     fn list_snapshots(&self) -> ResponseListSnapshots {
@@ -822,10 +1338,13 @@ where
         }
     }
 
-    fn verify_vote_extension(&self, _request: RequestVerifyVoteExtension) -> ResponseVerifyVoteExtension {
-        ResponseVerifyVoteExtension {
-            status: response_verify_vote_extension::VerifyStatus::Reject as i32,
-        }
+    fn verify_vote_extension(&self, request: RequestVerifyVoteExtension) -> ResponseVerifyVoteExtension {
+        let status = if request.vote_extension.is_empty() {
+            response_verify_vote_extension::VerifyStatus::Accept
+        } else {
+            response_verify_vote_extension::VerifyStatus::Reject
+        };
+        ResponseVerifyVoteExtension { status: status as i32 }
     }
 }
 
@@ -939,29 +1458,6 @@ fn successful_finalize_response(prepared: &PreparedBlockV2) -> ResponseFinalizeB
     }
 }
 
-fn failed_finalize_response(transaction_count: usize, error: &AbciAdapterError) -> ResponseFinalizeBlock {
-    let result_count = transaction_count.min(MAX_BLOCK_ENTRIES);
-    let tx_results = (0..result_count)
-        .map(|_| ExecTxResult {
-            code: error.response_code(),
-            data: Vec::new().into(),
-            log: error.public_log().to_owned(),
-            info: String::new(),
-            gas_wanted: 0,
-            gas_used: 0,
-            events: Vec::new(),
-            codespace: ABCI_CODESPACE.to_owned(),
-        })
-        .collect();
-    ResponseFinalizeBlock {
-        events: Vec::new(),
-        tx_results,
-        validator_updates: Vec::new(),
-        consensus_param_updates: None,
-        app_hash: Vec::new().into(),
-    }
-}
-
 fn check_error_response(error: &AbciAdapterError) -> ResponseCheckTx {
     ResponseCheckTx {
         code: error.response_code(),
@@ -990,11 +1486,17 @@ fn query_error_response(key: Bytes, error: &AbciAdapterError) -> ResponseQuery {
 }
 
 fn encode_query_value<T: Serialize>(value: &T) -> Result<Vec<u8>> {
-    let encoded = serde_json::to_vec(value)?;
-    if encoded.len() > MAX_QUERY_RESPONSE_BYTES {
+    let mut writer = BoundedJsonWriter::new(MAX_QUERY_RESPONSE_BYTES);
+    if let Err(error) = serde_json::to_writer(&mut writer, value) {
+        if writer.exceeded {
+            return Err(AbciAdapterError::InvalidRequest("query response exceeds bound"));
+        }
+        return Err(error.into());
+    }
+    if writer.exceeded {
         return Err(AbciAdapterError::InvalidRequest("query response exceeds bound"));
     }
-    Ok(encoded)
+    Ok(writer.bytes)
 }
 
 fn require_empty_data(data: &[u8]) -> Result<()> {

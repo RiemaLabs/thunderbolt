@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    primitives::digest_request, Result, RpcCodecError, RpcRequestDigestV2, RpcRequestV2, RpcResponseV2,
-    LEDGER_RPC_VERSION_V2,
+    primitives::digest_request, CorrelatedRpcResponseV2, Result, RpcCodecError, RpcRequestDigestV2, RpcRequestV2,
+    RpcResponseV2, LEDGER_RPC_VERSION_V2,
 };
 
 /// Maximum canonical request body accepted by the codec.
@@ -27,11 +27,11 @@ struct RequestEnvelopeOwned {
 #[derive(Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 enum RequestWire {
-    SubmitProposal(crate::SubmitProposalRequestV2),
-    ChannelStatus(crate::ChannelStatusRequestV2),
-    RequestStatus(crate::RequestStatusRequestV2),
-    History(crate::HistoryRequestV2),
-    RollbackFloorCas(crate::RollbackFloorCasRequestV2),
+    SubmitProposal(serde_json::Value),
+    ChannelStatus(serde_json::Value),
+    RequestStatus(serde_json::Value),
+    History(serde_json::Value),
+    RollbackFloorCas(serde_json::Value),
 }
 
 #[derive(Serialize)]
@@ -51,34 +51,54 @@ struct ResponseEnvelopeOwned {
 #[derive(Deserialize)]
 #[serde(tag = "method", content = "result", rename_all = "snake_case")]
 enum ResponseWire {
-    SubmitProposal(crate::SubmitProposalResponseV2),
-    ChannelStatus(Box<crate::ChannelStatusResponseV2>),
-    RequestStatus(Box<crate::RequestStatusResponseV2>),
-    History(crate::HistoryResponseV2),
-    RollbackFloorCas(crate::RollbackFloorCasResponseV2),
+    SubmitProposal(serde_json::Value),
+    ChannelStatus(serde_json::Value),
+    RequestStatus(serde_json::Value),
+    History(serde_json::Value),
+    RollbackFloorCas(serde_json::Value),
 }
 
-impl From<RequestWire> for RpcRequestV2 {
-    fn from(wire: RequestWire) -> Self {
-        match wire {
-            RequestWire::SubmitProposal(request) => Self::SubmitProposal(request),
-            RequestWire::ChannelStatus(request) => Self::ChannelStatus(request),
-            RequestWire::RequestStatus(request) => Self::RequestStatus(request),
-            RequestWire::History(request) => Self::History(request),
-            RequestWire::RollbackFloorCas(request) => Self::RollbackFloorCas(request),
-        }
+impl TryFrom<RequestWire> for RpcRequestV2 {
+    type Error = RpcCodecError;
+
+    fn try_from(wire: RequestWire) -> Result<Self> {
+        Ok(match wire {
+            RequestWire::SubmitProposal(value) => {
+                Self::SubmitProposal(crate::request::decode_submit_request_value(value)?)
+            }
+            RequestWire::ChannelStatus(value) => {
+                Self::ChannelStatus(crate::request::decode_channel_status_request_value(value)?)
+            }
+            RequestWire::RequestStatus(value) => {
+                Self::RequestStatus(crate::request::decode_request_status_request_value(value)?)
+            }
+            RequestWire::History(value) => Self::History(crate::request::decode_history_request_value(value)?),
+            RequestWire::RollbackFloorCas(value) => {
+                Self::RollbackFloorCas(crate::floor_codec::decode_floor_request_value(value)?)
+            }
+        })
     }
 }
 
-impl From<ResponseWire> for RpcResponseV2 {
-    fn from(wire: ResponseWire) -> Self {
-        match wire {
-            ResponseWire::SubmitProposal(response) => Self::SubmitProposal(response),
-            ResponseWire::ChannelStatus(response) => Self::ChannelStatus(response),
-            ResponseWire::RequestStatus(response) => Self::RequestStatus(response),
-            ResponseWire::History(response) => Self::History(response),
-            ResponseWire::RollbackFloorCas(response) => Self::RollbackFloorCas(response),
-        }
+impl TryFrom<ResponseWire> for RpcResponseV2 {
+    type Error = RpcCodecError;
+
+    fn try_from(wire: ResponseWire) -> Result<Self> {
+        Ok(match wire {
+            ResponseWire::SubmitProposal(value) => {
+                Self::SubmitProposal(crate::response::decode_submit_response_value(value)?)
+            }
+            ResponseWire::ChannelStatus(value) => {
+                Self::ChannelStatus(Box::new(crate::response::decode_channel_status_response_value(value)?))
+            }
+            ResponseWire::RequestStatus(value) => {
+                Self::RequestStatus(Box::new(crate::response::decode_request_status_response_value(value)?))
+            }
+            ResponseWire::History(value) => Self::History(crate::response::decode_history_response_value(value)?),
+            ResponseWire::RollbackFloorCas(value) => {
+                Self::RollbackFloorCas(crate::floor_codec::decode_floor_response_value(value)?)
+            }
+        })
     }
 }
 
@@ -106,7 +126,7 @@ impl RpcRequestV2 {
                 found: envelope.api_version,
             });
         }
-        let request = RpcRequestV2::from(envelope.request);
+        let request = RpcRequestV2::try_from(envelope.request)?;
         request.validate()?;
         if request.to_canonical_bytes()? != bytes {
             return Err(RpcCodecError::NonCanonical);
@@ -133,8 +153,21 @@ impl RpcResponseV2 {
         Ok(bytes)
     }
 
-    /// Decodes a bounded response and requires exact canonical re-encoding.
-    pub fn from_canonical_bytes(bytes: impl AsRef<[u8]>) -> Result<Self> {
+    /// Decodes a bounded response and binds it to the exact correlated request.
+    ///
+    /// There is intentionally no public raw response decoder. Successful
+    /// decoding always performs method and request-key correlation before
+    /// returning a capability.
+    pub fn from_canonical_bytes_for(
+        bytes: impl AsRef<[u8]>,
+        request: &RpcRequestV2,
+    ) -> Result<CorrelatedRpcResponseV2> {
+        let response = Self::decode_canonical_bytes(bytes)?;
+        response.validate_for(request)?;
+        Ok(CorrelatedRpcResponseV2::new(response))
+    }
+
+    fn decode_canonical_bytes(bytes: impl AsRef<[u8]>) -> Result<Self> {
         let bytes = bytes.as_ref();
         enforce_bound("response", bytes.len(), MAX_RPC_RESPONSE_BYTES)?;
         let envelope: ResponseEnvelopeOwned = serde_json::from_slice(bytes).map_err(RpcCodecError::InvalidEnvelope)?;
@@ -143,7 +176,7 @@ impl RpcResponseV2 {
                 found: envelope.api_version,
             });
         }
-        let response = RpcResponseV2::from(envelope.response);
+        let response = RpcResponseV2::try_from(envelope.response)?;
         response.validate()?;
         if response.to_canonical_bytes()? != bytes {
             return Err(RpcCodecError::NonCanonical);

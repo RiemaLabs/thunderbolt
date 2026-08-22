@@ -1,0 +1,28 @@
+[package]
+name = "thunderbolt-ownership"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Paper-exact Holder ownership proof for Bitcoin Thunderbolt"
+keywords = ["bitcoin", "zero-knowledge", "schnorr", "protocol"]
+categories = ["cryptography", "cryptography::cryptocurrencies"]
+
+[lints]
+workspace = true
+
+[dependencies]
+bitcoin = "0.32.5"
+getrandom = "0.3.4"
+secp = { version = "0.5.0", features = ["secp256k1"] }
+sha2 = "0.10.9"
+thiserror = "2.0.16"
+thunderbolt-ledger = { path = "../thunderbolt-ledger" }
+thunderbolt-protocol = { path = "../thunderbolt-protocol" }
+thunderbolt-wire = { path = "../thunderbolt-wire" }
+zeroize = "1.8.2"
+
+[dev-dependencies]
+hex = "0.4"
+proptest = "1.7.0"

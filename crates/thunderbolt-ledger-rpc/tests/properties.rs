@@ -4,8 +4,8 @@ use proptest::prelude::*;
 use thunderbolt_ledger::{AppHashV2, ChannelContextIdV2, LedgerChainIdV2, ParticipantIdV2, RequestDigestV2};
 use thunderbolt_ledger_rpc::{
     AmbiguityTokenV2, ChannelStatusRequestV2, ChannelStatusResponseV2, FinalityStatusV2, HistoryCursorV2,
-    RequestStatusRequestV2, RollbackFloorCasResponseV2, RollbackFloorCasStatusV2, RpcRequestV2, RpcResponseV2,
-    SnapshotBytesV2,
+    HistoryPageLimitV2, HistoryRequestV2, RequestStatusRequestV2, RollbackFloorCasResponseV2, RollbackFloorCasStatusV2,
+    RpcRequestV2, RpcResponseV2, SnapshotBytesV2,
 };
 
 fn fail(error: impl std::fmt::Display) -> TestCaseError {
@@ -72,9 +72,13 @@ proptest! {
             index,
             AppHashV2::from_bytes(previous).map_err(fail)?,
         ).map_err(fail)?;
-        let encoded = serde_json::to_vec(&cursor).map_err(fail)?;
-        let decoded: HistoryCursorV2 = serde_json::from_slice(&encoded).map_err(fail)?;
-        prop_assert_eq!(decoded, cursor);
+        let request = RpcRequestV2::History(HistoryRequestV2::new(
+            ChannelContextIdV2::from_bytes([0x81; 32]).map_err(fail)?,
+            cursor,
+            HistoryPageLimitV2::new(1).map_err(fail)?,
+        ));
+        let encoded = request.to_canonical_bytes().map_err(fail)?;
+        prop_assert_eq!(RpcRequestV2::from_canonical_bytes(encoded).map_err(fail)?, request);
     }
 
     #[test]
@@ -89,7 +93,11 @@ proptest! {
             ).map_err(fail)?,
         );
         let encoded = response.to_canonical_bytes().map_err(fail)?;
-        prop_assert_eq!(RpcResponseV2::from_canonical_bytes(&encoded).map_err(fail)?, response);
+        let rpc_request = RpcRequestV2::RollbackFloorCas(
+            thunderbolt_ledger_rpc::RollbackFloorCasRequestV2::new(request),
+        );
+        let correlated = RpcResponseV2::from_canonical_bytes_for(&encoded, &rpc_request).map_err(fail)?;
+        prop_assert_eq!(correlated.response(), &response);
     }
 
     #[test]
@@ -119,6 +127,10 @@ proptest! {
         snapshot_bytes[index] ^= 1_u8 << bit;
         value["response"]["result"]["snapshot_bytes"] = serde_json::Value::String(hex::encode(snapshot_bytes));
         let tampered = serde_json::to_vec(&value).map_err(fail)?;
-        prop_assert!(RpcResponseV2::from_canonical_bytes(tampered).is_err());
+        prop_assert!(RpcResponseV2::from_canonical_bytes_for(
+            tampered,
+            &RpcRequestV2::ChannelStatus(query),
+        )
+        .is_err());
     }
 }

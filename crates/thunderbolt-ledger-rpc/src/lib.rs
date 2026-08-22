@@ -34,7 +34,9 @@ pub use bytes::{
 };
 pub use codec::{MAX_RPC_REQUEST_BYTES, MAX_RPC_RESPONSE_BYTES};
 pub use error::{Result, RpcCodecError};
-pub use floor_codec::{RollbackFloorCasRequestV2, RollbackFloorCasResponseV2, RollbackFloorCasStatusV2};
+pub use floor_codec::{
+    RollbackFloorCasRequestV2, RollbackFloorCasResponseV2, RollbackFloorCasStatusV2, MAX_FLOOR_CAS_CANONICAL_BYTES,
+};
 pub use primitives::{FinalityVerifierProfileIdV2, RpcRequestDigestV2, TransportAcceptanceIdV2};
 pub use request::{
     ChannelStatusRequestV2, HistoryCursorV2, HistoryPageLimitV2, HistoryRequestV2, RequestStatusRequestV2,
@@ -42,9 +44,9 @@ pub use request::{
 };
 pub use response::{
     AdmissionRejectionV2, AdmissionStatusV2, ChannelExecutionPositionV2, ChannelStatusResponseV2,
-    ExecutedMetadataRecordV2, ExternalFinalityVerifierV2, FinalityCapabilityError, FinalityStatusV2,
-    FinalizedEntryBundleV2, HistoryResponseV2, RequestLifecycleV2, RequestStatusResponseV2, RpcResponseV2,
-    SubmitProposalResponseV2, VerifiedFinalizedEntryV2,
+    CorrelatedRpcResponseV2, ExecutedMetadataRecordV2, ExternalFinalityVerifierV2, FinalityCapabilityError,
+    FinalityStatusV2, FinalizedEntryBundleV2, HistoryResponseV2, RequestLifecycleV2, RequestStatusResponseV2,
+    RpcResponseV2, SubmitProposalResponseV2, VerifiedFinalizedEntryV2,
 };
 
 /// Version of the transport-neutral Ledger control-plane contract.

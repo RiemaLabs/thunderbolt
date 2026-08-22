@@ -1,4 +1,4 @@
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use thunderbolt_ledger::{
     AppHashV2, ChannelContextIdV2, LedgerChainIdV2, ParticipantIdV2, RequestDigestV2, SignedProposalV2,
     MAX_BLOCK_ENTRIES,
@@ -22,16 +22,6 @@ pub struct SubmitProposalRequestV2 {
 struct SubmitProposalRequestInput {
     ledger_chain_id: LedgerChainIdV2,
     signed_proposal: SignedProposalV2,
-}
-
-impl<'de> Deserialize<'de> for SubmitProposalRequestV2 {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let input = SubmitProposalRequestInput::deserialize(deserializer)?;
-        Self::new(input.ledger_chain_id, input.signed_proposal).map_err(serde::de::Error::custom)
-    }
 }
 
 impl SubmitProposalRequestV2 {
@@ -67,9 +57,16 @@ impl SubmitProposalRequestV2 {
 }
 
 /// Request for the materialized state of one stable channel context.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChannelStatusRequestV2 {
+    ledger_chain_id: LedgerChainIdV2,
+    channel_context_id: ChannelContextIdV2,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChannelStatusRequestInput {
     ledger_chain_id: LedgerChainIdV2,
     channel_context_id: ChannelContextIdV2,
 }
@@ -96,9 +93,18 @@ impl ChannelStatusRequestV2 {
 }
 
 /// Complete authenticated key for looking up an idempotent actor request.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RequestStatusRequestV2 {
+    ledger_chain_id: LedgerChainIdV2,
+    channel_context_id: ChannelContextIdV2,
+    participant_id: ParticipantIdV2,
+    request_digest: RequestDigestV2,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestStatusRequestInput {
     ledger_chain_id: LedgerChainIdV2,
     channel_context_id: ChannelContextIdV2,
     participant_id: ParticipantIdV2,
@@ -162,19 +168,14 @@ struct HistoryCursorInput {
     previous_app_hash: AppHashV2,
 }
 
-impl<'de> Deserialize<'de> for HistoryCursorV2 {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let input = HistoryCursorInput::deserialize(deserializer)?;
-        Self::new(
-            input.ledger_chain_id,
-            input.next_height,
-            input.next_block_index,
-            input.previous_app_hash,
+impl HistoryCursorInput {
+    fn into_cursor(self) -> Result<HistoryCursorV2> {
+        HistoryCursorV2::new(
+            self.ledger_chain_id,
+            self.next_height,
+            self.next_block_index,
+            self.previous_app_hash,
         )
-        .map_err(serde::de::Error::custom)
     }
 }
 
@@ -230,16 +231,6 @@ impl HistoryCursorV2 {
 #[serde(transparent)]
 pub struct HistoryPageLimitV2(u16);
 
-impl<'de> Deserialize<'de> for HistoryPageLimitV2 {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = u16::deserialize(deserializer)?;
-        Self::new(value).map_err(serde::de::Error::custom)
-    }
-}
-
 impl HistoryPageLimitV2 {
     /// Constructs a positive page size under the protocol maximum.
     pub fn new(value: u16) -> Result<Self> {
@@ -256,12 +247,20 @@ impl HistoryPageLimitV2 {
 }
 
 /// Request for a bounded page of executed entry metadata.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryRequestV2 {
     channel_context_id: ChannelContextIdV2,
     cursor: HistoryCursorV2,
     limit: HistoryPageLimitV2,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HistoryRequestInput {
+    channel_context_id: ChannelContextIdV2,
+    cursor: HistoryCursorInput,
+    limit: u16,
 }
 
 impl HistoryRequestV2 {
@@ -293,6 +292,43 @@ impl HistoryRequestV2 {
     pub const fn limit(&self) -> HistoryPageLimitV2 {
         self.limit
     }
+}
+
+pub(crate) fn decode_submit_request_value(value: serde_json::Value) -> Result<SubmitProposalRequestV2> {
+    let input: SubmitProposalRequestInput = serde_json::from_value(value).map_err(RpcCodecError::InvalidEnvelope)?;
+    SubmitProposalRequestV2::new(input.ledger_chain_id, input.signed_proposal)
+}
+
+pub(crate) fn decode_channel_status_request_value(value: serde_json::Value) -> Result<ChannelStatusRequestV2> {
+    let input: ChannelStatusRequestInput = serde_json::from_value(value).map_err(RpcCodecError::InvalidEnvelope)?;
+    Ok(ChannelStatusRequestV2::new(
+        input.ledger_chain_id,
+        input.channel_context_id,
+    ))
+}
+
+pub(crate) fn decode_request_status_request_value(value: serde_json::Value) -> Result<RequestStatusRequestV2> {
+    let input: RequestStatusRequestInput = serde_json::from_value(value).map_err(RpcCodecError::InvalidEnvelope)?;
+    Ok(RequestStatusRequestV2::new(
+        input.ledger_chain_id,
+        input.channel_context_id,
+        input.participant_id,
+        input.request_digest,
+    ))
+}
+
+pub(crate) fn decode_history_request_value(value: serde_json::Value) -> Result<HistoryRequestV2> {
+    let input: HistoryRequestInput = serde_json::from_value(value).map_err(RpcCodecError::InvalidEnvelope)?;
+    Ok(HistoryRequestV2::new(
+        input.channel_context_id,
+        input.cursor.into_cursor()?,
+        HistoryPageLimitV2::new(input.limit)?,
+    ))
+}
+
+pub(crate) fn decode_history_cursor_value(value: serde_json::Value) -> Result<HistoryCursorV2> {
+    let input: HistoryCursorInput = serde_json::from_value(value).map_err(RpcCodecError::InvalidEnvelope)?;
+    input.into_cursor()
 }
 
 /// One method in the version-two transport-neutral Ledger control plane.

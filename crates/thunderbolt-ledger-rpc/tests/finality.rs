@@ -141,12 +141,13 @@ fn tampered_block_or_merkle_proof_fails_decode() -> Result<(), Box<dyn std::erro
     let mut value: serde_json::Value = serde_json::from_slice(&encoded)?;
     value["response"]["result"]["lifecycle"]["bundle"]["proof"]["leaf_index"] = 1.into();
     let tampered = serde_json::to_vec(&value)?;
-    assert!(thunderbolt_ledger_rpc::RpcResponseV2::from_canonical_bytes(tampered).is_err());
+    let rpc_request = thunderbolt_ledger_rpc::RpcRequestV2::RequestStatus(query.clone());
+    assert!(thunderbolt_ledger_rpc::RpcResponseV2::from_canonical_bytes_for(tampered, &rpc_request).is_err());
 
     let mut value: serde_json::Value = serde_json::from_slice(&encoded)?;
     value["response"]["result"]["lifecycle"]["bundle"]["block"]["app_hash"] =
         serde_json::Value::String("ff".repeat(32));
     let tampered = serde_json::to_vec(&value)?;
-    assert!(thunderbolt_ledger_rpc::RpcResponseV2::from_canonical_bytes(tampered).is_err());
+    assert!(thunderbolt_ledger_rpc::RpcResponseV2::from_canonical_bytes_for(tampered, &rpc_request).is_err());
     Ok(())
 }

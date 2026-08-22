@@ -9,6 +9,8 @@ use thunderbolt_ledger::{
 use thunderbolt_protocol::v2::StateHashV2;
 use thunderbolt_wire::ChannelBindingV2;
 
+use crate::bytes::{deserialize_opaque_consensus_receipt, deserialize_snapshot_bytes};
+use crate::primitives::FixedHex32Wire;
 use crate::{
     ChannelStatusRequestV2, HistoryCursorV2, HistoryRequestV2, OpaqueConsensusReceiptV2, RequestStatusRequestV2,
     Result, RpcCodecError, RpcRequestDigestV2, RpcRequestV2, SnapshotBytesV2, SubmitProposalRequestV2,
@@ -19,7 +21,7 @@ use crate::{
 ///
 /// Transport failures and timeouts are not rejection values and must remain
 /// errors in the concrete transport adapter.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AdmissionRejectionV2 {
     /// Proposal does not extend the committed per-channel predecessor.
@@ -32,8 +34,28 @@ pub enum AdmissionRejectionV2 {
     UnauthorizedTransition,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AdmissionRejectionWire {
+    InvalidPredecessor,
+    ConflictingRequest,
+    CapacityExceeded,
+    UnauthorizedTransition,
+}
+
+impl From<AdmissionRejectionWire> for AdmissionRejectionV2 {
+    fn from(wire: AdmissionRejectionWire) -> Self {
+        match wire {
+            AdmissionRejectionWire::InvalidPredecessor => Self::InvalidPredecessor,
+            AdmissionRejectionWire::ConflictingRequest => Self::ConflictingRequest,
+            AdmissionRejectionWire::CapacityExceeded => Self::CapacityExceeded,
+            AdmissionRejectionWire::UnauthorizedTransition => Self::UnauthorizedTransition,
+        }
+    }
+}
+
 /// Transport admission result. It never means executed or finalized.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum AdmissionStatusV2 {
     /// The transport admitted the proposal for possible consensus ordering.
@@ -50,14 +72,43 @@ pub enum AdmissionStatusV2 {
     },
 }
 
+#[derive(Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum AdmissionStatusWire {
+    Accepted { acceptance_id: FixedHex32Wire },
+    AlreadyKnown,
+    Rejected { reason: AdmissionRejectionWire },
+}
+
+impl AdmissionStatusWire {
+    fn into_status(self) -> Result<AdmissionStatusV2> {
+        Ok(match self {
+            Self::Accepted { acceptance_id } => AdmissionStatusV2::Accepted {
+                acceptance_id: TransportAcceptanceIdV2::from_bytes(acceptance_id.into_bytes())?,
+            },
+            Self::AlreadyKnown => AdmissionStatusV2::AlreadyKnown,
+            Self::Rejected { reason } => AdmissionStatusV2::Rejected { reason: reason.into() },
+        })
+    }
+}
+
 /// Response to one signed-proposal submission.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubmitProposalResponseV2 {
     proposal_digest: ProposalDigestV2,
     entry_hash: EntryHashV2,
     request_digest: RequestDigestV2,
     admission_status: AdmissionStatusV2,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SubmitProposalResponseInput {
+    proposal_digest: ProposalDigestV2,
+    entry_hash: EntryHashV2,
+    request_digest: RequestDigestV2,
+    admission_status: AdmissionStatusWire,
 }
 
 impl SubmitProposalResponseV2 {
@@ -104,14 +155,43 @@ impl SubmitProposalResponseV2 {
     }
 }
 
+pub(crate) fn decode_submit_response_value(value: serde_json::Value) -> Result<SubmitProposalResponseV2> {
+    let input: SubmitProposalResponseInput = serde_json::from_value(value).map_err(RpcCodecError::InvalidEnvelope)?;
+    Ok(SubmitProposalResponseV2 {
+        proposal_digest: input.proposal_digest,
+        entry_hash: input.entry_hash,
+        request_digest: input.request_digest,
+        admission_status: input.admission_status.into_status()?,
+    })
+}
+
 /// Availability of an external consensus receipt for a state or entry.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", content = "receipt", rename_all = "snake_case")]
 pub enum FinalityStatusV2 {
     /// Only local deterministic execution is available.
     Unfinalized,
     /// An opaque receipt is available and still requires external verification.
     ReceiptAvailable(OpaqueConsensusReceiptV2),
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "status", content = "receipt", rename_all = "snake_case")]
+enum FinalityStatusWire {
+    Unfinalized,
+    ReceiptAvailable(OpaqueReceiptWire),
+}
+
+#[derive(Deserialize)]
+struct OpaqueReceiptWire(#[serde(deserialize_with = "deserialize_opaque_consensus_receipt")] OpaqueConsensusReceiptV2);
+
+impl FinalityStatusWire {
+    fn into_status(self) -> FinalityStatusV2 {
+        match self {
+            Self::Unfinalized => FinalityStatusV2::Unfinalized,
+            Self::ReceiptAvailable(receipt) => FinalityStatusV2::ReceiptAvailable(receipt.0),
+        }
+    }
 }
 
 /// Deterministic location and head hash of one materialized channel state.
@@ -176,18 +256,9 @@ struct ChannelStatusResponseInput {
     block_index: u32,
     entry_hash: EntryHashV2,
     state_hash: StateHashV2,
+    #[serde(deserialize_with = "deserialize_snapshot_bytes")]
     snapshot_bytes: SnapshotBytesV2,
-    finality_status: FinalityStatusV2,
-}
-
-impl<'de> Deserialize<'de> for ChannelStatusResponseV2 {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let input = ChannelStatusResponseInput::deserialize(deserializer)?;
-        Self::from_input(input).map_err(serde::de::Error::custom)
-    }
+    finality_status: FinalityStatusWire,
 }
 
 impl ChannelStatusResponseV2 {
@@ -208,7 +279,12 @@ impl ChannelStatusResponseV2 {
             entry_hash: execution.entry_hash,
             state_hash,
             snapshot_bytes,
-            finality_status,
+            finality_status: match finality_status {
+                FinalityStatusV2::Unfinalized => FinalityStatusWire::Unfinalized,
+                FinalityStatusV2::ReceiptAvailable(receipt) => {
+                    FinalityStatusWire::ReceiptAvailable(OpaqueReceiptWire(receipt))
+                }
+            },
         })?;
         response.validate_for(request)?;
         Ok(response)
@@ -237,7 +313,7 @@ impl ChannelStatusResponseV2 {
             entry_hash: input.entry_hash,
             state_hash: input.state_hash,
             snapshot_bytes: input.snapshot_bytes,
-            finality_status: input.finality_status,
+            finality_status: input.finality_status.into_status(),
         })
     }
 
@@ -300,6 +376,11 @@ impl ChannelStatusResponseV2 {
     }
 }
 
+pub(crate) fn decode_channel_status_response_value(value: serde_json::Value) -> Result<ChannelStatusResponseV2> {
+    let input: ChannelStatusResponseInput = serde_json::from_value(value).map_err(RpcCodecError::InvalidEnvelope)?;
+    ChannelStatusResponseV2::from_input(input)
+}
+
 /// Exact finality-carrying entry material returned by a finalized lookup.
 ///
 /// Deserialization recomputes the deterministic block and verifies exact entry
@@ -320,16 +401,13 @@ struct FinalizedEntryBundleInput {
     block: ExecutedBlockV2,
     entry: ExecutedEntryV2,
     proof: EntryMerkleProofV2,
+    #[serde(deserialize_with = "deserialize_opaque_consensus_receipt")]
     consensus_receipt: OpaqueConsensusReceiptV2,
 }
 
-impl<'de> Deserialize<'de> for FinalizedEntryBundleV2 {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let input = FinalizedEntryBundleInput::deserialize(deserializer)?;
-        Self::new(input.block, input.entry, input.proof, input.consensus_receipt).map_err(serde::de::Error::custom)
+impl FinalizedEntryBundleInput {
+    fn into_bundle(self) -> Result<FinalizedEntryBundleV2> {
+        FinalizedEntryBundleV2::new(self.block, self.entry, self.proof, self.consensus_receipt)
     }
 }
 
@@ -444,7 +522,7 @@ impl<'a> VerifiedFinalizedEntryV2<'a> {
 }
 
 /// Lifecycle result for one authenticated actor request key.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum RequestLifecycleV2 {
     /// No matching admission or committed request was observed.
@@ -466,6 +544,32 @@ pub enum RequestLifecycleV2 {
     },
 }
 
+#[derive(Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum RequestLifecycleWire {
+    Unknown,
+    Admitted { acceptance_id: FixedHex32Wire },
+    Executed { metadata: Box<ExecutedMetadataRecordInput> },
+    FinalityReceiptAvailable { bundle: Box<FinalizedEntryBundleInput> },
+}
+
+impl RequestLifecycleWire {
+    fn into_lifecycle(self) -> Result<RequestLifecycleV2> {
+        Ok(match self {
+            Self::Unknown => RequestLifecycleV2::Unknown,
+            Self::Admitted { acceptance_id } => RequestLifecycleV2::Admitted {
+                acceptance_id: TransportAcceptanceIdV2::from_bytes(acceptance_id.into_bytes())?,
+            },
+            Self::Executed { metadata } => RequestLifecycleV2::Executed {
+                metadata: Box::new(metadata.into_record()?),
+            },
+            Self::FinalityReceiptAvailable { bundle } => RequestLifecycleV2::FinalityReceiptAvailable {
+                bundle: Box::new(bundle.into_bundle()?),
+            },
+        })
+    }
+}
+
 /// Response to a complete authenticated request-status key.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -484,23 +588,7 @@ struct RequestStatusResponseInput {
     channel_context_id: thunderbolt_ledger::ChannelContextIdV2,
     participant_id: ParticipantIdV2,
     request_digest: RequestDigestV2,
-    lifecycle: RequestLifecycleV2,
-}
-
-impl<'de> Deserialize<'de> for RequestStatusResponseV2 {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let input = RequestStatusResponseInput::deserialize(deserializer)?;
-        let request = RequestStatusRequestV2::new(
-            input.ledger_chain_id,
-            input.channel_context_id,
-            input.participant_id,
-            input.request_digest,
-        );
-        Self::new(&request, input.lifecycle).map_err(serde::de::Error::custom)
-    }
+    lifecycle: RequestLifecycleWire,
 }
 
 impl RequestStatusResponseV2 {
@@ -556,8 +644,19 @@ impl RequestStatusResponseV2 {
     }
 }
 
+pub(crate) fn decode_request_status_response_value(value: serde_json::Value) -> Result<RequestStatusResponseV2> {
+    let input: RequestStatusResponseInput = serde_json::from_value(value).map_err(RpcCodecError::InvalidEnvelope)?;
+    let request = RequestStatusRequestV2::new(
+        input.ledger_chain_id,
+        input.channel_context_id,
+        input.participant_id,
+        input.request_digest,
+    );
+    RequestStatusResponseV2::new(&request, input.lifecycle.into_lifecycle()?)
+}
+
 /// Transport projection of deterministic executed-entry metadata.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutedMetadataRecordV2 {
     /// Positive block height.
@@ -588,6 +687,48 @@ pub struct ExecutedMetadataRecordV2 {
     pub event_kind: EventKindV2,
     /// Digest of the canonical public event bytes.
     pub event_digest: EventDigestV2,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutedMetadataRecordInput {
+    block_height: u64,
+    block_time_ms: u64,
+    block_index: u32,
+    ledger_chain_id: LedgerChainIdV2,
+    channel_context_id: thunderbolt_ledger::ChannelContextIdV2,
+    sequence: u64,
+    previous_entry_hash: EntryHashV2,
+    proposal_digest: ProposalDigestV2,
+    entry_hash: EntryHashV2,
+    request_digest: RequestDigestV2,
+    participant_id: ParticipantIdV2,
+    actor_role: ActorRoleV2,
+    event_kind: EventKindV2,
+    event_digest: EventDigestV2,
+}
+
+impl ExecutedMetadataRecordInput {
+    fn into_record(self) -> Result<ExecutedMetadataRecordV2> {
+        let record = ExecutedMetadataRecordV2 {
+            block_height: self.block_height,
+            block_time_ms: self.block_time_ms,
+            block_index: self.block_index,
+            ledger_chain_id: self.ledger_chain_id,
+            channel_context_id: self.channel_context_id,
+            sequence: self.sequence,
+            previous_entry_hash: self.previous_entry_hash,
+            proposal_digest: self.proposal_digest,
+            entry_hash: self.entry_hash,
+            request_digest: self.request_digest,
+            participant_id: self.participant_id,
+            actor_role: self.actor_role,
+            event_kind: self.event_kind,
+            event_digest: self.event_digest,
+        };
+        record.validate()?;
+        Ok(record)
+    }
 }
 
 impl ExecutedMetadataRecordV2 {
@@ -644,9 +785,9 @@ pub struct HistoryResponseV2 {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HistoryResponseInput {
-    request_digest: RpcRequestDigestV2,
+    request_digest: FixedHex32Wire,
     entries: BoundedMetadataList,
-    next_cursor: Option<HistoryCursorV2>,
+    next_cursor: Option<serde_json::Value>,
 }
 
 struct BoundedMetadataList(Vec<ExecutedMetadataRecordV2>);
@@ -679,11 +820,11 @@ impl<'de> Visitor<'de> for MetadataListVisitor {
                 .unwrap_or_default()
                 .min(usize::from(MAX_HISTORY_PAGE_ENTRIES)),
         );
-        while let Some(entry) = sequence.next_element::<ExecutedMetadataRecordV2>()? {
+        while let Some(input) = sequence.next_element::<ExecutedMetadataRecordInput>()? {
             if entries.len() == usize::from(MAX_HISTORY_PAGE_ENTRIES) {
                 return Err(A::Error::custom("history page exceeds entry bound"));
             }
-            entry.validate().map_err(A::Error::custom)?;
+            let entry = input.into_record().map_err(A::Error::custom)?;
             entries.push(entry);
         }
         Ok(BoundedMetadataList(entries))
@@ -696,20 +837,6 @@ impl<'de> Deserialize<'de> for BoundedMetadataList {
         D: Deserializer<'de>,
     {
         deserializer.deserialize_seq(MetadataListVisitor)
-    }
-}
-
-impl<'de> Deserialize<'de> for HistoryResponseV2 {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let input = HistoryResponseInput::deserialize(deserializer)?;
-        Ok(Self {
-            request_digest: input.request_digest,
-            entries: input.entries.0,
-            next_cursor: input.next_cursor,
-        })
     }
 }
 
@@ -796,6 +923,18 @@ impl HistoryResponseV2 {
     }
 }
 
+pub(crate) fn decode_history_response_value(value: serde_json::Value) -> Result<HistoryResponseV2> {
+    let input: HistoryResponseInput = serde_json::from_value(value).map_err(RpcCodecError::InvalidEnvelope)?;
+    Ok(HistoryResponseV2 {
+        request_digest: RpcRequestDigestV2::from_bytes(input.request_digest.into_bytes())?,
+        entries: input.entries.0,
+        next_cursor: input
+            .next_cursor
+            .map(crate::request::decode_history_cursor_value)
+            .transpose()?,
+    })
+}
+
 /// One response in the version-two transport-neutral Ledger control plane.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "method", content = "result", rename_all = "snake_case")]
@@ -810,6 +949,44 @@ pub enum RpcResponseV2 {
     History(HistoryResponseV2),
     /// Rollback-floor CAS transport/result response.
     RollbackFloorCas(crate::RollbackFloorCasResponseV2),
+}
+
+/// Response capability correlated to one exact canonical request.
+///
+/// This is the only public result of response decoding. The raw response enum
+/// cannot be decoded through the public API without first passing
+/// [`RpcResponseV2::validate_for`].
+///
+/// ```compile_fail
+/// use thunderbolt_ledger_rpc::RpcResponseV2;
+/// let _ = RpcResponseV2::from_canonical_bytes(b"{}");
+/// ```
+///
+/// Individual response payloads are also not Serde ingress types:
+///
+/// ```compile_fail
+/// use thunderbolt_ledger_rpc::SubmitProposalResponseV2;
+/// let _: SubmitProposalResponseV2 = serde_json::from_slice(b"{}").unwrap();
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CorrelatedRpcResponseV2 {
+    response: RpcResponseV2,
+}
+
+impl CorrelatedRpcResponseV2 {
+    pub(crate) const fn new(response: RpcResponseV2) -> Self {
+        Self { response }
+    }
+
+    /// Returns the request-correlated response.
+    pub const fn response(&self) -> &RpcResponseV2 {
+        &self.response
+    }
+
+    /// Consumes the correlation capability and returns its checked response.
+    pub fn into_response(self) -> RpcResponseV2 {
+        self.response
+    }
 }
 
 impl RpcResponseV2 {

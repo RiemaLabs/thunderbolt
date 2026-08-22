@@ -14,6 +14,13 @@ time in milliseconds, prior application hash, and proposal order. The
 application never reads a local clock. It verifies exact chain, height,
 application-hash, and monotonic-time continuity before execution.
 
+Consensus deployments must set `ApplicationOptions.consensus_profile_digest`.
+The schema stores that immutable 32-byte value alongside the chain ID and
+reducer limits and rejects a reopen under a different verifier/deployment
+profile. A version-one database can bind a profile only while its durable head
+is still empty; an executed unprofiled database fails closed instead of being
+retroactively assigned new proof policy.
+
 The application version is `2`. A future ABCI `Info` and `InitChain` boundary
 must report that exact value. Execution at consensus height `H` returns the
 application hash committed by the CometBFT header at height `H + 1`; the hash

@@ -26,11 +26,13 @@ The actor in a proposal is always the BIP340 key, derived participant identifier
 
 ## Canonical envelopes
 
-Requests and responses use compact JSON with a fixed outer `api_version` of `2`. `to_canonical_bytes` emits the only accepted byte representation. `from_canonical_bytes` validates all nested types and then requires exact byte-for-byte re-encoding. The top-level request and response enums deliberately do not implement `Deserialize`; adapters cannot bypass version, body, or canonical checks by handing them directly to a web framework. Unknown fields, duplicate fields, whitespace variants, reordered fields, uppercase hexadecimal, trailing bytes, and unsupported versions fail closed.
+Requests and responses use compact JSON with a fixed outer `api_version` of `2`. `to_canonical_bytes` emits the only accepted byte representation. `RpcRequestV2::from_canonical_bytes` validates requests. `RpcResponseV2::from_canonical_bytes_for` requires the exact request and returns only `CorrelatedRpcResponseV2`; there is no public raw response decoder. Both paths require exact byte-for-byte re-encoding. The top-level request and response enums deliberately do not implement `Deserialize`; adapters cannot bypass version, body, canonical, or response-correlation checks by handing them directly to a web framework. Unknown fields, duplicate fields, whitespace variants, reordered fields, uppercase hexadecimal, trailing bytes, and unsupported versions fail closed.
+
+Public request payloads, response payloads, snapshots, consensus receipts, ambiguity tokens, floor wrappers, and RPC digest types do not implement `Deserialize`. Private wire DTOs are reached only after the complete request or response passes its outer body-size check, then apply their tighter field and hexadecimal bounds. Frameworks therefore cannot select a nested public type as an alternate ingress path.
 
 Request digests cover the complete versioned canonical request. Proposal submission independently checks that the outer Ledger chain equals the chain authenticated inside `SignedProposalV2`. The signed proposal's stable channel context commits the complete deployment and committee binding.
 
-Decoding proves canonical shape, not request correlation or server authenticity. A client must call `RpcResponseV2::validate_for` with the exact request before using any result, then apply external finality verification wherever a receipt is present.
+Request-correlated decoding proves canonical shape and exact request matching, not server authenticity. A client must still apply external finality verification wherever a receipt is present.
 
 A channel-status response echoes the complete `ChannelBindingV2`. Decoding fully parses the bounded canonical state through EOF, reconstructs a validated `ChannelSnapshotV2`, compares the embedded binding digest and Ledger chain, derives the requested context from the binding, and checks the response entry hash against the snapshot head.
 

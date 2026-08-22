@@ -5,10 +5,39 @@ use thunderbolt_keystore::{
     VaultIdentity, VaultRevision, VaultRole, VaultStateDigest,
 };
 
-use crate::primitives::decode_hex_exact;
+use crate::bytes::{deserialize_ambiguity_token, deserialize_opaque_consensus_receipt};
+use crate::primitives::{deserialize_hex_bounded, FixedHex32Wire};
 use crate::{AmbiguityTokenV2, OpaqueConsensusReceiptV2, Result, RpcCodecError, TransportAcceptanceIdV2};
 
 const FLOOR_CAS_DOMAIN: &[u8] = b"bitcoin-thunderbolt/floor/cas/v1";
+/// Maximum canonical bytes for one chain-bound floor CAS request.
+pub const MAX_FLOOR_CAS_CANONICAL_BYTES: usize = 512;
+
+struct BoundedFloorCanonical(Vec<u8>);
+
+impl Serialize for BoundedFloorCanonical {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&hex::encode(&self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for BoundedFloorCanonical {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserialize_hex_bounded(
+            deserializer,
+            "floor_canonical_request",
+            1,
+            MAX_FLOOR_CAS_CANONICAL_BYTES,
+        )
+        .map(Self)
+    }
+}
 
 /// RPC wrapper for the floor crate's exact chain-bound checkpoint CAS request.
 ///
@@ -16,6 +45,11 @@ const FLOOR_CAS_DOMAIN: &[u8] = b"bitcoin-thunderbolt/floor/cas/v1";
 /// decoding reconstructs [`FloorCasRequest`] and requires exact re-encoding and
 /// digest equality. No alternate checkpoint identity or transition type is
 /// defined by this crate.
+///
+/// ```compile_fail
+/// use thunderbolt_ledger_rpc::RollbackFloorCasRequestV2;
+/// let _: RollbackFloorCasRequestV2 = serde_json::from_slice(b"{}").unwrap();
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RollbackFloorCasRequestV2(FloorCasRequest);
 
@@ -45,8 +79,8 @@ impl RollbackFloorCasRequestV2 {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FloorCasWire {
-    canonical_request: String,
-    request_digest: String,
+    canonical_request: BoundedFloorCanonical,
+    request_digest: FixedHex32Wire,
 }
 
 /// Transport and finalized-state outcomes for one rollback-floor CAS.
@@ -132,7 +166,7 @@ impl RollbackFloorCasResponseV2 {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FloorCasResponseWire {
-    request_digest: String,
+    request_digest: FixedHex32Wire,
     status: FloorCasStatusWire,
 }
 
@@ -140,13 +174,15 @@ struct FloorCasResponseWire {
 #[serde(tag = "status", rename_all = "snake_case")]
 enum FloorCasStatusWire {
     TransportAccepted {
-        acceptance_id: TransportAcceptanceIdV2,
+        acceptance_id: FixedHex32Wire,
     },
     Ambiguous {
+        #[serde(deserialize_with = "deserialize_ambiguity_token")]
         token: AmbiguityTokenV2,
     },
     FinalityReceiptAvailable {
         outcome: FloorOutcomeWire,
+        #[serde(deserialize_with = "deserialize_opaque_consensus_receipt")]
         consensus_receipt: OpaqueConsensusReceiptV2,
     },
 }
@@ -163,7 +199,7 @@ enum FloorOutcomeWire {
 #[serde(deny_unknown_fields)]
 struct CheckpointWire {
     revision: u64,
-    state_digest: String,
+    state_digest: FixedHex32Wire,
 }
 
 impl Serialize for RollbackFloorCasResponseV2 {
@@ -172,34 +208,26 @@ impl Serialize for RollbackFloorCasResponseV2 {
         S: Serializer,
     {
         FloorCasResponseWire {
-            request_digest: hex::encode(self.request_digest.as_bytes()),
+            request_digest: FixedHex32Wire::new(*self.request_digest.as_bytes()),
             status: FloorCasStatusWire::from_status(&self.status),
         }
         .serialize(serializer)
     }
 }
 
-impl<'de> Deserialize<'de> for RollbackFloorCasResponseV2 {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let wire = FloorCasResponseWire::deserialize(deserializer)?;
-        let request_digest = FloorRequestDigest::new(
-            decode_hex_exact::<32>("floor_request_digest", &wire.request_digest).map_err(serde::de::Error::custom)?,
-        );
-        Ok(Self {
-            request_digest,
-            status: wire.status.into_status().map_err(serde::de::Error::custom)?,
-        })
-    }
+pub(crate) fn decode_floor_response_value(value: serde_json::Value) -> Result<RollbackFloorCasResponseV2> {
+    let wire: FloorCasResponseWire = serde_json::from_value(value).map_err(RpcCodecError::InvalidEnvelope)?;
+    Ok(RollbackFloorCasResponseV2 {
+        request_digest: FloorRequestDigest::new(wire.request_digest.into_bytes()),
+        status: wire.status.into_status()?,
+    })
 }
 
 impl FloorCasStatusWire {
     fn from_status(status: &RollbackFloorCasStatusV2) -> Self {
         match status {
             RollbackFloorCasStatusV2::TransportAccepted { acceptance_id } => Self::TransportAccepted {
-                acceptance_id: *acceptance_id,
+                acceptance_id: FixedHex32Wire::new(*acceptance_id.as_bytes()),
             },
             RollbackFloorCasStatusV2::Ambiguous { token } => Self::Ambiguous { token: token.clone() },
             RollbackFloorCasStatusV2::FinalityReceiptAvailable {
@@ -214,7 +242,9 @@ impl FloorCasStatusWire {
 
     fn into_status(self) -> Result<RollbackFloorCasStatusV2> {
         Ok(match self {
-            Self::TransportAccepted { acceptance_id } => RollbackFloorCasStatusV2::TransportAccepted { acceptance_id },
+            Self::TransportAccepted { acceptance_id } => RollbackFloorCasStatusV2::TransportAccepted {
+                acceptance_id: TransportAcceptanceIdV2::from_bytes(acceptance_id.into_bytes())?,
+            },
             Self::Ambiguous { token } => RollbackFloorCasStatusV2::Ambiguous { token },
             Self::FinalityReceiptAvailable {
                 outcome,
@@ -253,14 +283,14 @@ impl CheckpointWire {
     fn from_checkpoint(checkpoint: VaultCheckpoint) -> Self {
         Self {
             revision: checkpoint.revision().get(),
-            state_digest: hex::encode(checkpoint.state_digest().as_bytes()),
+            state_digest: FixedHex32Wire::new(*checkpoint.state_digest().as_bytes()),
         }
     }
 
     fn into_checkpoint(self) -> Result<VaultCheckpoint> {
         Ok(VaultCheckpoint::new(
             VaultRevision::new(self.revision),
-            VaultStateDigest::new(decode_hex_exact::<32>("vault_state_digest", &self.state_digest)?),
+            VaultStateDigest::new(self.state_digest.into_bytes()),
         ))
     }
 }
@@ -271,38 +301,24 @@ impl Serialize for RollbackFloorCasRequestV2 {
         S: Serializer,
     {
         FloorCasWire {
-            canonical_request: hex::encode(self.0.canonical_bytes()),
-            request_digest: hex::encode(self.0.digest().as_bytes()),
+            canonical_request: BoundedFloorCanonical(self.0.canonical_bytes()),
+            request_digest: FixedHex32Wire::new(*self.0.digest().as_bytes()),
         }
         .serialize(serializer)
     }
 }
 
-impl<'de> Deserialize<'de> for RollbackFloorCasRequestV2 {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let wire = FloorCasWire::deserialize(deserializer)?;
-        if !wire.canonical_request.len().is_multiple_of(2)
-            || !wire
-                .canonical_request
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        {
-            return Err(serde::de::Error::custom("invalid floor canonical request"));
-        }
-        let canonical = hex::decode(&wire.canonical_request).map_err(serde::de::Error::custom)?;
-        let request = parse_floor_cas(&canonical).map_err(serde::de::Error::custom)?;
-        let supplied_digest =
-            decode_hex_exact::<32>("floor_request_digest", &wire.request_digest).map_err(serde::de::Error::custom)?;
-        if request.digest().as_bytes() != &supplied_digest || request.canonical_bytes() != canonical {
-            return Err(serde::de::Error::custom(
-                "floor CAS request digest or canonical bytes mismatch",
-            ));
-        }
-        Ok(Self(request))
+pub(crate) fn decode_floor_request_value(value: serde_json::Value) -> Result<RollbackFloorCasRequestV2> {
+    let wire: FloorCasWire = serde_json::from_value(value).map_err(RpcCodecError::InvalidEnvelope)?;
+    let canonical = wire.canonical_request.0;
+    let request = parse_floor_cas(&canonical)?;
+    let supplied_digest = wire.request_digest.into_bytes();
+    if request.digest().as_bytes() != &supplied_digest || request.canonical_bytes() != canonical {
+        return Err(RpcCodecError::BindingMismatch(
+            "floor CAS request digest or canonical bytes mismatch",
+        ));
     }
+    Ok(RollbackFloorCasRequestV2(request))
 }
 
 fn parse_floor_cas(bytes: &[u8]) -> Result<FloorCasRequest> {

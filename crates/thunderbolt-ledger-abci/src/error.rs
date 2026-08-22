@@ -34,6 +34,11 @@ pub enum AbciAdapterError {
     #[error("conflicting FinalizeBlock request while another block is staged")]
     StagedBlockConflict,
 
+    /// `Commit` arrived without a preceding successful `FinalizeBlock` in this
+    /// process and was not a duplicate of its immediately completed commit.
+    #[error("Commit has no staged FinalizeBlock result")]
+    MissingStagedBlock,
+
     /// Shared adapter state was poisoned by an earlier consensus-path failure.
     #[error("ABCI adapter is fail-closed after a consensus-path failure")]
     Faulted,
@@ -41,17 +46,48 @@ pub enum AbciAdapterError {
     /// A shared-state mutex was poisoned by an unwind outside this crate.
     #[error("ABCI adapter shared-state lock is poisoned")]
     LockPoisoned,
+
+    /// Durable commit completed but the response path became ambiguous.
+    #[error("ABCI commit completed but acknowledgement is ambiguous")]
+    PostCommitAmbiguous,
 }
 
 impl AbciAdapterError {
+    pub(crate) fn is_fatal_runtime(&self) -> bool {
+        match self {
+            Self::Serialization(_)
+            | Self::StagedBlockConflict
+            | Self::MissingStagedBlock
+            | Self::Faulted
+            | Self::LockPoisoned
+            | Self::PostCommitAmbiguous => true,
+            Self::Application(error) => matches!(
+                error,
+                thunderbolt_ledger_app::ApplicationError::Database(_)
+                    | thunderbolt_ledger_app::ApplicationError::Serialization(_)
+                    | thunderbolt_ledger_app::ApplicationError::InvalidOptions(_)
+                    | thunderbolt_ledger_app::ApplicationError::WrongApplication { .. }
+                    | thunderbolt_ledger_app::ApplicationError::UnrecognizedDatabase(_)
+                    | thunderbolt_ledger_app::ApplicationError::UnsupportedSchema { .. }
+                    | thunderbolt_ledger_app::ApplicationError::MigrationChecksumMismatch { .. }
+                    | thunderbolt_ledger_app::ApplicationError::ConfigurationMismatch
+                    | thunderbolt_ledger_app::ApplicationError::PreparedBlockMismatch
+                    | thunderbolt_ledger_app::ApplicationError::CorruptData(_)
+                    | thunderbolt_ledger_app::ApplicationError::LockPoisoned
+                    | thunderbolt_ledger_app::ApplicationError::RollbackFailed { .. }
+            ),
+            Self::InvalidRequest(_) | Self::InvalidTransaction(_) | Self::Ledger(_) | Self::NotFound(_) => false,
+        }
+    }
+
     pub(crate) const fn response_code(&self) -> u32 {
         match self {
             Self::InvalidRequest(_) => 1,
             Self::InvalidTransaction(_) | Self::Ledger(_) => 2,
             Self::Application(_) => 3,
             Self::NotFound(_) => 4,
-            Self::StagedBlockConflict => 5,
-            Self::Faulted | Self::LockPoisoned => 6,
+            Self::StagedBlockConflict | Self::MissingStagedBlock => 5,
+            Self::Faulted | Self::LockPoisoned | Self::PostCommitAmbiguous => 6,
             Self::Serialization(_) => 7,
         }
     }
@@ -63,7 +99,8 @@ impl AbciAdapterError {
             Self::Application(_) => "application_rejected",
             Self::NotFound(_) => "not_found",
             Self::StagedBlockConflict => "staged_block_conflict",
-            Self::Faulted | Self::LockPoisoned => "application_unavailable",
+            Self::MissingStagedBlock => "missing_staged_block",
+            Self::Faulted | Self::LockPoisoned | Self::PostCommitAmbiguous => "application_unavailable",
             Self::Serialization(_) => "serialization_failed",
         }
     }
