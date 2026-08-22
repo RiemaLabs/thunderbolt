@@ -33,7 +33,7 @@ pub use invoice::{InvoiceEnvelopeV1, InvoiceProofV1, InvoiceStatementV1};
 pub use message::PublicMessageV1;
 pub use share::{ShareEnvelopeV1, ShareProofV1, ShareStatementV1};
 pub use threshold::{
-    ThresholdDistributionV1, ThresholdEncryptedShareV1, ThresholdEnvelopeV1, MAX_COMMITTEE_MEMBERS,
-    RECIPIENT_SHARE_MEMBER_ID,
+    threshold_invoice_package_digest, ThresholdDistributionV1, ThresholdEncryptedShareV1, ThresholdEnvelopeV1,
+    MAX_COMMITTEE_MEMBERS, RECIPIENT_SHARE_MEMBER_ID,
 };
 pub use transfer::{AnchorTransitionV1, TransferEnvelopeV1, TransferProofV1, TransferStatementV1};

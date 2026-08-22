@@ -1,11 +1,16 @@
 use std::fmt;
 
 use bitcoin::Network;
-use libpaillier::EncryptionKey;
+use libpaillier::{Ciphertext, EncryptionKey};
 use secp::{Point, Scalar};
 use sha2::{Digest as _, Sha256};
+use thunderbolt_core::threshold::ThresholdMemberPublicKey;
 use thunderbolt_protocol::{ChannelId, Digest, EntryHash, InvoiceId, ParticipantId};
-use thunderbolt_wire::{BindingContext, CanonicalDigest, InvoiceEnvelopeV1, TransferEnvelopeV1};
+use thunderbolt_wire::{
+    threshold_invoice_package_digest as wire_threshold_invoice_package_digest, BindingContext, CanonicalDigest,
+    InvoiceEnvelopeV1, ShareEnvelopeV1, ThresholdEnvelopeV1, TransferEnvelopeV1, MAX_COMMITTEE_MEMBERS,
+    RECIPIENT_SHARE_MEMBER_ID,
+};
 use zeroize::Zeroizing;
 
 use crate::error::{crypto_error, HolderError};
@@ -148,6 +153,118 @@ impl InvoiceRequest {
 
     pub fn expected_transfer_step(&self) -> u64 {
         self.expected_transfer_step
+    }
+}
+
+/// Canonical, exact member-id-to-Paillier-key roster for one threshold
+/// committee epoch.
+#[derive(Clone, Debug)]
+pub struct ThresholdRoster {
+    threshold: usize,
+    members: Vec<ThresholdMemberPublicKey>,
+}
+
+impl ThresholdRoster {
+    /// Validates and canonicalizes an exact threshold roster by member id.
+    pub fn new(threshold: usize, mut members: Vec<ThresholdMemberPublicKey>) -> Result<Self, HolderError> {
+        if threshold == 0 || threshold > members.len() {
+            return Err(HolderError::InvalidInput {
+                reason: "threshold must be between one and the roster size",
+            });
+        }
+        if members.is_empty() || members.len() > MAX_COMMITTEE_MEMBERS {
+            return Err(HolderError::InvalidInput {
+                reason: "threshold roster size is outside the supported wire bound",
+            });
+        }
+        members.sort_by_key(|member| member.member_id);
+        let mut previous = None;
+        for member in &members {
+            if member.member_id == 0 || member.member_id == RECIPIENT_SHARE_MEMBER_ID {
+                return Err(HolderError::InvalidInput {
+                    reason: "committee member ids must be positive and must not use the reserved Recipient id",
+                });
+            }
+            if previous == Some(member.member_id) {
+                return Err(HolderError::InvalidInput {
+                    reason: "threshold roster member ids must be unique",
+                });
+            }
+            thunderbolt_core::paillier::validate_protocol_encryption_key(&member.encryption_key)
+                .map_err(|error| crypto_error("threshold member key validation", error))?;
+            previous = Some(member.member_id);
+        }
+        Ok(Self { threshold, members })
+    }
+
+    pub const fn threshold(&self) -> usize {
+        self.threshold
+    }
+
+    pub fn members(&self) -> &[ThresholdMemberPublicKey] {
+        &self.members
+    }
+
+    pub(crate) fn matches_distribution(&self, distribution: &ThresholdEnvelopeV1) -> bool {
+        distribution.distribution.threshold == self.threshold as u32
+            && distribution.distribution.encrypted_shares.len() == self.members.len()
+            && distribution
+                .distribution
+                .encrypted_shares
+                .iter()
+                .zip(&self.members)
+                .all(|(share, member)| {
+                    share.member_id == member.member_id
+                        && share.encryption_key.as_bytes() == member.encryption_key.to_bytes()
+                })
+    }
+}
+
+/// Request for the paper-aligned threshold Invoice construction.
+///
+/// The Recipient proof currently uses the implemented `tb/share` transcript.
+/// It is not claimed to be the paper's exact `R_inv^thr` transcript.
+#[derive(Clone, Debug)]
+pub struct ThresholdInvoiceRequest {
+    pub(crate) channel: ChannelContext,
+    pub(crate) invoice_id: InvoiceId,
+    pub(crate) expected_transfer_step: u64,
+    pub(crate) roster: ThresholdRoster,
+}
+
+impl ThresholdInvoiceRequest {
+    pub fn new(
+        channel: ChannelContext,
+        invoice_id: InvoiceId,
+        expected_transfer_step: u64,
+        roster: ThresholdRoster,
+    ) -> Result<Self, HolderError> {
+        if expected_transfer_step == 0 {
+            return Err(HolderError::InvalidStep);
+        }
+        channel.invoice_binding(&invoice_id)?;
+        Ok(Self {
+            channel,
+            invoice_id,
+            expected_transfer_step,
+            roster,
+        })
+    }
+
+    pub fn channel(&self) -> &ChannelContext {
+        &self.channel
+    }
+
+    pub fn invoice_id(&self) -> &InvoiceId {
+        &self.invoice_id
+    }
+
+    pub fn expected_transfer_step(&self) -> u64 {
+        self.expected_transfer_step
+    }
+
+    pub fn roster(&self) -> &ThresholdRoster {
+        &self.roster
     }
 }
 
@@ -305,6 +422,37 @@ impl PreparedInvoice {
     }
 }
 
+/// Recipient `tb/share` proof plus threshold VESS distribution, returned only
+/// after the private recipient key and refresh are durably stored.
+///
+/// This is the implemented paper-aligned threshold Invoice boundary, but the
+/// Recipient transcript remains `tb/share`; it is not the paper's exact
+/// `R_inv^thr` transcript.
+#[derive(Clone, Debug)]
+pub struct PreparedThresholdInvoice {
+    pub(crate) recipient_share: ShareEnvelopeV1,
+    pub(crate) threshold_distribution: ThresholdEnvelopeV1,
+    pub(crate) private_record: PrivateInvoiceRecordRef,
+}
+
+impl PreparedThresholdInvoice {
+    pub fn recipient_share(&self) -> &ShareEnvelopeV1 {
+        &self.recipient_share
+    }
+
+    pub fn threshold_distribution(&self) -> &ThresholdEnvelopeV1 {
+        &self.threshold_distribution
+    }
+
+    pub const fn private_record(&self) -> PrivateInvoiceRecordRef {
+        self.private_record
+    }
+
+    pub fn package_digest(&self) -> Result<Digest, HolderError> {
+        threshold_invoice_package_digest(&self.recipient_share, &self.threshold_distribution)
+    }
+}
+
 /// An invoice accompanied by a durable ledger acknowledgement.
 #[derive(Clone, Debug)]
 pub struct CommittedInvoice {
@@ -344,20 +492,93 @@ impl CommittedInvoice {
     }
 }
 
+/// A threshold Recipient share and VESS distribution accompanied by one
+/// durable acknowledgement of their canonical package digest.
+#[derive(Clone, Debug)]
+pub struct CommittedThresholdInvoice {
+    pub(crate) recipient_share: ShareEnvelopeV1,
+    pub(crate) threshold_distribution: ThresholdEnvelopeV1,
+    pub(crate) expected_transfer_step: u64,
+    pub(crate) acknowledgement: DurableAcknowledgement,
+}
+
+impl CommittedThresholdInvoice {
+    pub fn new(
+        recipient_share: ShareEnvelopeV1,
+        threshold_distribution: ThresholdEnvelopeV1,
+        expected_transfer_step: u64,
+        acknowledgement: DurableAcknowledgement,
+    ) -> Result<Self, HolderError> {
+        if expected_transfer_step == 0 {
+            return Err(HolderError::InvalidStep);
+        }
+        let digest = threshold_invoice_package_digest(&recipient_share, &threshold_distribution)?;
+        acknowledgement.require_digest(digest.to_bytes())?;
+        Ok(Self {
+            recipient_share,
+            threshold_distribution,
+            expected_transfer_step,
+            acknowledgement,
+        })
+    }
+
+    pub fn recipient_share(&self) -> &ShareEnvelopeV1 {
+        &self.recipient_share
+    }
+
+    pub fn threshold_distribution(&self) -> &ThresholdEnvelopeV1 {
+        &self.threshold_distribution
+    }
+
+    pub fn expected_transfer_step(&self) -> u64 {
+        self.expected_transfer_step
+    }
+
+    pub fn acknowledgement(&self) -> &DurableAcknowledgement {
+        &self.acknowledgement
+    }
+
+    pub fn package_digest(&self) -> Result<Digest, HolderError> {
+        threshold_invoice_package_digest(&self.recipient_share, &self.threshold_distribution)
+    }
+}
+
+/// Public proof package carried by a verified Invoice capability.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VerifiedInvoiceMessages {
+    Single(InvoiceEnvelopeV1),
+    Threshold {
+        recipient_share: ShareEnvelopeV1,
+        threshold_distribution: ThresholdEnvelopeV1,
+    },
+}
+
 /// A verified committed invoice capability. Only [`crate::HolderEngine`] can
 /// construct it, so transfer creation cannot skip committed-invoice checking.
 #[derive(Clone, Debug)]
 pub struct VerifiedInvoice {
     pub(crate) channel: ChannelContext,
     pub(crate) invoice_id: InvoiceId,
-    pub(crate) envelope: InvoiceEnvelopeV1,
+    pub(crate) messages: VerifiedInvoiceMessages,
+    pub(crate) anchor_base: Point,
+    pub(crate) recipient_key: EncryptionKey,
+    pub(crate) delta: Point,
+    pub(crate) recipient_ciphertext: Ciphertext,
+    pub(crate) public_digest: Digest,
     pub(crate) expected_transfer_step: u64,
     pub(crate) acknowledgement: DurableAcknowledgement,
 }
 
 impl VerifiedInvoice {
-    pub fn envelope(&self) -> &InvoiceEnvelopeV1 {
-        &self.envelope
+    pub fn messages(&self) -> &VerifiedInvoiceMessages {
+        &self.messages
+    }
+
+    pub fn single_envelope(&self) -> Option<&InvoiceEnvelopeV1> {
+        match &self.messages {
+            VerifiedInvoiceMessages::Single(envelope) => Some(envelope),
+            VerifiedInvoiceMessages::Threshold { .. } => None,
+        }
     }
 
     pub fn channel(&self) -> &ChannelContext {
@@ -375,6 +596,25 @@ impl VerifiedInvoice {
     pub fn acknowledgement(&self) -> &DurableAcknowledgement {
         &self.acknowledgement
     }
+
+    pub fn public_digest(&self) -> Digest {
+        self.public_digest
+    }
+}
+
+/// Canonical digest of the two-message threshold Invoice package. This exactly
+/// matches the verifier's package boundary; it does not rename the underlying
+/// Recipient `tb/share` transcript to `R_inv^thr`.
+pub fn threshold_invoice_package_digest(
+    recipient_share: &ShareEnvelopeV1,
+    threshold_distribution: &ThresholdEnvelopeV1,
+) -> Result<Digest, HolderError> {
+    let recipient_digest = recipient_share.canonical_digest()?;
+    let distribution_digest = threshold_distribution.canonical_digest()?;
+    Ok(Digest::from_bytes(wire_threshold_invoice_package_digest(
+        recipient_digest,
+        distribution_digest,
+    )))
 }
 
 /// Public transfer plus the retained source-credential reference.

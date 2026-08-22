@@ -1,4 +1,5 @@
-use bitcoin::Network;
+use bitcoin::hashes::Hash as _;
+use bitcoin::{BlockHash, Network, OutPoint, Txid};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use thunderbolt_core::zkp::ProofContext;
@@ -80,6 +81,29 @@ fixed_binding_id!(
     BitcoinGenesisHashV2,
     "bitcoin_genesis_hash"
 );
+
+impl BitcoinGenesisHashV2 {
+    /// Converts rust-bitcoin's internal hash bytes to the display-order bytes
+    /// used by operator configuration and this wire format.
+    pub fn from_block_hash(hash: BlockHash) -> Result<Self> {
+        let mut bytes = hash.to_byte_array();
+        bytes.reverse();
+        Self::from_bytes(bytes)
+    }
+
+    /// Converts display-order wire bytes to rust-bitcoin's internal hash type.
+    pub fn to_block_hash(&self) -> BlockHash {
+        let mut bytes = [0_u8; BINDING_ID_BYTES];
+        bytes.copy_from_slice(self.as_bytes());
+        bytes.reverse();
+        BlockHash::from_byte_array(bytes)
+    }
+
+    /// Returns the canonical genesis hash for a standard rust-bitcoin network.
+    pub fn for_network(network: Network) -> Result<Self> {
+        Self::from_block_hash(bitcoin::constants::genesis_block(network).block_hash())
+    }
+}
 fixed_binding_id!(
     /// Digest of the complete, ordered committee descriptor for this epoch.
     CommitteeDescriptorDigestV2,
@@ -131,6 +155,21 @@ impl FundingOutpointV2 {
             });
         }
         Ok(Self { txid, vout })
+    }
+
+    /// Converts a rust-bitcoin outpoint without relying on implicit hash byte order.
+    pub fn from_outpoint(outpoint: OutPoint) -> Result<Self> {
+        let mut txid = outpoint.txid.to_byte_array();
+        txid.reverse();
+        Self::new(txid, outpoint.vout)
+    }
+
+    /// Converts the display-order wire encoding to a rust-bitcoin outpoint.
+    pub fn to_outpoint(&self) -> OutPoint {
+        let mut txid = [0_u8; 32];
+        txid.copy_from_slice(self.txid.as_bytes());
+        txid.reverse();
+        OutPoint::new(Txid::from_byte_array(txid), self.vout)
     }
 
     /// Parses the canonical 36-byte funding-outpoint encoding.
@@ -292,6 +331,11 @@ impl ValidateWire for ChannelBindingV2 {
         if self.committee_epoch == 0 {
             return Err(WireError::InvalidBinding {
                 reason: "committee_epoch must be positive",
+            });
+        }
+        if self.bitcoin_genesis_hash != BitcoinGenesisHashV2::for_network(self.network)? {
+            return Err(WireError::InvalidBinding {
+                reason: "bitcoin_genesis_hash does not match network",
             });
         }
         Ok(())

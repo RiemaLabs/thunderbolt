@@ -17,9 +17,77 @@ pub enum KeystoreError {
     #[error("secret record does not satisfy its type constraints")]
     InvalidSecretRecord,
 
+    /// A record key is empty or exceeds its canonical bound.
+    #[error("record key does not satisfy the keystore policy")]
+    InvalidRecordKey,
+
     /// The requested record is not valid for this participant role.
     #[error("secret record is not valid for this participant role")]
     InvalidRecordForRole,
+
+    /// The deployment or committee identity is invalid.
+    #[error("vault deployment identity is invalid")]
+    InvalidVaultIdentity,
+
+    /// The complete vault revision changed before a compare-and-swap commit.
+    #[error("vault revision does not match the expected revision")]
+    RevisionConflict,
+
+    /// A record did not match the expected absent or versioned state.
+    #[error("record version does not match the compare-and-swap request")]
+    RecordConflict,
+
+    /// The same record key was staged more than once in one transaction.
+    #[error("transaction contains a duplicate record mutation")]
+    DuplicateMutation,
+
+    /// The encrypted record count or total secret bytes exceed supported bounds.
+    #[error("vault record limits would be exceeded")]
+    RecordLimitExceeded,
+
+    /// One transaction contains too many record mutations.
+    #[error("vault transaction contains too many mutations")]
+    TransactionLimitExceeded,
+
+    /// The bounded idempotency-receipt collection is full.
+    #[error("vault transaction receipt limit is reached")]
+    TransactionReceiptLimitExceeded,
+
+    /// A receipt-pruning boundary is newer than the authenticated vault state.
+    #[error("transaction receipt pruning boundary exceeds the vault revision")]
+    InvalidPruneRevision,
+
+    /// An idempotency key was reused for different mutations.
+    #[error("transaction identifier was reused for a different update")]
+    TransactionReplayConflict,
+
+    /// The authenticated revision counter cannot be incremented.
+    #[error("vault revision is exhausted")]
+    RevisionExhausted,
+
+    /// A consumed signing nonce cannot be inserted again.
+    #[error("committee signing nonce was already consumed")]
+    NonceConsumed,
+
+    /// A reserved signing nonce is immutable until it is tombstoned.
+    #[error("committee signing nonce is already reserved")]
+    NonceAlreadyReserved,
+
+    /// Generic restore cannot safely recover committee signing state.
+    #[error("committee signing-state restore requires external monotonic reconciliation")]
+    SigningStateRestoreForbidden,
+
+    /// Committee state cannot be opened without an externally anchored floor.
+    #[error("committee vault requires an externally authenticated minimum revision")]
+    RollbackFloorRequired,
+
+    /// The authenticated vault revision is older than the trusted external floor.
+    #[error("vault rollback detected below the trusted minimum revision")]
+    RollbackDetected,
+
+    /// A write failed ambiguously and the handle must be dropped and reopened.
+    #[error("vault handle is poisoned; drop it and reopen the vault")]
+    Poisoned,
 
     /// The file does not use a supported, canonical keystore encoding.
     #[error("keystore format is invalid or unsupported")]

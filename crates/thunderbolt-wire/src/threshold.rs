@@ -1,6 +1,7 @@
 use std::convert::TryFrom;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use thunderbolt_core::threshold::{
     verify_threshold_refresh_distribution, ThresholdEncryptedShare, ThresholdRefreshDistribution,
 };
@@ -20,6 +21,22 @@ pub const MAX_COMMITTEE_MEMBERS: usize = 256;
 ///
 /// Committee rosters must never assign this identifier to an operator.
 pub const RECIPIENT_SHARE_MEMBER_ID: u32 = u32::MAX;
+const THRESHOLD_INVOICE_PACKAGE_DOMAIN: &[u8] = b"bitcoin-thunderbolt/verifier/threshold-invoice-package/v1";
+
+/// Commits the Recipient share proof and threshold refresh distribution as one
+/// threshold Invoice package.
+///
+/// Both inputs must be the canonical digests of their exact v1 envelopes.
+pub fn threshold_invoice_package_digest(
+    recipient_share_digest: [u8; 32],
+    threshold_distribution_digest: [u8; 32],
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(THRESHOLD_INVOICE_PACKAGE_DOMAIN);
+    hasher.update(recipient_share_digest);
+    hasher.update(threshold_distribution_digest);
+    hasher.finalize().into()
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -3,7 +3,7 @@ use std::fmt;
 use libpaillier::DecryptionKey;
 use secp::Point;
 use thunderbolt_protocol::Digest;
-use thunderbolt_wire::{InvoiceEnvelopeV1, TransferEnvelopeV1};
+use thunderbolt_wire::{InvoiceEnvelopeV1, ShareEnvelopeV1, ThresholdEnvelopeV1, TransferEnvelopeV1};
 use zeroize::Zeroizing;
 
 use crate::error::{HolderError, VaultError};
@@ -54,6 +54,16 @@ pub enum InvoiceState {
     },
 }
 
+/// Public proof package associated with a private Recipient invoice record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InvoicePublicRecord {
+    Single(InvoiceEnvelopeV1),
+    Threshold {
+        recipient_share: ShareEnvelopeV1,
+        threshold_distribution: ThresholdEnvelopeV1,
+    },
+}
+
 /// Recipient-only invoice refresh and Paillier decryption key.
 ///
 /// This record implements neither serde nor any plaintext export method. Its
@@ -63,8 +73,8 @@ pub struct InvoiceRecord {
     key: InvoiceRecordKey,
     channel: ChannelKey,
     expected_transfer_step: u64,
-    envelope: InvoiceEnvelopeV1,
-    envelope_digest: Digest,
+    public: InvoicePublicRecord,
+    public_digest: Digest,
     refresh: Zeroizing<[u8; 32]>,
     decryption_key: DecryptionKey,
     state: InvoiceState,
@@ -72,12 +82,12 @@ pub struct InvoiceRecord {
 
 impl InvoiceRecord {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+    pub(crate) fn new_single(
         key: InvoiceRecordKey,
         channel: ChannelKey,
         expected_transfer_step: u64,
         envelope: InvoiceEnvelopeV1,
-        envelope_digest: Digest,
+        public_digest: Digest,
         refresh: Zeroizing<[u8; 32]>,
         decryption_key: DecryptionKey,
     ) -> Self {
@@ -85,8 +95,34 @@ impl InvoiceRecord {
             key,
             channel,
             expected_transfer_step,
-            envelope,
-            envelope_digest,
+            public: InvoicePublicRecord::Single(envelope),
+            public_digest,
+            refresh,
+            decryption_key,
+            state: InvoiceState::Prepared,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_threshold(
+        key: InvoiceRecordKey,
+        channel: ChannelKey,
+        expected_transfer_step: u64,
+        recipient_share: ShareEnvelopeV1,
+        threshold_distribution: ThresholdEnvelopeV1,
+        public_digest: Digest,
+        refresh: Zeroizing<[u8; 32]>,
+        decryption_key: DecryptionKey,
+    ) -> Self {
+        Self {
+            key,
+            channel,
+            expected_transfer_step,
+            public: InvoicePublicRecord::Threshold {
+                recipient_share,
+                threshold_distribution,
+            },
+            public_digest,
             refresh,
             decryption_key,
             state: InvoiceState::Prepared,
@@ -105,12 +141,12 @@ impl InvoiceRecord {
         self.expected_transfer_step
     }
 
-    pub fn envelope(&self) -> &InvoiceEnvelopeV1 {
-        &self.envelope
+    pub fn public(&self) -> &InvoicePublicRecord {
+        &self.public
     }
 
-    pub fn envelope_digest(&self) -> Digest {
-        self.envelope_digest
+    pub fn public_digest(&self) -> Digest {
+        self.public_digest
     }
 
     pub fn state(&self) -> &InvoiceState {
@@ -169,7 +205,8 @@ impl fmt::Debug for InvoiceRecord {
             .field("key", &self.key)
             .field("channel", &self.channel)
             .field("expected_transfer_step", &self.expected_transfer_step)
-            .field("envelope_digest", &self.envelope_digest)
+            .field("public", &self.public)
+            .field("public_digest", &self.public_digest)
             .field("refresh", &"[REDACTED]")
             .field("decryption_key", &"[REDACTED]")
             .field("state", &self.state)

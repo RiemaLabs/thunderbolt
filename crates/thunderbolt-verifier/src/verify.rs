@@ -1,11 +1,10 @@
-use sha2::{Digest as _, Sha256};
 use thunderbolt_protocol::{
     ActorRole, ChannelEvent, ChannelSnapshot, Digest, EventKind, InvoiceEvent, InvoiceId, LedgerEntry, TransferEvent,
     VerificationEvidence, VerificationKind, VerificationOutcome, PROTOCOL_VERSION,
 };
 use thunderbolt_wire::{
-    from_json_slice, BindingContext, CanonicalDigest, PublicMessageV1, ShareEnvelopeV1, ThresholdEnvelopeV1,
-    TransferEnvelopeV1,
+    from_json_slice, threshold_invoice_package_digest, BindingContext, CanonicalDigest, PublicMessageV1,
+    ShareEnvelopeV1, ThresholdEnvelopeV1, TransferEnvelopeV1,
 };
 
 use crate::context::{CommitteeBinding, DeploymentContext, VerifierIdentity, RECIPIENT_SHARE_MEMBER_ID};
@@ -375,7 +374,10 @@ impl TrustedVerifier {
                     })?;
                 let recipient_digest = canonical_digest(PublicMessageKind::Share, &recipient)?;
                 let distribution_digest = canonical_digest(PublicMessageKind::ThresholdRefresh, &distribution)?;
-                let package_digest = threshold_invoice_package_digest(recipient_digest, distribution_digest);
+                let package_digest = Digest::from_bytes(threshold_invoice_package_digest(
+                    recipient_digest.to_bytes(),
+                    distribution_digest.to_bytes(),
+                ));
                 Ok(VerifiedInvoice {
                     evidence_digest: package_digest,
                     statement_digests: vec![
@@ -713,12 +715,4 @@ where
         .canonical_digest()
         .map(Digest::from_bytes)
         .map_err(|source| VerifierError::VerificationFailed { message, source })
-}
-
-fn threshold_invoice_package_digest(recipient: Digest, distribution: Digest) -> Digest {
-    let mut hasher = Sha256::new();
-    hasher.update(b"bitcoin-thunderbolt/verifier/threshold-invoice-package/v1");
-    hasher.update(recipient.as_bytes());
-    hasher.update(distribution.as_bytes());
-    Digest::from_bytes(hasher.finalize().into())
 }

@@ -1,19 +1,24 @@
-use crate::{KeystoreError, Result, VaultRole};
+use std::collections::{BTreeMap, BTreeSet};
+
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-pub(crate) const BITCOIN_SEED_TAG: u8 = 1;
-pub(crate) const PAILLIER_KEY_TAG: u8 = 2;
-pub(crate) const HOLDER_CREDENTIAL_TAG: u8 = 3;
-pub(crate) const COMMITTEE_SHARE_TAG: u8 = 4;
-pub(crate) const SESSION_NONCE_TAG: u8 = 5;
+use crate::{KeystoreError, Result, VaultRole};
 
-const MIN_BITCOIN_SEED_BYTES: usize = 16;
-const MAX_BITCOIN_SEED_BYTES: usize = 64;
-const MIN_PAILLIER_KEY_BYTES: usize = 32;
-const MAX_PAILLIER_KEY_BYTES: usize = 256 * 1024;
-const MAX_CREDENTIAL_BYTES: usize = 64 * 1024;
-const MAX_COMMITTEE_SHARE_BYTES: usize = 64 * 1024;
-const SESSION_NONCE_BYTES: usize = 32;
+/// Maximum number of encrypted records in one vault.
+pub const MAX_RECORDS: usize = 4_096;
+/// Maximum number of committed transaction receipts retained by one vault.
+pub const MAX_TRANSACTION_RECEIPTS: usize = 4_096;
+/// Maximum number of records changed by one atomic transaction.
+pub const MAX_TRANSACTION_MUTATIONS: usize = 256;
+/// Maximum byte length of a public record key within its namespace.
+pub const MAX_RECORD_KEY_BYTES: usize = 128;
+/// Maximum byte length of one opaque secret record.
+pub const MAX_RECORD_VALUE_BYTES: usize = 512 * 1024;
+/// Maximum combined byte length of all decrypted record values.
+pub const MAX_TOTAL_SECRET_BYTES: usize = 8 * 1024 * 1024;
+
+const LEGACY_KEY: &[u8] = b"default";
 
 macro_rules! opaque_secret {
     ($(#[$metadata:meta])* $name:ident, $minimum:expr, $maximum:expr) => {
@@ -35,6 +40,10 @@ macro_rules! opaque_secret {
             pub fn expose_secret(&self) -> &[u8] {
                 self.0.as_slice()
             }
+
+            pub(crate) fn into_value(self) -> SecretValue {
+                SecretValue(self.0)
+            }
         }
     };
 }
@@ -42,192 +51,678 @@ macro_rules! opaque_secret {
 opaque_secret!(
     /// BIP32/BIP39 seed material for one Holder wallet.
     BitcoinSeed,
-    MIN_BITCOIN_SEED_BYTES,
-    MAX_BITCOIN_SEED_BYTES
+    16,
+    64
 );
 opaque_secret!(
     /// Serialized private Paillier key material.
     PaillierKeyBytes,
-    MIN_PAILLIER_KEY_BYTES,
-    MAX_PAILLIER_KEY_BYTES
+    32,
+    256 * 1024
 );
 opaque_secret!(
     /// Serialized current-Holder ownership credential.
     HolderCredential,
     1,
-    MAX_CREDENTIAL_BYTES
+    64 * 1024
 );
 opaque_secret!(
     /// Serialized threshold share held by one committee member.
     CommitteeMemberShare,
     1,
-    MAX_COMMITTEE_SHARE_BYTES
+    64 * 1024
 );
 opaque_secret!(
     /// A persisted one-time committee signing-session nonce.
     CommitteeSessionNonce,
-    SESSION_NONCE_BYTES,
-    SESSION_NONCE_BYTES
+    32,
+    32
 );
 
+/// Opaque secret bytes stored by a Holder or committee engine adapter.
+///
+/// The value intentionally implements neither `Debug`, `Clone`, nor a serde
+/// trait. Its allocation is zeroized on every return path.
+pub struct SecretValue(Zeroizing<Vec<u8>>);
+
+impl SecretValue {
+    /// Moves bounded, non-empty bytes into a zeroizing value.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
+        let bytes = Zeroizing::new(bytes);
+        if bytes.is_empty() || bytes.len() > MAX_RECORD_VALUE_BYTES {
+            return Err(KeystoreError::InvalidSecretRecord);
+        }
+        Ok(Self(bytes))
+    }
+
+    /// Explicitly borrows the secret bytes for an engine operation.
+    #[must_use]
+    pub fn expose_secret(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+}
+
+/// Typed collection containing an encrypted record.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RecordNamespace {
+    /// The Holder wallet seed collection.
+    WalletSeed,
+    /// Private Paillier material, keyed by key identifier or epoch.
+    PaillierKey,
+    /// Per-channel participant state.
+    Channel,
+    /// Per-invoice Holder state.
+    Invoice,
+    /// Holder ownership credentials, including pending and acknowledged state.
+    Credential,
+    /// Per-channel or per-epoch committee shares.
+    CommitteeShare,
+    /// Reserved or burned committee signing nonces.
+    SessionNonce,
+    /// Versioned private state owned by an external participant engine adapter.
+    AdapterState,
+}
+
+impl RecordNamespace {
+    pub(crate) const fn tag(self) -> u8 {
+        match self {
+            Self::WalletSeed => 1,
+            Self::PaillierKey => 2,
+            Self::Channel => 3,
+            Self::Invoice => 4,
+            Self::Credential => 5,
+            Self::CommitteeShare => 6,
+            Self::SessionNonce => 7,
+            Self::AdapterState => 8,
+        }
+    }
+
+    pub(crate) fn from_tag(tag: u8) -> Result<Self> {
+        match tag {
+            1 => Ok(Self::WalletSeed),
+            2 => Ok(Self::PaillierKey),
+            3 => Ok(Self::Channel),
+            4 => Ok(Self::Invoice),
+            5 => Ok(Self::Credential),
+            6 => Ok(Self::CommitteeShare),
+            7 => Ok(Self::SessionNonce),
+            8 => Ok(Self::AdapterState),
+            _ => Err(KeystoreError::InvalidFormat),
+        }
+    }
+
+    pub(crate) const fn valid_for_role(self, role: VaultRole) -> bool {
+        match role {
+            VaultRole::Holder => !matches!(self, Self::CommitteeShare | Self::SessionNonce),
+            VaultRole::CommitteeMember => !matches!(self, Self::WalletSeed | Self::Invoice | Self::Credential),
+        }
+    }
+}
+
+/// A bounded public key inside one typed encrypted collection.
+///
+/// This type intentionally omits `Debug` so identifiers cannot be emitted by
+/// broad structure logging. It contains no secret value bytes.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RecordKey {
+    pub(crate) namespace: RecordNamespace,
+    pub(crate) id: Vec<u8>,
+}
+
+impl RecordKey {
+    /// Constructs a namespaced key from canonical public identifier bytes.
+    pub fn new(namespace: RecordNamespace, id: Vec<u8>) -> Result<Self> {
+        if id.is_empty() || id.len() > MAX_RECORD_KEY_BYTES {
+            return Err(KeystoreError::InvalidRecordKey);
+        }
+        Ok(Self { namespace, id })
+    }
+
+    /// Constructs a per-channel record key.
+    pub fn channel(id: Vec<u8>) -> Result<Self> {
+        Self::new(RecordNamespace::Channel, id)
+    }
+
+    /// Constructs a per-invoice record key.
+    pub fn invoice(id: Vec<u8>) -> Result<Self> {
+        Self::new(RecordNamespace::Invoice, id)
+    }
+
+    /// Constructs a Holder credential record key.
+    pub fn credential(id: Vec<u8>) -> Result<Self> {
+        Self::new(RecordNamespace::Credential, id)
+    }
+
+    /// Constructs a committee signing-nonce record key.
+    pub fn session_nonce(id: Vec<u8>) -> Result<Self> {
+        Self::new(RecordNamespace::SessionNonce, id)
+    }
+
+    /// Returns the typed collection.
+    #[must_use]
+    pub const fn namespace(&self) -> RecordNamespace {
+        self.namespace
+    }
+
+    /// Returns the canonical public identifier bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        self.id.as_slice()
+    }
+
+    pub(crate) fn legacy(namespace: RecordNamespace) -> Self {
+        Self {
+            namespace,
+            id: LEGACY_KEY.to_vec(),
+        }
+    }
+}
+
+/// Authenticated revision of the complete vault state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct VaultRevision(pub(crate) u64);
+
+impl VaultRevision {
+    /// Constructs a revision for a compare-and-swap request.
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the canonical integer revision.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Authenticated revision at which one record was last changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RecordVersion(pub(crate) u64);
+
+impl RecordVersion {
+    /// Constructs an expected record version for compare-and-swap.
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the canonical integer version.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Authenticated state of a namespaced record key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordStatus {
+    /// No live record or durable tombstone exists.
+    Absent,
+    /// A live secret exists at this version.
+    Present(RecordVersion),
+    /// A committee signing nonce was consumed at this version.
+    Tombstoned(RecordVersion),
+}
+
+/// Expected state of a record in a compare-and-swap mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpectedRecord {
+    /// The key must not exist.
+    Absent,
+    /// The key must exist at exactly this authenticated version.
+    Version(RecordVersion),
+}
+
+/// Stable caller-chosen identifier for an idempotent transaction.
+///
+/// This type intentionally omits `Debug`; applications should log their own
+/// non-sensitive request correlation identifier instead.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TransactionId(pub(crate) [u8; 32]);
+
+impl TransactionId {
+    /// Constructs an identifier from canonical bytes.
+    #[must_use]
+    pub const fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Returns the canonical bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// Result of an idempotent vault transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitOutcome {
+    /// The mutations were durably committed at this revision.
+    Applied(VaultRevision),
+    /// The identifier was already durably committed at this revision.
+    Replayed(VaultRevision),
+}
+
+/// Borrowed opaque record returned by a healthy open vault.
+///
+/// This view intentionally implements neither `Debug` nor `Clone`.
+pub struct RecordView<'a> {
+    version: RecordVersion,
+    value: &'a SecretValue,
+}
+
+impl<'a> RecordView<'a> {
+    /// Returns the authenticated record version for compare-and-swap.
+    #[must_use]
+    pub const fn version(&self) -> RecordVersion {
+        self.version
+    }
+
+    /// Explicitly borrows the secret record bytes.
+    #[must_use]
+    pub fn expose_secret(&self) -> &'a [u8] {
+        self.value.expose_secret()
+    }
+}
+
+pub(crate) struct StoredRecord {
+    pub(crate) version: RecordVersion,
+    pub(crate) value: Option<SecretValue>,
+}
+
+pub(crate) struct TransactionReceipt {
+    pub(crate) revision: u64,
+    pub(crate) mutation_digest: [u8; 32],
+}
+
 #[derive(Default)]
-pub(crate) struct Records {
-    pub(crate) bitcoin_seed: Option<BitcoinSeed>,
-    pub(crate) paillier_key: Option<PaillierKeyBytes>,
-    pub(crate) holder_credential: Option<HolderCredential>,
-    pub(crate) committee_share: Option<CommitteeMemberShare>,
-    pub(crate) session_nonce: Option<CommitteeSessionNonce>,
+pub(crate) struct RecordStore {
+    pub(crate) revision: u64,
+    pub(crate) records: BTreeMap<RecordKey, StoredRecord>,
+    pub(crate) receipts: BTreeMap<TransactionId, TransactionReceipt>,
+    pub(crate) total_value_bytes: usize,
 }
 
-impl Records {
-    pub(crate) fn bitmap(&self) -> u8 {
-        let mut bitmap = 0_u8;
-        if self.bitcoin_seed.is_some() {
-            bitmap |= 1 << (BITCOIN_SEED_TAG - 1);
-        }
-        if self.paillier_key.is_some() {
-            bitmap |= 1 << (PAILLIER_KEY_TAG - 1);
-        }
-        if self.holder_credential.is_some() {
-            bitmap |= 1 << (HOLDER_CREDENTIAL_TAG - 1);
-        }
-        if self.committee_share.is_some() {
-            bitmap |= 1 << (COMMITTEE_SHARE_TAG - 1);
-        }
-        if self.session_nonce.is_some() {
-            bitmap |= 1 << (SESSION_NONCE_TAG - 1);
-        }
-        bitmap
+impl RecordStore {
+    pub(crate) fn get(&self, key: &RecordKey) -> Option<RecordView<'_>> {
+        self.records.get(key).and_then(|record| {
+            record.value.as_ref().map(|value| RecordView {
+                version: record.version,
+                value,
+            })
+        })
     }
 
-    pub(crate) fn validate_role(&self, role: VaultRole) -> Result<()> {
-        let invalid = match role {
-            VaultRole::Holder => self.committee_share.is_some() || self.session_nonce.is_some(),
-            VaultRole::CommitteeMember => self.bitcoin_seed.is_some() || self.holder_credential.is_some(),
+    pub(crate) fn status(&self, key: &RecordKey) -> RecordStatus {
+        match self.records.get(key) {
+            None => RecordStatus::Absent,
+            Some(record) if record.value.is_some() => RecordStatus::Present(record.version),
+            Some(record) => RecordStatus::Tombstoned(record.version),
+        }
+    }
+
+    pub(crate) fn receipt(&self, transaction_id: &TransactionId) -> Option<&TransactionReceipt> {
+        self.receipts.get(transaction_id)
+    }
+
+    pub(crate) fn record_count(&self) -> usize {
+        self.records.len()
+    }
+
+    pub(crate) fn receipt_count(&self) -> usize {
+        self.receipts.len()
+    }
+
+    pub(crate) fn total_value_bytes(&self) -> usize {
+        self.total_value_bytes
+    }
+
+    pub(crate) fn validate(&self, role: VaultRole) -> Result<()> {
+        if self.records.len() > MAX_RECORDS
+            || self.receipts.len() > MAX_TRANSACTION_RECEIPTS
+            || self.total_value_bytes > MAX_TOTAL_SECRET_BYTES
+        {
+            return Err(KeystoreError::RecordLimitExceeded);
+        }
+        let mut calculated_total = 0_usize;
+        for (key, record) in &self.records {
+            if !key.namespace.valid_for_role(role) {
+                return Err(KeystoreError::InvalidRecordForRole);
+            }
+            if key.id.is_empty()
+                || key.id.len() > MAX_RECORD_KEY_BYTES
+                || record.version.0 == 0
+                || record.version.0 > self.revision
+            {
+                return Err(KeystoreError::InvalidFormat);
+            }
+            match &record.value {
+                Some(value) => {
+                    if value.expose_secret().is_empty() || value.expose_secret().len() > MAX_RECORD_VALUE_BYTES {
+                        return Err(KeystoreError::InvalidFormat);
+                    }
+                    calculated_total = calculated_total
+                        .checked_add(value.expose_secret().len())
+                        .ok_or(KeystoreError::RecordLimitExceeded)?;
+                }
+                None if key.namespace != RecordNamespace::SessionNonce => {
+                    return Err(KeystoreError::InvalidFormat);
+                }
+                None => {}
+            }
+        }
+        if calculated_total != self.total_value_bytes {
+            return Err(KeystoreError::InvalidFormat);
+        }
+        if self
+            .receipts
+            .values()
+            .any(|receipt| receipt.revision == 0 || receipt.revision > self.revision)
+        {
+            return Err(KeystoreError::InvalidFormat);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn insert_loaded(&mut self, key: RecordKey, record: StoredRecord) -> Result<()> {
+        if let Some(value) = &record.value {
+            self.total_value_bytes = self
+                .total_value_bytes
+                .checked_add(value.expose_secret().len())
+                .ok_or(KeystoreError::RecordLimitExceeded)?;
+        }
+        if self.records.insert(key, record).is_some() {
+            return Err(KeystoreError::InvalidFormat);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn apply(
+        &mut self,
+        revision: u64,
+        mutations: BTreeMap<RecordKey, StagedMutation>,
+    ) -> Vec<(RecordKey, Option<StoredRecord>)> {
+        let mut journal = Vec::with_capacity(mutations.len());
+        for (key, mutation) in mutations {
+            let previous = self.records.remove(&key);
+            if let Some(value) = previous.as_ref().and_then(|record| record.value.as_ref()) {
+                self.total_value_bytes -= value.expose_secret().len();
+            }
+            match mutation {
+                StagedMutation::Put { value, .. } => {
+                    self.total_value_bytes += value.expose_secret().len();
+                    self.records.insert(
+                        key.clone(),
+                        StoredRecord {
+                            version: RecordVersion(revision),
+                            value: Some(value),
+                        },
+                    );
+                }
+                StagedMutation::Remove { .. } if key.namespace == RecordNamespace::SessionNonce => {
+                    self.records.insert(
+                        key.clone(),
+                        StoredRecord {
+                            version: RecordVersion(revision),
+                            value: None,
+                        },
+                    );
+                }
+                StagedMutation::Remove { .. } => {}
+            }
+            journal.push((key, previous));
+        }
+        journal
+    }
+
+    pub(crate) fn rollback(&mut self, journal: Vec<(RecordKey, Option<StoredRecord>)>) {
+        for (key, previous) in journal.into_iter().rev() {
+            if let Some(value) = self.records.remove(&key).and_then(|record| record.value) {
+                self.total_value_bytes -= value.expose_secret().len();
+            }
+            if let Some(record) = previous {
+                if let Some(value) = &record.value {
+                    self.total_value_bytes += value.expose_secret().len();
+                }
+                self.records.insert(key, record);
+            }
+        }
+    }
+
+    pub(crate) fn preflight(&self, mutations: &BTreeMap<RecordKey, StagedMutation>) -> Result<()> {
+        if mutations.len() > MAX_TRANSACTION_MUTATIONS {
+            return Err(KeystoreError::TransactionLimitExceeded);
+        }
+        let mut count = self.records.len();
+        let mut total = self.total_value_bytes;
+        for (key, mutation) in mutations {
+            let previous = self.records.get(key);
+            if let Some(value) = previous.and_then(|record| record.value.as_ref()) {
+                total = total
+                    .checked_sub(value.expose_secret().len())
+                    .ok_or(KeystoreError::InvalidFormat)?;
+            }
+            if previous.is_none() && matches!(mutation, StagedMutation::Put { .. }) {
+                count = count.checked_add(1).ok_or(KeystoreError::RecordLimitExceeded)?;
+            }
+            match mutation {
+                StagedMutation::Put { value, .. } => {
+                    total = total
+                        .checked_add(value.expose_secret().len())
+                        .ok_or(KeystoreError::RecordLimitExceeded)?;
+                }
+                StagedMutation::Remove { .. } if key.namespace == RecordNamespace::SessionNonce => {}
+                StagedMutation::Remove { .. } => {
+                    count = count.checked_sub(1).ok_or(KeystoreError::InvalidFormat)?;
+                }
+            }
+        }
+        if count > MAX_RECORDS || total > MAX_TOTAL_SECRET_BYTES {
+            return Err(KeystoreError::RecordLimitExceeded);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_conflicts(&self, mutations: &BTreeMap<RecordKey, StagedMutation>) -> Result<()> {
+        for (key, mutation) in mutations {
+            let actual = self.records.get(key);
+            if key.namespace == RecordNamespace::SessionNonce
+                && matches!(mutation, StagedMutation::Put { .. })
+                && actual.is_some_and(|record| record.value.is_some())
+            {
+                return Err(KeystoreError::NonceAlreadyReserved);
+            }
+            let matches = match mutation.expected() {
+                ExpectedRecord::Absent => actual.is_none(),
+                ExpectedRecord::Version(version) => actual.map(|record| record.version) == Some(version),
+            };
+            if !matches {
+                return Err(KeystoreError::RecordConflict);
+            }
+            if key.namespace == RecordNamespace::SessionNonce && actual.is_some_and(|record| record.value.is_none()) {
+                return Err(KeystoreError::NonceConsumed);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn clear_sensitive(&mut self) {
+        self.records.clear();
+        self.receipts.clear();
+        self.total_value_bytes = 0;
+    }
+}
+
+pub(crate) enum StagedMutation {
+    Put {
+        expected: ExpectedRecord,
+        value: SecretValue,
+    },
+    Remove {
+        expected: ExpectedRecord,
+    },
+}
+
+impl StagedMutation {
+    fn expected(&self) -> ExpectedRecord {
+        match self {
+            Self::Put { expected, .. } | Self::Remove { expected } => *expected,
+        }
+    }
+}
+
+/// Builder for one atomic, compare-and-swap update across multiple records.
+pub struct Transaction {
+    role: VaultRole,
+    staged: BTreeMap<RecordKey, StagedMutation>,
+    touched: BTreeSet<RecordKey>,
+}
+
+impl Transaction {
+    pub(crate) fn new(role: VaultRole) -> Self {
+        Self {
+            role,
+            staged: BTreeMap::new(),
+            touched: BTreeSet::new(),
+        }
+    }
+
+    /// Stages an insert or replacement only if the current version matches.
+    pub fn compare_and_swap(&mut self, key: RecordKey, expected: ExpectedRecord, value: SecretValue) -> Result<()> {
+        self.check_key(&key)?;
+        self.staged.insert(key, StagedMutation::Put { expected, value });
+        Ok(())
+    }
+
+    /// Stages a removal only if the current authenticated version matches.
+    pub fn remove(&mut self, key: RecordKey, expected: RecordVersion) -> Result<()> {
+        self.check_key(&key)?;
+        self.staged.insert(
+            key,
+            StagedMutation::Remove {
+                expected: ExpectedRecord::Version(expected),
+            },
+        );
+        Ok(())
+    }
+
+    fn check_key(&mut self, key: &RecordKey) -> Result<()> {
+        if !key.namespace.valid_for_role(self.role) {
+            return Err(KeystoreError::InvalidRecordForRole);
+        }
+        if !self.touched.insert(key.clone()) {
+            return Err(KeystoreError::DuplicateMutation);
+        }
+        if self.touched.len() > MAX_TRANSACTION_MUTATIONS {
+            return Err(KeystoreError::TransactionLimitExceeded);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn into_mutations(self) -> BTreeMap<RecordKey, StagedMutation> {
+        self.staged
+    }
+}
+
+pub(crate) fn mutation_digest(mutations: &BTreeMap<RecordKey, StagedMutation>) -> Result<[u8; 32]> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"bitcoin-thunderbolt/keystore/transaction/v1\0");
+    let count = u32::try_from(mutations.len()).map_err(|_| KeystoreError::TransactionLimitExceeded)?;
+    hasher.update(count.to_be_bytes());
+    for (key, mutation) in mutations {
+        hasher.update([key.namespace.tag()]);
+        let key_length = u16::try_from(key.id.len()).map_err(|_| KeystoreError::InvalidRecordKey)?;
+        hasher.update(key_length.to_be_bytes());
+        hasher.update(&key.id);
+        match mutation.expected() {
+            ExpectedRecord::Absent => hasher.update([0]),
+            ExpectedRecord::Version(version) => {
+                hasher.update([1]);
+                hasher.update(version.0.to_be_bytes());
+            }
+        }
+        match mutation {
+            StagedMutation::Put { value, .. } => {
+                hasher.update([1]);
+                let length =
+                    u32::try_from(value.expose_secret().len()).map_err(|_| KeystoreError::InvalidSecretRecord)?;
+                hasher.update(length.to_be_bytes());
+                hasher.update(Sha256::digest(value.expose_secret()));
+            }
+            StagedMutation::Remove { .. } => hasher.update([2]),
+        }
+    }
+    Ok(hasher.finalize().into())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::{
+        ExpectedRecord, RecordKey, RecordNamespace, RecordStore, RecordVersion, SecretValue, StagedMutation,
+        StoredRecord, MAX_RECORDS, MAX_RECORD_VALUE_BYTES,
+    };
+    use crate::KeystoreError;
+
+    #[test]
+    fn record_count_bound_rejects_one_more_key() -> crate::Result<()> {
+        let mut store = RecordStore {
+            revision: 1,
+            ..RecordStore::default()
         };
-        if invalid {
-            Err(KeystoreError::InvalidRecordForRole)
-        } else {
-            Ok(())
+        for index in 0..MAX_RECORDS {
+            store.insert_loaded(
+                RecordKey::new(RecordNamespace::AdapterState, index.to_be_bytes().to_vec())?,
+                StoredRecord {
+                    version: RecordVersion(1),
+                    value: Some(SecretValue::from_bytes(vec![0x71])?),
+                },
+            )?;
         }
+        let mut mutations = BTreeMap::new();
+        mutations.insert(
+            RecordKey::new(RecordNamespace::AdapterState, b"one-too-many".to_vec())?,
+            StagedMutation::Put {
+                expected: ExpectedRecord::Absent,
+                value: SecretValue::from_bytes(vec![0x72])?,
+            },
+        );
+        assert!(matches!(
+            store.preflight(&mutations),
+            Err(KeystoreError::RecordLimitExceeded)
+        ));
+        Ok(())
     }
 
-    pub(crate) fn encode(&self) -> Result<Zeroizing<Vec<u8>>> {
-        let mut output = Zeroizing::new(Vec::with_capacity(1024));
-        let count = self.bitmap().count_ones();
-        let count = u8::try_from(count).map_err(|_| KeystoreError::InvalidFormat)?;
-        output.push(count);
-
-        if let Some(record) = &self.bitcoin_seed {
-            encode_record(&mut output, BITCOIN_SEED_TAG, record.expose_secret())?;
+    #[test]
+    fn total_secret_bound_rejects_one_more_byte() -> crate::Result<()> {
+        let mut store = RecordStore {
+            revision: 1,
+            ..RecordStore::default()
+        };
+        for index in 0..16_usize {
+            store.insert_loaded(
+                RecordKey::new(RecordNamespace::AdapterState, index.to_be_bytes().to_vec())?,
+                StoredRecord {
+                    version: RecordVersion(1),
+                    value: Some(SecretValue::from_bytes(vec![0x73; MAX_RECORD_VALUE_BYTES])?),
+                },
+            )?;
         }
-        if let Some(record) = &self.paillier_key {
-            encode_record(&mut output, PAILLIER_KEY_TAG, record.expose_secret())?;
-        }
-        if let Some(record) = &self.holder_credential {
-            encode_record(&mut output, HOLDER_CREDENTIAL_TAG, record.expose_secret())?;
-        }
-        if let Some(record) = &self.committee_share {
-            encode_record(&mut output, COMMITTEE_SHARE_TAG, record.expose_secret())?;
-        }
-        if let Some(record) = &self.session_nonce {
-            encode_record(&mut output, SESSION_NONCE_TAG, record.expose_secret())?;
-        }
-        Ok(output)
-    }
-
-    pub(crate) fn decode(plaintext: &[u8], authenticated_bitmap: u8, role: VaultRole) -> Result<Self> {
-        if authenticated_bitmap & !0b0001_1111 != 0 {
-            return Err(KeystoreError::InvalidFormat);
-        }
-
-        let mut cursor = SecretCursor::new(plaintext);
-        let count = cursor.read_u8()?;
-        let mut records = Self::default();
-        let mut seen = 0_u8;
-
-        for _ in 0..count {
-            let tag = cursor.read_u8()?;
-            if !(BITCOIN_SEED_TAG..=SESSION_NONCE_TAG).contains(&tag) {
-                return Err(KeystoreError::InvalidFormat);
-            }
-            let bit = 1_u8
-                .checked_shl(u32::from(tag - 1))
-                .ok_or(KeystoreError::InvalidFormat)?;
-            if seen & bit != 0 {
-                return Err(KeystoreError::InvalidFormat);
-            }
-            seen |= bit;
-
-            let length = cursor.read_u32()?;
-            let length = usize::try_from(length).map_err(|_| KeystoreError::InvalidFormat)?;
-            let bytes = cursor.take(length)?;
-            match tag {
-                BITCOIN_SEED_TAG => records.bitcoin_seed = Some(BitcoinSeed::from_bytes(bytes.to_vec())?),
-                PAILLIER_KEY_TAG => records.paillier_key = Some(PaillierKeyBytes::from_bytes(bytes.to_vec())?),
-                HOLDER_CREDENTIAL_TAG => {
-                    records.holder_credential = Some(HolderCredential::from_bytes(bytes.to_vec())?);
-                }
-                COMMITTEE_SHARE_TAG => {
-                    records.committee_share = Some(CommitteeMemberShare::from_bytes(bytes.to_vec())?);
-                }
-                SESSION_NONCE_TAG => {
-                    records.session_nonce = Some(CommitteeSessionNonce::from_bytes(bytes.to_vec())?);
-                }
-                _ => return Err(KeystoreError::InvalidFormat),
-            }
-        }
-
-        if !cursor.is_empty() || seen != authenticated_bitmap || u32::from(count) != seen.count_ones() {
-            return Err(KeystoreError::InvalidFormat);
-        }
-        records.validate_role(role)?;
-        Ok(records)
-    }
-}
-
-fn encode_record(output: &mut Zeroizing<Vec<u8>>, tag: u8, bytes: &[u8]) -> Result<()> {
-    let length = u32::try_from(bytes.len()).map_err(|_| KeystoreError::InvalidSecretRecord)?;
-    output.push(tag);
-    output.extend_from_slice(&length.to_be_bytes());
-    output.extend_from_slice(bytes);
-    Ok(())
-}
-
-struct SecretCursor<'a> {
-    bytes: &'a [u8],
-    position: usize,
-}
-
-impl<'a> SecretCursor<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, position: 0 }
-    }
-
-    fn read_u8(&mut self) -> Result<u8> {
-        let byte = self
-            .bytes
-            .get(self.position)
-            .copied()
-            .ok_or(KeystoreError::InvalidFormat)?;
-        self.position = self.position.checked_add(1).ok_or(KeystoreError::InvalidFormat)?;
-        Ok(byte)
-    }
-
-    fn read_u32(&mut self) -> Result<u32> {
-        let bytes = self.take(4)?;
-        let bytes = <[u8; 4]>::try_from(bytes).map_err(|_| KeystoreError::InvalidFormat)?;
-        Ok(u32::from_be_bytes(bytes))
-    }
-
-    fn take(&mut self, length: usize) -> Result<&'a [u8]> {
-        let end = self.position.checked_add(length).ok_or(KeystoreError::InvalidFormat)?;
-        let value = self.bytes.get(self.position..end).ok_or(KeystoreError::InvalidFormat)?;
-        self.position = end;
-        Ok(value)
-    }
-
-    fn is_empty(&self) -> bool {
-        self.position == self.bytes.len()
+        let mut mutations = BTreeMap::new();
+        mutations.insert(
+            RecordKey::new(RecordNamespace::AdapterState, b"one-byte-over".to_vec())?,
+            StagedMutation::Put {
+                expected: ExpectedRecord::Absent,
+                value: SecretValue::from_bytes(vec![0x74])?,
+            },
+        );
+        assert!(matches!(
+            store.preflight(&mutations),
+            Err(KeystoreError::RecordLimitExceeded)
+        ));
+        Ok(())
     }
 }

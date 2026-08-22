@@ -14,7 +14,6 @@ workspace = true
 
 [dependencies]
 bitcoin = { version = "0.32.5", features = ["serde"] }
-sha2 = "0.10.8"
 thiserror = "2.0.12"
 thunderbolt-protocol = { path = "../thunderbolt-protocol" }
 thunderbolt-wire = { path = "../thunderbolt-wire" }

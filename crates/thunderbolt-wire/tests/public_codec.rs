@@ -9,9 +9,9 @@ use thunderbolt_core::zkp::{
     ShareEncryptionWitness, TransferStatement, TransferWitness,
 };
 use thunderbolt_wire::{
-    from_json_slice, to_json_vec, BindingContext, CanonicalDigest, CanonicalInteger, ChannelId, HexBytes,
-    InvoiceEnvelopeV1, PointHex, PublicMessageV1, ShareEnvelopeV1, ShareStatementV1, ThresholdEnvelopeV1,
-    TransferEnvelopeV1, ValidateWire, WireError, MAX_DEPLOYMENT_ID_BYTES, MAX_WIRE_MESSAGE_BYTES,
+    from_json_slice, threshold_invoice_package_digest, to_json_vec, BindingContext, CanonicalDigest, CanonicalInteger,
+    ChannelId, HexBytes, InvoiceEnvelopeV1, PointHex, PublicMessageV1, ShareEnvelopeV1, ShareStatementV1,
+    ThresholdEnvelopeV1, TransferEnvelopeV1, ValidateWire, WireError, MAX_DEPLOYMENT_ID_BYTES, MAX_WIRE_MESSAGE_BYTES,
     PAILLIER_MODULUS_BYTES, RECIPIENT_SHARE_MEMBER_ID,
 };
 
@@ -267,4 +267,12 @@ fn binding_accepts_full_outpoints_and_protocol_invoice_ids_without_truncation() 
         [0x22; thunderbolt_wire::MAX_INVOICE_ID_BYTES + 1],
     )
     .is_err());
+}
+
+#[test]
+fn threshold_invoice_package_digest_has_a_golden_vector() {
+    assert_eq!(
+        hex::encode(threshold_invoice_package_digest([0x11; 32], [0x22; 32])),
+        "7530d5ab12fcae009101fa39b4433f26e9f40d32581c6fa38ca63956b44bfa52"
+    );
 }

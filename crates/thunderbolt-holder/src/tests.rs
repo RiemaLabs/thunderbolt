@@ -6,11 +6,12 @@ use proptest::prelude::*;
 use secp::{MaybeScalar, Scalar};
 use thunderbolt_protocol::{BitcoinTxid, ChannelId, Digest, EntryHash, InvoiceId};
 use thunderbolt_wire::{
-    from_json_slice, to_json_vec, CanonicalDigest, PaillierCiphertextHex, ProofResponseHex, TransferEnvelopeV1,
+    from_json_slice, to_json_vec, CanonicalDigest, PaillierCiphertextHex, PaillierPublicKeyHex, ProofResponseHex,
+    TransferEnvelopeV1,
 };
 
 use super::*;
-use crate::engine::InvoiceFixture;
+use crate::engine::{InvoiceFixture, ThresholdInvoiceFixture};
 
 // Public deterministic test primes, split into short literals so secret
 // scanners do not mistake cryptographic fixtures for deployable credentials.
@@ -86,6 +87,42 @@ const COMMITTEE_Q: &str = concat!(
     "9bb3dc60f98796a5",
     "3c5e3253c8f4993f",
 );
+const MEMBER_TWO_P: &str = concat!(
+    "f140e15b8a40c453",
+    "77a11136b8983bcf",
+    "30959cd6a807873a",
+    "63d83525c8b53e37",
+    "1a7620369c5b1fb5",
+    "facbbef931ac56d9",
+    "4e95c741e10c094c",
+    "e64e9873e70a562d",
+    "ab4b304f2ac2668f",
+    "7cd4599b5d2caf33",
+    "14bf0a8acbb1bc33",
+    "5efe484793bc2283",
+    "76bc1076831158af",
+    "2393473ecefd030b",
+    "4d431ab5dcd01fb1",
+    "03b146a178b0e169",
+);
+const MEMBER_TWO_Q: &str = concat!(
+    "f3e46053c59c1b12",
+    "0daa3a6267e68aea",
+    "1dc784f84e8cd310",
+    "cd6baa5035888736",
+    "e9958c5d5d470a56",
+    "fc0557cf26a1ba00",
+    "46b3ca8e9822e323",
+    "b38e06ca71f2be55",
+    "21fb586e84a0f515",
+    "17ff918686536c5c",
+    "62a3f655ac5b53ba",
+    "0575b7caa05be290",
+    "5ab5aa7d6aaa4462",
+    "93f9d2f4e661efe2",
+    "5ba15a41f9180bb7",
+    "e0c4477f07bd020f",
+);
 
 #[derive(Clone, Debug, Default)]
 struct MemoryData {
@@ -139,7 +176,7 @@ impl VaultTransaction for MemoryTransaction<'_> {
         self.staged
             .invoices
             .values_mut()
-            .find(|record| record.envelope_digest() == *digest)
+            .find(|record| record.public_digest() == *digest)
     }
 
     fn insert_invoice(&mut self, record: InvoiceRecord) -> Result<(), VaultError> {
@@ -227,6 +264,46 @@ fn committee_key() -> Result<DecryptionKey, HolderError> {
     fixed_key(COMMITTEE_P, COMMITTEE_Q)
 }
 
+fn member_two_key() -> Result<DecryptionKey, HolderError> {
+    fixed_key(MEMBER_TWO_P, MEMBER_TWO_Q)
+}
+
+fn threshold_roster() -> Result<ThresholdRoster, HolderError> {
+    let first = committee_key()?;
+    let second = member_two_key()?;
+    ThresholdRoster::new(
+        2,
+        vec![
+            ThresholdMemberPublicKey {
+                member_id: 2,
+                encryption_key: EncryptionKey::from(&second),
+            },
+            ThresholdMemberPublicKey {
+                member_id: 1,
+                encryption_key: EncryptionKey::from(&first),
+            },
+        ],
+    )
+}
+
+fn wrong_key_roster() -> Result<ThresholdRoster, HolderError> {
+    let first = committee_key()?;
+    let wrong = recipient_key()?;
+    ThresholdRoster::new(
+        2,
+        vec![
+            ThresholdMemberPublicKey {
+                member_id: 1,
+                encryption_key: EncryptionKey::from(&first),
+            },
+            ThresholdMemberPublicKey {
+                member_id: 2,
+                encryption_key: EncryptionKey::from(&wrong),
+            },
+        ],
+    )
+}
+
 fn channel(tag: u8) -> Result<ChannelContext, HolderError> {
     let channel_id = ChannelId::new(BitcoinTxid::from_bytes([tag; 32]), u32::from(tag));
     ChannelContext::new(
@@ -270,6 +347,23 @@ fn prepared_invoice(
             refresh,
             bob_nonce: BigNumber::from(2_u32),
             committee_nonce: BigNumber::from(3_u32),
+        },
+    )
+}
+
+fn prepared_threshold_invoice(
+    recipient: &mut HolderEngine<MemoryVault>,
+    channel: &ChannelContext,
+    invoice_id: &InvoiceId,
+    roster: ThresholdRoster,
+    refresh: Scalar,
+) -> Result<PreparedThresholdInvoice, HolderError> {
+    recipient.create_threshold_invoice_with_fixture(
+        ThresholdInvoiceRequest::new(channel.clone(), invoice_id.clone(), 1, roster)?,
+        ThresholdInvoiceFixture {
+            decryption_key: recipient_key()?,
+            refresh,
+            recipient_nonce: BigNumber::from(7_u32),
         },
     )
 }
@@ -319,6 +413,52 @@ fn prepare_flow(holder: u16, refresh: u16, tag: u8) -> Result<Flow, HolderError>
         channel,
         invoice_id,
         invoice_envelope,
+        prepared_transfer,
+    })
+}
+
+struct ThresholdFlow {
+    sender: HolderEngine<MemoryVault>,
+    recipient: HolderEngine<MemoryVault>,
+    channel: ChannelContext,
+    invoice_id: InvoiceId,
+    roster: ThresholdRoster,
+    prepared_invoice: PreparedThresholdInvoice,
+    prepared_transfer: PreparedTransfer,
+}
+
+fn prepare_threshold_flow(holder: u16, refresh: u16, tag: u8) -> Result<ThresholdFlow, HolderError> {
+    let channel = channel(tag)?;
+    let invoice_id = invoice_id(tag)?;
+    let roster = threshold_roster()?;
+    let mut sender = initialize_engine(tag.wrapping_add(11))?;
+    let mut recipient = initialize_engine(tag.wrapping_add(12))?;
+    let holder_secret = scalar(holder)?;
+    let _ = sender.install_genesis_credential(GenesisCredential::new(
+        channel.clone(),
+        CredentialSecret::from_bytes(holder_secret.serialize())?,
+        channel.anchor_base() * holder_secret,
+        genesis_ack(tag.wrapping_add(10)),
+    )?)?;
+    let prepared_invoice =
+        prepared_threshold_invoice(&mut recipient, &channel, &invoice_id, roster.clone(), scalar(refresh)?)?;
+    let package_digest = prepared_invoice.package_digest()?;
+    let committed_invoice = CommittedThresholdInvoice::new(
+        prepared_invoice.recipient_share().clone(),
+        prepared_invoice.threshold_distribution().clone(),
+        1,
+        acknowledgement(package_digest.to_bytes(), 1, tag.wrapping_add(13)),
+    )?;
+    let _ = recipient.verify_committed_threshold_invoice(&channel, &invoice_id, &roster, committed_invoice.clone())?;
+    let verified = sender.verify_committed_threshold_invoice(&channel, &invoice_id, &roster, committed_invoice)?;
+    let prepared_transfer = sender.create_transfer_with_fixture_nonce(&verified, BigNumber::from(11_u32))?;
+    Ok(ThresholdFlow {
+        sender,
+        recipient,
+        channel,
+        invoice_id,
+        roster,
+        prepared_invoice,
         prepared_transfer,
     })
 }
@@ -450,6 +590,162 @@ proptest! {
             .ok_or_else(|| TestCaseError::fail("old credential was deleted"))?;
         prop_assert_eq!(old.transferred_by(), Some(committed.acknowledgement()));
         prop_assert!(prop_result(flow.recipient.credential_summary(&flow.channel, 1))?.is_some());
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(2))]
+
+    #[test]
+    fn threshold_restart_idempotency_wrong_key_and_transfer_roundtrip(
+        holder in 1_u16..=80,
+        refresh in 1_u16..=80,
+        tag in 1_u8..=200,
+    ) {
+        let flow = prop_result(prepare_threshold_flow(holder, refresh, tag))?;
+        let ThresholdFlow {
+            mut sender,
+            recipient,
+            channel,
+            invoice_id,
+            roster,
+            prepared_invoice,
+            prepared_transfer,
+        } = flow;
+
+        let mut restarted = HolderEngine::new(recipient.into_vault());
+        let wrong_retry = prepared_threshold_invoice(
+            &mut restarted,
+            &channel,
+            &invoice_id,
+            prop_result(wrong_key_roster())?,
+            prop_result(scalar(refresh))?,
+        );
+        prop_assert!(wrong_retry.is_err());
+
+        let retry = prop_result(prepared_threshold_invoice(
+            &mut restarted,
+            &channel,
+            &invoice_id,
+            roster,
+            prop_result(scalar(refresh))?,
+        ))?;
+        prop_assert_eq!(retry.recipient_share(), prepared_invoice.recipient_share());
+        prop_assert_eq!(retry.threshold_distribution(), prepared_invoice.threshold_distribution());
+        prop_assert_eq!(retry.private_record(), prepared_invoice.private_record());
+
+        let committed = prop_result(committed_transfer(&prepared_transfer, tag.wrapping_add(14)))?;
+        let received = prop_result(restarted.receive_committed_transfer(&channel, &invoice_id, &committed))?;
+        prop_assert_eq!(received, ReceiveDisposition::OwnershipRecorded);
+        let acknowledged = prop_result(sender.acknowledge_committed_transfer(&channel, &committed))?;
+        prop_assert_eq!(
+            acknowledged,
+            TransferAcknowledgementDisposition::CredentialRetainedAndMarkedTransferred
+        );
+        let old = prop_result(sender.credential_summary(&channel, 0))?
+            .ok_or_else(|| TestCaseError::fail("threshold path deleted the old credential"))?;
+        prop_assert_eq!(old.transferred_by(), Some(committed.acknowledgement()));
+        let next = prop_result(restarted.credential_summary(&channel, 1))?
+            .ok_or_else(|| TestCaseError::fail("threshold Recipient credential missing"))?;
+        let sum = prop_result(scalar(holder))? + prop_result(scalar(refresh))?;
+        let expected_anchor = match sum {
+            MaybeScalar::Valid(value) => channel.anchor_base() * value,
+            MaybeScalar::Zero => return Err(TestCaseError::fail("test range unexpectedly summed to zero")),
+        };
+        prop_assert_eq!(next.anchor(), expected_anchor);
+    }
+
+    #[test]
+    fn threshold_package_tamper_roster_and_wrong_keys_are_rejected(tag in 1_u8..=200) {
+        let channel = prop_result(channel(tag))?;
+        let invoice_id = prop_result(invoice_id(tag))?;
+        let roster = prop_result(threshold_roster())?;
+        let mut recipient = prop_result(initialize_engine(tag.wrapping_add(21)))?;
+        let prepared = prop_result(prepared_threshold_invoice(
+            &mut recipient,
+            &channel,
+            &invoice_id,
+            roster.clone(),
+            prop_result(scalar(19))?,
+        ))?;
+
+        for mutation in 0_u8..5 {
+            let mut recipient_share = prepared.recipient_share().clone();
+            let mut threshold_distribution = prepared.threshold_distribution().clone();
+            let expected_roster = if mutation == 4 {
+                prop_result(wrong_key_roster())?
+            } else {
+                roster.clone()
+            };
+            match mutation {
+                0 => {
+                    recipient_share.proof.z = ProofResponseHex::from_bytes("tampered Recipient response", [1_u8])
+                        .map_err(|error| TestCaseError::fail(error.to_string()))?;
+                }
+                1 => {
+                    threshold_distribution.distribution.encrypted_shares[0].proof.z =
+                        ProofResponseHex::from_bytes("tampered member response", [1_u8])
+                            .map_err(|error| TestCaseError::fail(error.to_string()))?;
+                }
+                2 => {
+                    let wrong_key = prop_result(recipient_key())?;
+                    threshold_distribution.distribution.encrypted_shares[0].encryption_key =
+                        PaillierPublicKeyHex::from_bytes(
+                            "wrong threshold member key",
+                            EncryptionKey::from(&wrong_key).to_bytes(),
+                        ).map_err(|error| TestCaseError::fail(error.to_string()))?;
+                }
+                3 => {
+                    threshold_distribution.binding.committee_epoch =
+                        threshold_distribution.binding.committee_epoch.saturating_add(1);
+                }
+                4 => {}
+                _ => return Err(TestCaseError::fail("unreachable threshold mutation")),
+            }
+
+            let attempt = (|| -> Result<VerifiedInvoice, HolderError> {
+                let digest = threshold_invoice_package_digest(&recipient_share, &threshold_distribution)?;
+                let committed = CommittedThresholdInvoice::new(
+                    recipient_share,
+                    threshold_distribution,
+                    1,
+                    acknowledgement(digest.to_bytes(), 1, tag.wrapping_add(mutation)),
+                )?;
+                recipient.verify_committed_threshold_invoice(
+                    &channel,
+                    &invoice_id,
+                    &expected_roster,
+                    committed,
+                )
+            })();
+            prop_assert!(attempt.is_err(), "accepted threshold mutation {mutation}");
+        }
+    }
+
+    #[test]
+    fn threshold_roster_rejects_invalid_shapes(kind in 0_u8..3) {
+        let first = prop_result(committee_key())?;
+        let second = prop_result(member_two_key())?;
+        let (threshold, first_id, second_id) = match kind {
+            0 => (2, 1, 1),
+            1 => (2, thunderbolt_wire::RECIPIENT_SHARE_MEMBER_ID, 2),
+            2 => (3, 1, 2),
+            _ => return Err(TestCaseError::fail("unreachable roster mutation")),
+        };
+        let result = ThresholdRoster::new(
+            threshold,
+            vec![
+                ThresholdMemberPublicKey {
+                    member_id: first_id,
+                    encryption_key: EncryptionKey::from(&first),
+                },
+                ThresholdMemberPublicKey {
+                    member_id: second_id,
+                    encryption_key: EncryptionKey::from(&second),
+                },
+            ],
+        );
+        prop_assert!(result.is_err());
     }
 }
 

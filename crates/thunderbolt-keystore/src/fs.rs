@@ -3,8 +3,14 @@ use std::fs::{self, File, Metadata, OpenOptions, TryLockError};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::format::MAX_VAULT_FILE_BYTES;
+use crate::record_format::MAX_VAULT_FILE_BYTES;
 use crate::{KeystoreError, Result};
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_BEFORE_RENAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_AFTER_RENAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -90,7 +96,19 @@ pub(crate) fn atomic_replace(path: &Path, bytes: &[u8], expected: FileIdentity) 
         if current != expected {
             return Err(KeystoreError::FileReplaced);
         }
+        #[cfg(test)]
+        if FAIL_BEFORE_RENAME.with(|flag| flag.replace(false)) {
+            return Err(KeystoreError::Io(std::io::Error::other(
+                "injected failure before durable-state transition",
+            )));
+        }
         fs::rename(&temporary, path)?;
+        #[cfg(test)]
+        if FAIL_AFTER_RENAME.with(|flag| flag.replace(false)) {
+            return Err(KeystoreError::Io(std::io::Error::other(
+                "injected failure after durable-state transition",
+            )));
+        }
         sync_directory(parent)?;
         let (_, identity) = read_secure(path)?;
         Ok(identity)
@@ -99,6 +117,16 @@ pub(crate) fn atomic_replace(path: &Path, bytes: &[u8], expected: FileIdentity) 
         let _ = fs::remove_file(&temporary);
     }
     replace_result
+}
+
+#[cfg(test)]
+pub(crate) fn inject_failure_before_rename_once() {
+    FAIL_BEFORE_RENAME.with(|flag| flag.set(true));
+}
+
+#[cfg(test)]
+pub(crate) fn inject_failure_after_rename_once() {
+    FAIL_AFTER_RENAME.with(|flag| flag.set(true));
 }
 
 fn write_temporary(target: &Path, bytes: &[u8]) -> Result<PathBuf> {

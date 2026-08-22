@@ -1,6 +1,6 @@
 use thiserror::Error;
 use thunderbolt_protocol::{
-    ChannelEvent, ChannelSnapshot, EventKind, InvoiceEvent, LedgerEntry, TransferEvent, VerificationEvidence,
+    ChannelEvent, ChannelSnapshot, Digest, EventKind, InvoiceEvent, LedgerEntry, TransferEvent, VerificationEvidence,
     VerificationKind, VerificationOutcome,
 };
 
@@ -176,6 +176,12 @@ impl VerifiedProposalEvidence {
                 return Err(ProposalVerifierError::InvalidEvidence {
                     event,
                     reason: "evidence timestamp is not trusted ledger time",
+                });
+            }
+            if item.statement_digest == Digest::ZERO {
+                return Err(ProposalVerifierError::InvalidEvidence {
+                    event,
+                    reason: "statement digest must not be zero",
                 });
             }
         }
@@ -363,4 +369,29 @@ pub(crate) fn development_demo_evidence(
             )
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use thunderbolt_protocol::{ImplementationId, ParticipantId};
+
+    #[test]
+    fn custom_verifier_cannot_return_zero_digest_evidence() {
+        let evidence = VerificationEvidence::verified(
+            VerificationKind::InvoiceConsistencyProof,
+            ParticipantId::new("custom-verifier").expect("participant id"),
+            ImplementationId::new("custom-verifier/v1").expect("implementation id"),
+            Digest::ZERO,
+            42,
+        );
+
+        assert!(matches!(
+            VerifiedProposalEvidence::invoice(evidence, 42),
+            Err(ProposalVerifierError::InvalidEvidence {
+                event: EventKind::Invoice,
+                reason: "statement digest must not be zero",
+            })
+        ));
+    }
 }
