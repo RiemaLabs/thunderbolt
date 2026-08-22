@@ -1,0 +1,22 @@
+[package]
+name = "thunderbolt-floor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Finality-verified external rollback checkpoints for Bitcoin Thunderbolt"
+keywords = ["bitcoin", "consensus", "security", "thunderbolt"]
+categories = ["cryptography::cryptocurrencies"]
+
+[lints]
+workspace = true
+
+[dependencies]
+sha2 = "0.10.9"
+thiserror = "2.0.16"
+thunderbolt-keystore = { path = "../thunderbolt-keystore" }
+
+[dev-dependencies]
+hex = "0.4"
+proptest = "1.9.0"

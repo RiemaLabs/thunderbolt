@@ -3,3 +3,8 @@ Bitcoin Thunderbolt
 This product includes software developed by the Bitcoin Thunderbolt project.
 
 Third-party components remain subject to their respective licenses and notices.
+
+This distribution includes a locally maintained copy of flex-error 0.4.4,
+developed by Informal Systems and licensed under Apache-2.0. The local patch
+replaces its archived paste macro dependency with pastey; no library behavior
+is intentionally changed. See third_party/flex-error/README.md and LICENSE.

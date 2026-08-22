@@ -45,9 +45,9 @@ Suite, committee-descriptor, anchor-suite, and genesis identifiers are non-zero
 authenticated by deployment configuration; this codec does not decide their
 signature or governance policy.
 
-Version 2 deliberately does not yet define an actor-signed proposal envelope.
-That envelope must wait for a reviewed actor signature algorithm and key
-encoding, an exact proposal payload, authorization rules, replay policy, and a
-transaction-scoped Ledger verification contract. Adding a generic signature
-blob before those choices are fixed would not provide a meaningful security
-boundary.
+The binding layer deliberately does not define actor signatures. The separate
+`thunderbolt-ledger` crate now layers a reviewed `bip340_v1` signed proposal,
+actor-derived participant identity, chain-scoped request digest, predecessor,
+role, and canonical event bytes over `ChannelBindingV2`. Keeping these layers
+separate prevents a generic signature blob from weakening the stable channel
+binding or changing version 1 encodings.

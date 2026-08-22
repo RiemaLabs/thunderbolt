@@ -1,0 +1,24 @@
+[package]
+name = "flex-error"
+version = "0.4.4"
+edition = "2018"
+license = "Apache-2.0"
+repository = "https://github.com/informalsystems/flex-error"
+authors = ["Informal Systems <hello@informal.systems>"]
+description = "Flexible error definitions using macros and traits"
+readme = "README.md"
+publish = false
+
+[dependencies]
+pastey = "0.2.3"
+eyre = { version = "0.6.5", optional = true }
+anyhow = { version = "1.0.40", optional = true }
+
+[features]
+default = ["full"]
+std = []
+eyre_tracer = ["eyre", "std"]
+anyhow_tracer = ["anyhow", "std"]
+full = ["std", "eyre_tracer", "anyhow_tracer"]
+
+[workspace]

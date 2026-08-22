@@ -8,9 +8,9 @@ This guide covers deployment controls. The protocol assumptions are in [Threat m
 
 ## Current security milestone
 
-The focused review of stable HEAD `17fc4c1` found no unresolved Critical or High defect within the landed library boundaries. It covered the stable version 2 binding, transaction-scoped verifier and storage path, threshold Invoice and Recipient-share binding, one-share committee update, transactional Keystore, and Bitcoin backend.
+The focused review of clean HEAD `6ca2c42` found no unresolved Critical, High, or Medium code finding within the reviewed Ledger v2, protocol v2, Keystore, Holder-adapter, and committee-adapter boundaries.
 
-This is not production approval. The executable daemon still has no production verifier. Open and Finalize remain unavailable, participant proposals have no actor signatures, the repository has no concrete quorum-receipt capability, and private role runtimes have no adapters, outboxes, or Ledger cursors. Version 1 remains active beside the standalone version 2 binding, and the reducer allows one pending Invoice rather than the paper's pending set.
+This is not production approval. Version 2 has BIP340 actor-signed proposals and concurrent Invoice semantics as standalone libraries, but the executable daemon still runs version 1 without a production verifier. The repository has no finality receipt, ABCI runtime, durable version 2 request index, production rollback-floor backend, role daemons, outboxes, Ledger cursors, or Bitcoin settlement path.
 
 The resolved items and exact review boundary are recorded in [Security milestone](security-milestone-2026-08-21.md).
 
@@ -52,7 +52,9 @@ A production Thunderbolt Ledger must provide the three guarantees defined by the
 
 A local SQLite service or single server is useful for development, but it creates a trusted point of ordering and availability. Do not describe that profile as Byzantine fault tolerant. A production profile needs an implementation and review of the stated fault model, such as a deterministic application over a suitable BFT consensus system.
 
-The current recommendation is a deterministic Thunderbolt application replicated through CometBFT. This is planned architecture only. The repository contains no CometBFT or ABCI implementation, configuration, deployment, or test. The validator set and its relationship to the Threshold Committee also remain design work.
+`thunderbolt-ledger` now defines the chain-scoped signed proposal, executed-block commitment, application hash, and ordered Merkle-proof contract for a deterministic version 2 application. These types prove deterministic execution, not validator finality.
+
+The current recommendation is to expose that application through ABCI and replicate it with CometBFT. This remains planned architecture. The repository contains no CometBFT dependency, ABCI service, validator configuration, quorum or light-client receipt, deployment, or integration test. The validator set and its relationship to the Threshold Committee also remain design work.
 
 Ledger signatures do not replace consensus guarantees. Consensus transport authentication does not replace entry signatures.
 
@@ -60,9 +62,11 @@ Ledger signatures do not replace consensus guarantees. Consensus transport authe
 
 The current Ledger commits the immutable event and derived public channel snapshot in one SQLite transaction before acknowledging success. It does not store Holder secrets, committee shares, or signing material.
 
-`thunderbolt-keystore` supplies an encrypted transactional multi-record vault. It checks record versions and authenticated vault revisions, persists idempotent transaction receipts, and keeps consumed signing nonces as permanent tombstones. The Holder and committee engines define their vault boundaries. Runtime adapters still need to coordinate sealed records with Ledger cursors, committed acknowledgements, and outbound work before either role can run safely as a daemon.
+`thunderbolt-keystore` supplies encrypted multi-record transactions, idempotent receipts, and permanent consumed-nonce tombstones. `VaultCheckpoint` binds a revision to the exact encrypted-file digest, and all secret reads and outputs remain fenced until external checkpoint CAS succeeds. Concrete Holder and committee adapters implement their engine storage traits and support bounded pruning after external finalization.
 
-An authenticated vault can still be replaced with an older valid file while stopped. Committee open therefore requires a positive minimum revision from an independently authenticated monotonic store, and the operator must advance that floor after every share, nonce, or signing-state commit. Generic committee restore is forbidden. Holder restore also requires an externally trusted minimum revision.
+The repository deliberately has no production `RollbackFloorStore`. A production backend must live in an independent authenticated trust domain and key CAS by the complete vault identity. A sibling file is not a production floor. Exact anchored backups can be restored, but there is no automatic recovery protocol for a process killed after local encrypted persistence and before checkpoint advancement.
+
+Pruning also has limits. The Holder adapter loads retained history eagerly, while the committee replay journal has a 512 KiB state-record ceiling. Transaction-receipt and finalized-idempotency pruning require independent durable request history. Nonce tombstones are never pruned.
 
 `database backup` creates a verified SQLite backup but does not encrypt it. Protect the backup directory with filesystem or encrypted-volume controls. Production backups must be encrypted and include enough metadata to identify the network, daemon identity, schema version, last event hash, and channel sequence.
 
@@ -121,7 +125,8 @@ Mainnet stays disabled until all of these gates pass:
 
 - reconcile the RC's 2048-bit Paillier wire parameter with the paper's 3072-bit evaluation parameter, then regenerate and audit compatibility vectors
 - production review of the deterministic event state machine and canonical wire format
-- production role adapters for the transactional Keystore, external rollback floors, outboxes, Ledger cursors, backup, restore, and crash recovery
+- production role runtimes built around the landed Keystore adapters, with outboxes, Ledger cursors, backup, restore, and crash recovery
+- a production rollback-floor backend, killed-between-persistence-and-floor recovery, and compaction or epoch rotation for retained role history
 - integrated Open, Transfer, committee update, and Finalize settlement path
 - reviewed Open DKG or provisioning, including consistency between committee shares and the fixed lock key
 - concrete `R_own` verification for the current Holder and exact closing context
@@ -131,7 +136,7 @@ Mainnet stays disabled until all of these gates pass:
 - Ledger implementation that meets the documented fault model
 - Bitcoin Core confirmation, fee, mempool, and reorganization handling
 - authenticated transport and least-privilege control access
-- actor-signed proposals, a concrete authenticated quorum-receipt verifier, and migration from version 1 to the stable version 2 binding
+- a concrete authenticated quorum-receipt verifier, ABCI/CometBFT integration, durable version 2 request index, and migration from the version 1 daemon
 - multi-process tests for restart, replay, duplicates, ordering, quorum loss, and finalization races
 - removal of mock keys, fixed nonces, production panics, and unfinished signing paths from release binaries
 - dependency, license, secret, and cryptographic review
@@ -144,6 +149,6 @@ See [Production roadmap](roadmap.md) for the order in which the runtime, protoco
 
 ## Development demo warning
 
-Normal daemon startup rejects event submission because no production verifier is configured. The node library can inject a Trusted Verifier for Invoice and Transfer, but the executable has no configuration for it and Open and Finalize still fail closed. `--development-allow-unverified-demo-events` is accepted only on development regtest. In that mode, the daemon rejects client-supplied verification evidence and inserts synthetic evidence labeled `development-unverified-demo`.
+Normal daemon startup rejects event submission because no production verifier is configured. The executable does not use `thunderbolt-ledger`, the protocol v2 reducer, the role adapters, or an ABCI service. The version 1 node library can inject a Trusted Verifier for Invoice and Transfer, but the executable has no configuration for it and Open and Finalize still fail closed. `--development-allow-unverified-demo-events` is accepted only on development regtest. In that mode, the daemon rejects client-supplied verification evidence and inserts synthetic evidence labeled `development-unverified-demo`.
 
 The demo flag does not validate proofs, Bitcoin transactions, signatures, or committee quorums. Treat every resulting database as test data.

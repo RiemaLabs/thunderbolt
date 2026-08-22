@@ -83,13 +83,14 @@ Host and operator
 
 - Mainnet is disabled in `v1.0.0-rc.1`.
 - The runnable server is a single reference Ledger. It does not implement the paper's Byzantine Ledger fault model.
-- The node library can inject trusted Invoice and Transfer verification into its atomic append path. The shipped daemon does not configure that verifier. It has no production Open, actor-signature, Bitcoin, quorum-receipt, or committee service path, and its optional regtest demo mode inserts synthetic verification attestations.
+- The node library can inject trusted version 1 Invoice and Transfer verification into its atomic append path. The shipped daemon does not configure that verifier and does not use the standalone version 2 Ledger, reducer, or role adapters. It has no production Open, Bitcoin, quorum-receipt, or committee service path, and its optional regtest demo mode inserts synthetic verification attestations.
 - Control uses bearer-authenticated loopback HTTP. The reserved Unix socket, remote control, and metrics are not implemented.
 - Manual SQLite backups are verified but not encrypted by the daemon.
 - The RC wire codec fixes Paillier values at 2048 bits, while the accepted paper evaluates 3072-bit Paillier.
-- Stable version 2 channel bindings exist, but the active message and Ledger contract remains version 1 and has no actor-signed proposal envelope.
-- The reducer allows one pending Invoice rather than the pending-Invoice set used by the paper's ideal state.
-- Committee rollback protection depends on an independently authenticated monotonic revision floor. Generic committee restore is forbidden.
+- Version 2 has BIP340 actor-signed proposals and a reducer with bounded concurrent Invoices, but these are standalone libraries without daemon, ABCI, persistence, or finality integration. The active runtime remains version 1.
+- Executed version 2 blocks, application hashes, and Merkle proofs establish deterministic execution only. They do not authenticate validator consensus.
+- Holder and committee rollback protection depends on an exact checkpoint in an independently authenticated store. The repository has no production store or killed-between-persistence-and-checkpoint recovery procedure.
+- Exact anchored backups can be restored, but retained Holder and committee histories still need compaction or epoch rotation.
 - Open has no reviewed DKG or provisioning ceremony that establishes the distributed committee state and its relationship to `P`.
 - Finalize has no concrete `R_own` proof or audited combined-key Holder plus FROST implementation under `P`.
 - Finalize is committee-dependent in the base protocol.

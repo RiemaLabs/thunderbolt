@@ -28,6 +28,12 @@ repository = "https://github.com/RiemaLabs/thunderbolt-lib"
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
+[patch.crates-io]
+# tendermint-rs 0.40.4 still resolves the archived `paste` crate through
+# flex-error. The vendored source changes only that macro dependency to its
+# maintained successor. See third_party/flex-error/README.md.
+flex-error = { path = "third_party/flex-error" }
+
 [profile.release]
 codegen-units = 1
 lto = "thin"

@@ -4,7 +4,7 @@ Bitcoin Thunderbolt is the open source Rust implementation of Thunderbolt, a pro
 
 The paper "Thunderbolt: Fast Asynchronous Off-Chain Bitcoin Transfers" has been accepted to ACM CCS 2026. The paper was accepted, not this software product.
 
-> Release status: `v1.0.0-rc.1`. Mainnet is disabled. This release includes the cryptographic core, versioned public messages, a deterministic Ledger state machine, atomic verified SQLite appends, and libraries for Holder state, one-share committee state, trusted Invoice and Transfer verification, encrypted local secrets, and Bitcoin Core access. The runnable `thunderboltd` remains a single reference Ledger and does not configure a production verifier. There is no complete Open-to-Finalize deployment, Byzantine-fault-tolerant Ledger, or mainnet support. Do not use it with real funds.
+> Release status: `v1.0.0-rc.1`. Mainnet is disabled. This release includes the version 1 reference Ledger, a standalone version 2 Ledger contract and reducer, Holder and committee libraries, encrypted participant storage, and Bitcoin Core access. The runnable `thunderboltd` remains a version 1 single-node Ledger and does not configure a production verifier, role adapter, version 2 application, or consensus engine. There is no complete Open-to-Finalize deployment, Byzantine-fault-tolerant Ledger, or mainnet support. Do not use it with real funds.
 
 ## Why Thunderbolt
 
@@ -51,15 +51,17 @@ The repository now contains several libraries intended for those future role pro
 
 | Library | Current boundary |
 | --- | --- |
-| `thunderbolt-holder` | Creates and tracks v1 single-committee and threshold Invoice packages, Holder credentials, and Transfers behind a transactional vault trait. The threshold path binds the Recipient share to the VESS distribution but does not claim the paper's exact `R_inv^thr` transcript. It has no networking or daemon adapter. |
-| `thunderbolt-committee` | Models one independently stored committee share, verifies the bound Recipient share, distribution, committed Transfer, and Ledger receipt boundary, then records replay-safe updates. It has no DKG, concrete quorum-receipt verifier, audited FROST signer, or signature aggregator. |
+| `thunderbolt-ledger` | Defines chain-scoped BIP340 `SignedProposalV2`, actor-derived participant IDs, executed-entry metadata, ordered Merkle proofs, and incremental application hashes. It proves deterministic execution, not consensus finality, and contains no network, database, ABCI server, quorum certificate, or durable request index. |
+| `thunderbolt-protocol` v2 | Reduces authenticated version 2 entries at positive consensus time, supports a bounded concurrent Invoice set, consumes one selected Invoice by exact entry hash, and orders Finalize. Its Open, Invoice, Transfer, and Finalize proof hooks are abstract and have no production implementation. |
+| `thunderbolt-holder` | Creates v1 single-committee and threshold Invoice packages and manages Holder credentials and Transfers. `KeystoreSecretVault` is a concrete encrypted adapter with exact checkpoint fencing and finalized-receipt pruning. It still has no daemon service, outbox, Ledger cursor, or trusted `DurableAcknowledgement` source. |
+| `thunderbolt-committee` | Verifies the bound Recipient share, distribution, committed Transfer, and abstract Ledger receipt before a one-share update. `KeystoreCommitteeVault` is a concrete fenced adapter with finalized-history pruning. It still has no concrete quorum receipt, DKG, audited FROST signer, or role service. |
 | `thunderbolt-verifier` | Verifies bounded Invoice and Transfer artifacts against trusted deployment and Ledger state. `thunderbolt-node` can inject it into the atomic append path. It does not verify Open, Finalize, actor signatures, or Bitcoin state. |
-| `thunderbolt-keystore` | Provides an encrypted, transactional multi-record vault with revision checks, idempotent receipts, permanent nonce tombstones, and authenticated Holder backup and restore. Committee restore is forbidden, and committee open requires an externally anchored minimum revision. The daemon does not open this vault. |
+| `thunderbolt-keystore` | Provides encrypted multi-record transactions whose reads and outputs are fenced by an exact external checkpoint containing revision and encrypted-state digest. It has idempotent receipts, nonce tombstones, exact-checkpoint restore, and bounded pruning. The repository has no production `RollbackFloorStore`. |
 | `thunderbolt-bitcoin` | Provides a bounded Bitcoin Core RPC client, network checks, reorganization-aware cursors, and funding and closing validators. It passed the official Bitcoin Core v31.1.0 live regtest, reorganization, and restart gate. It has no wallet or signing API and is not connected to the daemon. |
 
-`thunderbolt-wire` also exposes a stable version 2 channel binding over the Bitcoin network and genesis, complete funding outpoint, deployment, committee descriptor and epoch, protocol suite, and anchor parameter suite. Version 1 messages and Ledger events have not migrated to it, and version 2 does not yet define an actor-signed proposal envelope.
+The version 2 libraries form a deterministic application contract. They are not connected to `thunderboltd`, and an `ExecutedBlockV2`, application hash, or Merkle inclusion proof is not evidence that validators reached consensus. A future CometBFT or equivalent integration must supply finality and persist the cross-block request index.
 
-`thunderbolt-storage` and `thunderbolt-node` now verify evidence-free Invoice and Transfer proposals inside the same SQLite write transaction that selects the authoritative snapshot, pending Invoice, and Ledger time. The transaction persists the entry, evidence, snapshot, and retry mapping atomically. The shipped daemon still starts without a Trusted Verifier, so normal event submission remains unavailable.
+The separate version 1 `thunderbolt-storage` and `thunderbolt-node` path can verify evidence-free Invoice and Transfer proposals inside the same SQLite write transaction that selects the authoritative snapshot, pending Invoice, and Ledger time. The transaction persists the entry, evidence, snapshot, and retry mapping atomically. The shipped daemon starts without a Trusted Verifier, so normal event submission remains unavailable.
 
 See [Architecture](docs/architecture.md) for component boundaries and the current implementation gap.
 
@@ -87,13 +89,14 @@ The existing workspace contains:
 ```text
 crates/
   thunderbolt-bitcoin/ Validated Bitcoin Core RPC and chain tracking library
+  thunderbolt-ledger/  Signed proposal and executed-block contract for v2
   thunderbolt-holder/ Local Holder, Recipient, and threshold-Invoice engine
   thunderbolt-committee/ One-share committee member engine
   thunderbolt-verifier/ Trusted Invoice and Transfer verification bridge
   thunderbolt-keystore/ Transactional encrypted participant vault
   thunderbolt-core/    Proofs, Paillier operations, and public threshold
                        distribution primitives
-  thunderbolt-protocol/ Deterministic Ledger entries and channel reducer
+  thunderbolt-protocol/ Version 1 and version 2 channel reducers
   thunderbolt-wire/    Version 1 proof messages and stable version 2 bindings
   thunderbolt-storage/ Atomic verified SQLite Ledger persistence
   thunderbolt-config/  Strict configuration and local token authorization
@@ -170,13 +173,14 @@ Important limits:
 - The base design does not promise transaction unlinkability.
 - A production Ledger must satisfy the paper's persistence, ordering, inclusion, and data-availability guarantees under the stated committee fault bound.
 - Safe operation also depends on durable encrypted state, correct backups, Bitcoin reorganization handling, nonce safety, authenticated transport, and operator discipline. These controls are release gates, not assumptions that may be skipped.
-- The current daemon uses authenticated loopback HTTP. The configured Unix socket path is reserved but not listened on. It has no configured production verifier, actor signatures, quorum-receipt implementation, role-specific Holder or committee services, or Bitcoin settlement path.
+- The current daemon uses authenticated loopback HTTP and the version 1 state machine. It has no configured production verifier, version 2 proposal or reducer path, ABCI service, quorum receipt, role service, or Bitcoin settlement path.
 - The manual database backup is verified but not encrypted by the daemon. Protect it at the filesystem or volume layer.
 - The RC wire codec enforces a 2048-bit Paillier modulus, while the accepted paper evaluates 3072-bit Paillier. The production parameter and wire version must be reconciled before mainnet approval.
 - The Open ceremony still needs a reviewed DKG or provisioning protocol. Finalize still needs an `R_own` proof and audited combined-key Holder plus FROST signing under the fixed key `P`.
-- Version 1 remains the active message and Ledger contract. The stable version 2 binding has not yet been adopted across those layers, and the reducer still permits only one pending Invoice.
+- Version 2 signed proposals and concurrent-Invoice reduction exist as standalone libraries. They have no durable cross-block request index, finality receipt, storage integration, or activation path in the shipped daemon.
+- The concrete Holder and committee Keystore adapters require an independent authenticated rollback-checkpoint backend. Their retained histories still need compaction or epoch rotation for long-lived deployments.
 
-The focused security milestone review found no unresolved Critical or High defect within the landed library boundaries at `17fc4c1`. This is not a system audit or production approval. See [Security milestone](docs/security-milestone-2026-08-21.md).
+The focused security milestone review found no unresolved Critical, High, or Medium code finding within the reviewed version 2 Ledger, reducer, Keystore, Holder-adapter, and committee-adapter boundaries at `6ca2c42`. This is not a system audit or production approval. See [Security milestone](docs/security-milestone-2026-08-21.md).
 
 Read [Security](docs/security.md), [Threat model](docs/threat-model.md), and [SECURITY.md](SECURITY.md) before testing a deployment. Report suspected vulnerabilities privately. Do not open a public issue for a security report.
 
@@ -190,6 +194,8 @@ Read [Security](docs/security.md), [Threat model](docs/threat-model.md), and [SE
 | [Security](docs/security.md) | Operational controls and mainnet gates |
 | [Threat model](docs/threat-model.md) | Assets, adversaries, assumptions, guarantees, and exclusions |
 | [API](docs/api.md) | Control API, Ledger events, idempotency, and versioning |
+| [Ledger v2 contract](crates/thunderbolt-ledger/README.md) | Signed proposals, executed blocks, application hashes, Merkle proofs, and finality boundary |
+| [Protocol v2 migration](crates/thunderbolt-protocol/docs/v2-migration.md) | Separate-history rules, concurrent Invoices, consensus time, and reducer limits |
 | [Release process](docs/release-process.md) | RC policy, verification, signing, and promotion gates |
 | [Production roadmap](docs/roadmap.md) | Protocol v2, multi-process regtest, cryptographic, and Ledger gates |
 | [Testing](docs/testing.md) | Automated checks and the measured Bitcoin Core v31.1.0 live gate |

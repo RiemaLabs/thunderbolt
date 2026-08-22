@@ -56,16 +56,16 @@ The reference Ledger does not satisfy the paper's Byzantine fault model. A produ
 The workspace contains role libraries, but no executable composes them into a Thunderbolt network yet.
 
 `thunderbolt-holder`
-: A local Holder and Recipient state engine. It creates the v1 single-committee Invoice and the threshold Recipient-share plus VESS package, retains old credentials after Transfer, checks committed acknowledgements, and stores private transitions through a transactional vault trait. The threshold Recipient proof uses the implemented `tb/share` transcript and does not claim to be the paper's exact `R_inv^thr` transcript. The crate has no network client, service loop, or `thunderboltd` integration.
+: A local Holder and Recipient state engine. It creates the v1 single-committee Invoice and threshold Recipient-share plus VESS package, retains credentials after Transfer, and checks committed acknowledgements. `KeystoreSecretVault` is a concrete encrypted implementation of the engine's transactional vault with exact-checkpoint fencing and externally finalized receipt pruning. It has no network client, outbox, Ledger cursor, service loop, or trusted source for the public `DurableAcknowledgement` capability.
 
 `thunderbolt-committee`
-: A one-share committee member engine. It verifies the Recipient-share proof, its exact binding to the threshold distribution, the committed Transfer, and an abstract Ledger receipt before updating only its local Shamir share. The update and replay-safe acknowledgement share one encrypted-vault revision. The crate defines the Ledger receipt and signer boundaries but has no concrete quorum-receipt verifier, DKG, FROST aggregation, or Finalize path under `P`.
+: A one-share committee member engine. It verifies the Recipient-share proof, its exact distribution binding, the committed Transfer, and an abstract Ledger receipt before updating its local Shamir share. `KeystoreCommitteeVault` stores engine and signing-session state through exact-checkpoint fenced transactions and can prune externally finalized receipts and idempotency records. The crate has no production rollback-floor backend, concrete quorum receipt, DKG, FROST aggregation, or Finalize path under `P`.
 
 `thunderbolt-verifier`
 : A narrow bridge from bounded public Invoice and Transfer artifacts to trusted verification evidence. It checks deployment, committee, channel, invoice, step, and prior-Ledger bindings. `thunderbolt-node` can inject it into the transaction-scoped append path. The shipped daemon does not supply one, and the verifier has no Open, Finalize, actor-signature, or Bitcoin policy implementation.
 
 `thunderbolt-keystore`
-: An encrypted transactional multi-record vault for Holder or committee-member secrets. It authenticates deployment and committee scope, uses record versions and vault revisions for compare-and-swap updates, retains idempotency receipts, and turns consumed signing nonces into permanent tombstones. Committee open requires a minimum revision anchored outside the vault, and generic committee restore is forbidden. The daemon never opens the vault, and the role engines still need concrete adapters.
+: An encrypted transactional multi-record vault. `VaultCheckpoint` combines the revision with a digest of the exact encrypted file, so equal-revision forks differ. `RollbackFloorStore` provides atomic checkpoint CAS; all secret reads and callback outputs remain fenced until the checkpoint is anchored. Exact anchored backups can be restored, finalized receipts can be pruned under external request history, and nonce tombstones are never pruned. The repository provides no production rollback-floor implementation.
 
 `thunderbolt-bitcoin`
 : A fail-closed Bitcoin Core boundary for regtest, signet, and testnet3. It validates network and genesis, bounds RPC work, tracks a reorganization-aware chain cursor, enforces coinbase maturity, and checks funding and closing transactions. It passed the official Bitcoin Core v31.1.0 live regtest, reorganization, and same-datadir restart gate. It deliberately has no wallet or signing API.
@@ -78,7 +78,19 @@ The `thunderbolt-bitcoin` library provides the validated Bitcoin Core boundary, 
 
 `thunderbolt-wire` provides `ChannelBindingV2` and `OperationBindingV2`. The stable channel context commits to protocol version and suite, Bitcoin network and exact genesis, the complete 36-byte funding outpoint, deployment ID, committee epoch and descriptor digest, and the anchor parameter-suite digest. Invoice ID and positive Transfer step remain operation inputs, so they do not change the stable channel `ctx_id`.
 
-This binding is a landed codec primitive, not the active event protocol. Version 1 Invoice, Transfer, verifier, Holder, committee, and Ledger types still use the version 1 binding. Version 2 also lacks an actor-signed proposal envelope. Migration, golden vectors across every consumer, and activation policy remain release work.
+Version 2 now has a separate signed Ledger and reducer surface. It does not change any version 1 hash or behavior, and the shipped daemon still uses version 1.
+
+## Standalone version 2 application contract
+
+`thunderbolt-ledger` authenticates chain-scoped proposals with BIP340. A `SignedProposalV2` binds the Ledger chain ID, stable channel binding, sequence and predecessor, actor-scoped request digest, x-only actor key and derived participant ID, role, event kind, and bounded canonical event bytes.
+
+Consensus supplies proposal order, positive height, positive block time, and the previous application hash. `PendingBlockV2` produces deterministic executed-entry metadata, an ordered Merkle root, and an incremental application hash. `ExecutedBlockV2::validate_successor` checks chain, next height, previous application hash, and monotonic consensus time. Merkle proofs authenticate executed entry metadata to that block commitment.
+
+These values prove deterministic, self-consistent execution only. They do not prove that a validator quorum committed the block. The crate has no network, consensus engine, ABCI server, database, validator signatures, quorum certificate, trusted header chain, or durable cross-block `request_digest -> entry_hash` index.
+
+`thunderbolt-protocol` has a separate version 2 reducer that consumes authenticated executed entries. It uses positive consensus block time, pins one Ledger chain, supports a bounded map of concurrent Invoices, consumes one selected Invoice by exact committed entry hash, invalidates other Invoices from the prior Holder step, and orders Finalize without allowing an unrelated Invoice to veto closure. Its `ExternalVerifierV2` hooks for Open, Invoice, Transfer, and Finalize are abstract. No production implementation exists.
+
+The Ledger and reducer crates are not connected to `thunderboltd`, `thunderbolt-storage`, or a consensus runtime. They make no finality or deployed-runtime claim.
 
 ## Control plane and target protocol plane
 
@@ -88,7 +100,7 @@ The target protocol plane connects Holder clients, Ledger replicas, and committe
 
 The two planes must use separate listeners, authorization policy, rate limits, and metrics.
 
-## Transaction-scoped verification
+## Version 1 transaction-scoped verification
 
 The service-facing write path now has one atomic boundary:
 
@@ -108,7 +120,7 @@ injected Trusted Verifier
 reducer and one commit for entry, evidence, snapshot, and retry mapping
 ```
 
-`SqliteStorage::append_verified_proposal` rejects client evidence and runs verification under the writer lock. `NodeServer::bind_with_verifier` and `from_listener_with_verifier` inject the Invoice and Transfer verifier. Open and Finalize fail closed even when one is supplied.
+`SqliteStorage::append_verified_proposal` rejects client evidence and runs version 1 verification under the writer lock. `NodeServer::bind_with_verifier` and `from_listener_with_verifier` inject the version 1 Invoice and Transfer verifier. Open and Finalize fail closed even when one is supplied.
 
 `thunderboltd` calls the ordinary `NodeServer::bind` path and has no configuration for a production verifier. Its normal submission path therefore remains unavailable. Development regtest may still use the explicit synthetic-evidence mode.
 
@@ -138,13 +150,15 @@ The active version 1 event contract still needs:
 
 The reducer rejects duplicate invoice identifiers, skipped or repeated sequences, wrong actors, stale hashes, invalid lifecycle transitions, and idempotency conflicts. It requires verification attestations but does not run proof, Bitcoin, signature, or quorum verification itself.
 
-The version 1 reducer also permits only one pending Invoice. Protocol v2 must either preserve that as an explicit product restriction with its own analysis or adopt the paper's pending-Invoice set semantics.
+The version 1 reducer permits one pending Invoice. The standalone version 2 reducer resolves that product-semantics gap with a bounded concurrent set, but no active runtime uses it.
 
 ## Storage boundary
 
 The current Ledger database contains public protocol entries and materialized channel snapshots. It uses SQLite WAL, full synchronization, immutable-entry triggers, migration checksums, hash-chain replay, integrity checking, and no-clobber verified backup. It does not store Holder secrets, committee shares, decryption keys, or signing material.
 
-The Keystore and role-engine vault traits establish the local encryption and transaction boundaries. The multi-record transaction can update independently keyed channel, Invoice, credential, committee-share, nonce, and adapter records together. The daemon still needs adapters that coordinate those secret records with Ledger cursors, acknowledgements, and outbound work. Committee processes must also persist and advance the externally trusted rollback floor after each share, nonce, or signing-state commit.
+The concrete Holder and committee adapters map engine state into independently keyed Keystore records. They use the exact external checkpoint for every read and write, withhold output until checkpoint CAS succeeds, fail closed on unresolved ambiguity, and support bounded pruning after external finalization.
+
+The missing piece is the rollback-floor service itself. A production implementation must live in an independent authenticated trust domain. The repository also has no automatic recovery protocol for a process killed after local encrypted persistence but before external checkpoint advancement. Role runtimes still need outboxes, Ledger cursors, and settlement coordination. Holder history is loaded eagerly and grows append-only; the committee replay journal retains a 512 KiB state-record ceiling. Both need compaction or epoch rotation.
 
 The current manual backup is verified but not encrypted by the daemon. Operators must protect the destination at the filesystem or volume layer. Production backups must be encrypted, versioned, and verified through a restore drill.
 
@@ -161,14 +175,16 @@ The implementation must preserve these protocol invariants at each accepted tran
 
 ## Current implementation boundary
 
-The current tree has the cryptographic proof implementation, stable version 2 binding primitives, a deterministic version 1 channel reducer, atomic verified Ledger storage, strict configuration and token authorization, a loopback Ledger daemon, a control CLI, and the Holder, committee, Trusted Verifier, Keystore, and Bitcoin Core libraries described above. The default release build excludes the legacy settlement prototype and single-process committee fixtures. Research builds enable them explicitly for regression coverage.
+The current tree has the version 1 reference daemon and its atomic verified append, plus standalone version 2 binding, signed Ledger, and reducer libraries. It also contains the concrete Holder and committee Keystore adapters and the Bitcoin Core library. The default release build excludes the legacy settlement prototype and single-process committee fixtures. Research builds enable them explicitly for regression coverage.
 
 The following remain release gates:
 
 - reconcile the current 2048-bit Paillier wire parameter with the paper's 3072-bit evaluation parameter
-- configure a production verifier in the daemon and add Open, Finalize, Bitcoin, actor-signature, and quorum-receipt verification
-- migrate the version 1 event and proof layers to the stable version 2 binding
-- add durable Holder and committee runtime adapters, outboxes, Ledger cursors, migrations, and recovery tests
+- choose and implement the version 2 runtime and activation path; the shipped daemon remains version 1 and verifierless
+- add an ABCI application, persistent version 2 channel state, and durable cross-block request index
+- implement a production rollback-floor backend and killed-between-commit-and-floor recovery procedure
+- add Holder and committee role daemons, outboxes, Ledger cursors, and settlement coordination
+- replace raw Holder `DurableAcknowledgement` construction and the abstract committee receipt with authenticated finality capabilities
 - specify and implement the Open DKG or provisioning ceremony
 - add an `R_own` proof and combined-key Holder plus FROST Finalize path under `P`
 - a Ledger that meets the required fault model
@@ -177,7 +193,8 @@ The following remain release gates:
 - Holder and committee daemon services with durable outboxes and Ledger consumers
 - metrics and production observability
 - full multi-process restart, replay, duplicate, out-of-order, quorum-loss, and reorganization tests
+- compaction or epoch rotation for Holder history and the committee replay journal
 
-The planned production Ledger recommendation is a deterministic Thunderbolt application replicated through CometBFT. This repository has no CometBFT dependency, ABCI application, configuration, deployment assets, or tests. Validator governance, its relationship to the Threshold Committee, state synchronization, evidence handling, and recovery remain design work. Until those pieces exist and pass review, the only runnable Ledger is the single SQLite service.
+The planned production Ledger recommendation is the standalone deterministic version 2 application replicated through CometBFT. This repository has no CometBFT dependency, ABCI application, configuration, deployment assets, quorum receipt, or integration tests. Validator governance, its relationship to the Threshold Committee, state synchronization, evidence handling, and recovery remain design work. Until those pieces exist and pass review, the only runnable Ledger is the version 1 single SQLite service.
 
 See [Production roadmap](roadmap.md), [Publication checklist](publication-checklist.md), and [Release process](release-process.md) for the gates that prevent an RC from being labeled mainnet-ready.

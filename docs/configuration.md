@@ -93,7 +93,7 @@ The node library can accept an injected Trusted Verifier, but `thunderboltd` has
 `deployment.id`
 : A stable 1 to 64 byte ASCII identifier bound into every proof context. Every Holder, committee member, verifier, and Ledger replica in one deployment must use the same value.
 
-The stable version 2 binding also needs authenticated protocol-suite, Bitcoin-genesis, committee-descriptor, funding-outpoint, and anchor-suite values. The current TOML schema does not configure or activate that binding.
+The standalone version 2 Ledger and reducer also need a Ledger chain ID, protocol-suite, Bitcoin-genesis, committee-descriptor, funding-outpoint, anchor-suite, consensus, storage, and external-verifier configuration. The current TOML schema does not configure or activate those libraries or an ABCI service.
 
 ### `paths`
 

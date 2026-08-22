@@ -111,25 +111,31 @@ The reducer checks lifecycle, sequence, previous hash, actor role, channel-lifet
 
 The RC codec fixes Paillier values at 2048 bits. The accepted paper evaluates 3072-bit Paillier. The project must reconcile that parameter and version the encoding before mainnet approval.
 
-The wire crate also provides `ChannelBindingV2` and `OperationBindingV2`. They define a stable channel `ctx_id` over the protocol suite, Bitcoin network and exact genesis, complete funding outpoint, deployment, committee epoch and descriptor, and anchor parameter suite. Invoice ID and positive Transfer step remain explicit operation inputs. These version 2 types are not yet used by the active version 1 envelopes or Ledger events and do not define actor signatures.
+The wire crate also provides `ChannelBindingV2` and `OperationBindingV2`. They define a stable channel `ctx_id` over the protocol suite, Bitcoin network and exact genesis, complete funding outpoint, deployment, committee epoch and descriptor, and anchor parameter suite. Invoice ID and positive Transfer step remain explicit operation inputs. These binding types are not used by the active version 1 envelopes or Ledger events; actor signatures are layered separately by `thunderbolt-ledger`.
+
+`thunderbolt-ledger` layers a separate version 2 contract over that binding. `SignedProposalV2` authenticates the Ledger chain, predecessor, actor-scoped request digest, x-only actor key and derived participant ID, role, event kind, and canonical event bytes with BIP340. `ExecutedBlockV2` commits consensus-supplied height and time, ordered entry metadata, a Merkle root, and the previous application hash.
+
+An executed block or Merkle proof proves deterministic self-consistency, not validator finality. The crate exposes no network, consensus engine, ABCI server, database, quorum certificate, trusted header chain, or durable cross-block request index.
+
+The protocol v2 reducer consumes authenticated executed entries and supports a bounded concurrent Invoice set, exact selected-Invoice Transfer, consensus time, and ordered Finalize. All operation-specific proof checks remain behind abstract `ExternalVerifierV2` hooks.
 
 ## Library APIs not exposed by the daemon
 
 The following APIs are available to runtime developers, not to `thunderbolt-cli` users:
 
-- `HolderEngine` creates and records v1 single-committee Invoices and threshold Recipient-share plus VESS packages behind `SecretVault` and `VaultTransaction`. The threshold Recipient proof uses the implemented `tb/share` transcript rather than claiming the paper's exact `R_inv^thr` transcript.
-- `CommitteeMemberEngine` owns one committee share and verifies the exact Recipient-share, distribution, Transfer, and abstract committed-Ledger binding before a replay-safe update. `CommitteeSigner` defines fail-closed nonce handling but supplies no FROST implementation or aggregator.
+- `HolderEngine` creates and records v1 single-committee Invoices and threshold Recipient-share plus VESS packages. `KeystoreSecretVault` is its concrete encrypted adapter with exact-checkpoint fencing and finalized-receipt pruning.
+- `CommitteeMemberEngine` verifies the exact Recipient-share, distribution, Transfer, and abstract committed-Ledger binding before a replay-safe update. `KeystoreCommitteeVault` is its concrete fenced adapter. `CommitteeSigner` supplies no FROST implementation or aggregator.
 - `TrustedVerifier` verifies Invoice and Transfer artifacts against a `DeploymentContext`, a channel snapshot, and trusted Ledger time. The node can inject it into the atomic append path. It does not verify Open, `R_own`, Finalize, actor signatures, quorum receipts, or Bitcoin state.
-- `Vault` encrypts a transactional multi-record participant store. Committee open requires an externally anchored minimum revision and committee restore is forbidden. It is not a Holder or committee service by itself.
+- `Vault` encrypts a transactional multi-record participant store. Exact checkpoints contain revision and encrypted-state digest; reads and outputs remain fenced until external checkpoint CAS. Exact anchored backup restore and bounded receipt pruning are available, but no production `RollbackFloorStore` is included.
 - `BitcoinCoreClient` validates the selected Bitcoin network before use and provides bounded chain, funding, fee, broadcast, and closing checks. It has no wallet or signing interface.
 
 The current `POST /v1/channels/{id}/events` handler always uses the atomic verified-append path. With an injected Trusted Verifier it can verify Invoice and Transfer. Open and Finalize always fail closed. Because `thunderboltd` starts the node without a verifier, its safe default still rejects all event submission unless the explicit development-regtest demo mode is enabled.
 
-## Protocol v2 contract
+## Protocol v2 runtime gap
 
-The stable channel and operation binding is implemented. The signed proposal and authorization layer is not.
+The stable binding, signed proposal, executed-block commitment, and reducer are implemented as separate libraries. The runtime and finality layers are not.
 
-The production event envelope needs fields equivalent to:
+The standalone version 2 proposal carries fields equivalent to:
 
 ```text
 protocol_version
@@ -149,7 +155,7 @@ actor_signature
 
 The signature digest must define a fixed Bitcoin Thunderbolt domain, hash-format version, integer widths, byte order, length encoding, optional-field encoding, and exact field order. Implementations must reject non-canonical values and share checked golden vectors.
 
-Invoice and Transfer now use the required transaction-scoped verification boundary. Protocol v2 still needs an actor-scoped request identifier, actor signature validation, quorum receipt capability, and a durable notification outbox.
+Version 2 now has actor-scoped request digests and BIP340 signature validation. It still needs a persistent cross-block request index, ABCI execution and storage, consensus finality verification, concrete operation verifiers, and a durable notification outbox.
 
 The full runtime also needs control operations for wallet initialization and locking, encrypted backup and restore, Open, invoice creation, Transfer, Finalize, event subscriptions, committee update, threshold signing, heartbeat, and resharing. Those operations are not part of the current CLI or HTTP server.
 

@@ -1,0 +1,23 @@
+[package]
+name = "thunderbolt-cometbft"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CometBFT light-client finality verification for Bitcoin Thunderbolt"
+keywords = ["bitcoin", "cometbft", "consensus", "light-client"]
+categories = ["cryptography::cryptocurrencies"]
+
+[lints]
+workspace = true
+
+[dependencies]
+tendermint = "0.40.4"
+tendermint-light-client-verifier = "0.40.4"
+thiserror = "2.0.16"
+thunderbolt-ledger = { path = "../thunderbolt-ledger" }
+
+[dev-dependencies]
+ed25519-consensus = "2.1.0"
+proptest = "1.9.0"

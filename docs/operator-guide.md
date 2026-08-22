@@ -18,8 +18,10 @@ Building the workspace also builds these non-executable components:
 
 | Crate | What it provides | What operators cannot do yet |
 | --- | --- | --- |
-| `thunderbolt-holder` | Local Holder and Recipient state, including v1 single-committee and threshold Invoice packages | Start a Holder daemon, create an Invoice through the CLI, or submit a Transfer automatically |
-| `thunderbolt-committee` | One-share committee update engine with Recipient-share binding and signing-session guards | Start a committee daemon, verify a concrete quorum receipt, run DKG, or produce and aggregate FROST shares |
+| `thunderbolt-ledger` | BIP340 signed version 2 proposals, executed blocks, application hashes, and Merkle proofs | Run consensus, ABCI, persistent version 2 state, or obtain finality |
+| `thunderbolt-protocol` v2 | Concurrent bounded Invoices, consensus time, exact selected Transfer, and ordered Finalize rules | Activate version 2 in the daemon or verify production Open and Finalize proofs |
+| `thunderbolt-holder` | Local Holder and Recipient state plus a concrete fenced Keystore adapter | Start a Holder daemon, obtain trusted acknowledgements, or run outboxes and Ledger cursors |
+| `thunderbolt-committee` | One-share updates plus a concrete fenced Keystore adapter | Start a committee daemon, verify a concrete quorum receipt, run DKG, or produce and aggregate FROST shares |
 | `thunderbolt-verifier` | Trusted Invoice and Transfer verification plus node injection API | Configure a production verifier in `thunderboltd`, or verify Open and Finalize |
 | `thunderbolt-keystore` | Encrypted transactional multi-record vault, revision floors, nonce tombstones, and restricted restore | Unlock or manage participant secrets through the daemon or CLI, or restore committee signing state |
 | `thunderbolt-bitcoin` | Validated Bitcoin Core RPC, chain tracking, and transaction policy checks | Connect the daemon to Bitcoin Core, fund a channel, or complete settlement |
@@ -187,16 +189,17 @@ The Compose files are [`compose.yaml`](../deploy/regtest/compose.yaml) and [`thu
 
 ## Participant vault recovery
 
-`thunderbolt-keystore` is not used by this daemon, but future Holder and committee operators must preserve its rollback rules:
+`thunderbolt-keystore` is not used by this daemon. Concrete Holder and committee adapters exist, but future role operators must supply an independent authenticated `RollbackFloorStore` and preserve these rules:
 
 - multi-record updates use one authenticated revision and one transaction identifier;
 - a consumed signing nonce becomes a permanent tombstone;
-- a committee vault opens only with a positive minimum revision obtained from an independently authenticated monotonic store;
-- the external floor must advance after every share, nonce, or signing-state commit;
-- generic committee restore is forbidden;
-- Holder restore requires an externally trusted minimum revision and an empty destination.
+- the external checkpoint contains both revision and encrypted-state digest;
+- every secret read and output is fenced until exact checkpoint CAS succeeds;
+- a sibling file beside the vault is not a production checkpoint store;
+- exact anchored backups can be restored to an empty destination;
+- receipt pruning requires independent durable request history, and nonce tombstones are never pruned.
 
-An old vault file can authenticate successfully. Without the external revision floor, authentication alone does not detect rollback while the process is stopped.
+An old or equal-revision forked vault file can authenticate successfully. Without the exact external checkpoint, authentication alone does not detect rollback while the process is stopped. The repository has no automatic recovery for a process killed after local persistence but before checkpoint advancement.
 
 ## Release test evidence
 
@@ -237,14 +240,16 @@ Compatibility aliases `/live` and `/ready` are also available. The daemon marks 
 - Only the Ledger server role runs.
 - The control transport is loopback HTTP, not the reserved Unix socket.
 - Remote control and built-in TLS are rejected.
-- The daemon has no configured production verifier. The node injection API verifies only Invoice and Transfer.
+- The daemon runs version 1 and has no configured production verifier. The node injection API verifies only version 1 Invoice and Transfer.
+- The standalone version 2 Ledger and reducer are not connected to the daemon, SQLite service, ABCI, or CometBFT.
 - Open, Finalize, actor signatures, Bitcoin policy, and concrete quorum receipts are not connected to event submission.
-- The Holder, committee, Keystore, and Bitcoin Core libraries have no daemon or CLI integration.
+- The Holder and committee Keystore adapters exist, but no role daemon, outbox, Ledger cursor, production checkpoint store, or Bitcoin coordination uses them.
 - Metrics settings are parsed but no metrics endpoint runs.
 - Backups are verified but not encrypted by the daemon.
 - The Compose profile is a Ledger and storage demonstration, not a Bitcoin regtest network.
 - The wire codec uses 2048-bit Paillier values, while the accepted paper evaluates 3072-bit Paillier.
 - Open has no reviewed DKG or provisioning ceremony. Finalize has no `R_own` proof or combined-key Holder plus FROST signing path under `P`.
-- Version 1 remains active. Stable version 2 bindings are not adopted across messages and Ledger events, and the reducer permits one pending Invoice.
+- Version 2 signed proposals and concurrent-Invoice reduction exist only as standalone libraries. Executed blocks are not finality receipts.
+- Holder and committee retained histories need compaction or epoch rotation for long-lived operation.
 
 Role processes, participant vault adapters, outboxes, Ledger cursors, Bitcoin settlement, threshold signing, metrics, and a production Ledger fault model remain release work. See [Production roadmap](roadmap.md).

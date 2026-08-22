@@ -1,0 +1,30 @@
+[package]
+name = "thunderbolt-holder-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Durable Holder role service for Bitcoin Thunderbolt"
+keywords = ["bitcoin", "holder", "protocol", "service", "thunderbolt"]
+categories = ["cryptography::cryptocurrencies", "database"]
+
+[lints]
+workspace = true
+
+[dependencies]
+bitcoin = "0.32.5"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.145"
+sha2 = "0.10.9"
+thiserror = "2.0.16"
+thunderbolt-holder = { path = "../thunderbolt-holder" }
+thunderbolt-keystore = { path = "../thunderbolt-keystore" }
+thunderbolt-ledger = { path = "../thunderbolt-ledger" }
+thunderbolt-protocol = { path = "../thunderbolt-protocol" }
+thunderbolt-wire = { path = "../thunderbolt-wire" }
+
+[dev-dependencies]
+secp256k1 = { version = "0.31.1", features = ["rand"] }
+tempfile = "3.27.0"

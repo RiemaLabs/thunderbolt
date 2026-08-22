@@ -10,33 +10,35 @@ The repository contains:
 
 - the proof and threshold primitives in `thunderbolt-core`
 - bounded version 1 public messages and a stable version 2 binding in `thunderbolt-wire`
-- deterministic Ledger events, reduction, and transaction-scoped verified SQLite persistence
+- chain-scoped BIP340 signed proposals, executed blocks, application hashes, and Merkle proofs in `thunderbolt-ledger`
+- a deterministic version 2 reducer with bounded concurrent Invoices and consensus time
+- version 1 Ledger events, reduction, and transaction-scoped verified SQLite persistence
 - a Ledger-only `thunderboltd` and control CLI
 - a local Holder and Recipient engine with single-committee and threshold Invoice paths
 - a one-share committee member engine with Recipient-share binding
 - a Trusted Verifier for Invoice and Transfer, plus an injection boundary in `thunderbolt-node`
-- an encrypted transactional multi-record participant Keystore with external rollback floors
+- an encrypted transactional multi-record Keystore and concrete Holder and committee adapters with checkpoint fencing and pruning
 - a validated Bitcoin Core client and chain cursor
 
-The role and backend components are libraries. They have no daemon services, CLI commands, or complete deployment topology. The shipped daemon does not configure the Trusted Verifier.
+The version 2 Ledger, reducer, role adapters, and backend components are standalone libraries. They have no ABCI service, consensus finality, daemon services, CLI commands, or complete deployment topology. The shipped daemon remains version 1 and does not configure the Trusted Verifier.
 
 ## Protocol v2
 
-`ChannelBindingV2` and `OperationBindingV2` now define the stable proof scope. They include the protocol suite, Bitcoin network and exact genesis, deployment ID, full funding outpoint, committee epoch and descriptor digest, and anchor parameter-suite digest. Invoice ID and positive Transfer step remain operation inputs.
+`ChannelBindingV2` and `OperationBindingV2` define the stable proof scope. `SignedProposalV2` adds a Ledger chain ID, predecessor, actor-scoped request digest, BIP340 key and signature, role, and canonical event bytes. `ExecutedBlockV2` commits external consensus height and time, ordered entry metadata, an application hash, and Merkle inclusion proofs.
 
-Version 1 remains the active message, proof-envelope, Holder, committee, verifier, and Ledger contract. Protocol v2 must adopt the stable binding across those consumers without changing version 1 hashes.
+The version 2 reducer consumes these authenticated entries and implements bounded concurrent Invoices, one exact selected Transfer, consensus time, and total-order Finalize. It does not reinterpret version 1 hashes.
+
+Version 1 remains the active daemon, HTTP, SQLite, Holder, committee, and Trusted Verifier contract. The release still needs a coordinated activation and migration plan.
 
 The event contract also needs:
 
-- actor public keys and signatures over canonical proposal bytes
-- an actor-scoped request identifier and signed participant proposal envelope
-- a concrete authenticated quorum receipt consumed by the committee engine's existing receipt trait
-- an Open message and verifier
-- an `R_own` proof and Finalize message bound to `(ctx_id, s, P, X_s, tx)`
-- golden vectors and migration rules for every canonical digest
-- a decision to keep the one-pending-Invoice product restriction or adopt the paper's pending-Invoice set
+- a persistent ABCI application that decodes events, runs the reducer, and commits channel state atomically with blocks
+- a durable cross-block `request_digest -> entry_hash` index
+- a concrete authenticated quorum or light-client receipt consumed by the committee and Holder adapters
+- production `ExternalVerifierV2` implementations for Open, Invoice, Transfer, and Finalize
+- golden vectors and activation rules across every runtime consumer
 
-Invoice and Transfer verification now runs inside the same storage write transaction that selects the channel head, referenced Invoice, and trusted Ledger time. The transaction commits the entry, evidence, snapshot, and retry mapping together. A durable notification outbox and actor-scoped request history remain missing.
+Version 1 Invoice and Transfer verification runs inside one SQLite write transaction. That path does not store or execute version 2 blocks. Version 2 still needs its own persistence, request index, notification outbox, and recovery rules.
 
 The Holder threshold path now binds a Recipient `ShareEnvelopeV1` to the exact VESS distribution, and the committee rechecks that binding before its share update. The Recipient proof uses the implemented `tb/share` transcript. It does not claim to instantiate the paper's exact `R_inv^thr` transcript; adopting that transcript would require a new version and review.
 
@@ -44,11 +46,13 @@ The Holder threshold path now binds a Recipient `ShareEnvelopeV1` to the exact V
 
 The first integrated topology should run one Bitcoin Core regtest node, one Ledger, two Holder processes, and three committee-member processes with a threshold of two.
 
-Each role needs a local service, a durable Ledger cursor, an outbox, restart recovery, and a control API. The test must cover a Recipient Invoice, current-Holder Transfer, two independent committee share updates, Recipient credential recovery, and duplicate delivery. It must kill processes after external commit but before local acknowledgement and prove that retries neither repeat a share update nor reuse signing material.
+Concrete Keystore adapters now exist for both roles. Each role still needs a service, durable Ledger cursor, outbox, restart recovery, and control API. The test must cover a Recipient Invoice, current-Holder Transfer, two independent committee share updates, Recipient credential recovery, and duplicate delivery. It must kill processes after local vault persistence but before rollback-floor advancement, and after external commit but before local acknowledgement.
 
 The Bitcoin library has passed a measured gate on official Bitcoin Core v31.1.0, including network and genesis checks, exact coinbase maturity, a one-block reorganization, and same-datadir restart. That opt-in harness is ignored in automatic CI. The full topology still needs broadcast response-loss tests and funding or closing reorganization handling at the role-runtime level. See [Testing](testing.md).
 
 A test-only Open or Finalize fixture must be labeled as such and cannot support a production-readiness claim.
+
+The adapters also need long-lived-state tests. Holder history is eager and append-only, and the committee replay journal has a 512 KiB record ceiling. Production needs compaction or epoch rotation without weakening request replay or nonce tombstones.
 
 ## Cryptographic completion
 
@@ -67,8 +71,8 @@ The paper's Fiat-Shamir proofs establish the standalone proof relations. They do
 
 ## Production Ledger and release
 
-The single SQLite Ledger is a development service. A production Ledger must establish append-only persistence, one committed order per channel, and eventual inclusion and retrieval under the stated fault model. The current recommendation is a deterministic Thunderbolt application replicated through CometBFT.
+The version 1 single SQLite Ledger is a development service. `thunderbolt-ledger` now defines the deterministic version 2 application bytes that a replicated system can agree on, but executed blocks and Merkle proofs do not establish finality. The current recommendation is to expose that application through ABCI and replicate it with CometBFT.
 
-CometBFT is planned architecture, not implemented functionality. The repository has no CometBFT dependency, ABCI application, validator configuration, deployment asset, or integration test. Validator governance, its relationship to the Threshold Committee, state synchronization, and recovery procedures remain design work.
+CometBFT remains planned architecture. The repository has no CometBFT dependency, ABCI application, validator configuration, quorum receipt, deployment asset, or integration test. Validator governance, its relationship to the Threshold Committee, state synchronization, request indexing, and recovery procedures remain design work.
 
 Mainnet remains disabled until the integrated system passes multi-process restart and reorganization tests, production observability and backup drills, dependency and release checks, and an independent security audit with critical findings resolved.

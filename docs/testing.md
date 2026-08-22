@@ -14,6 +14,28 @@ cargo build --locked --release --package thunderboltd --package thunderbolt-cli
 
 That build does not enable `legacy-research`, `insecure-regression`, or `insecure-regtest`. It excludes `bitcoin-utils`, `thunderbolt-eval`, the old static two-key settlement prototype, and the single-process committee dealer from the release binaries.
 
+## Current local evidence
+
+The final full workspace run at `6ca2c42` recorded 268 passed, 0 failed, and 1 intentionally ignored live Bitcoin test. A fresh workspace all-target check also passed. Focused final suites recorded:
+
+| Package | Result |
+| --- | ---: |
+| `thunderbolt-ledger` | 13 passed |
+| `thunderbolt-protocol` | 44 passed |
+| `thunderbolt-keystore` | 27 passed plus 3 compile-fail doctests |
+| `thunderbolt-holder` | 21 passed |
+| `thunderbolt-committee` | 22 passed |
+
+These counts cover library behavior, including signed proposal and block commitments, concurrent version 2 Invoices, checkpoint fencing, adapter restart and pruning, replay, and tamper rejection. They do not cover a deployed consensus network or role runtime.
+
+## Linux version 2 gate
+
+An isolated Linux gate passed on exact ancestor commit `bcdf250`, after the version 2 workspace integration and before the final Holder and committee hardening commits. The host was limited to 4 CPUs and 16 GiB of memory. The source manifest matched 242 tracked files.
+
+Formatting, workspace check, 127 tests, strict Clippy, rustdoc with warnings denied, and 3 doctests passed. The live Bitcoin test remained ignored. The remote source stayed unchanged, and the source tree, build output, and processes were removed after the run.
+
+This Linux result does not cover the later `6ca2c42` committee codec regressions. Those have the focused local evidence listed above.
+
 ## Bitcoin Core v31.1.0 live gate
 
 The current release evidence includes a passing run against the official Bitcoin Core v31.1.0 binary. Before the run, the archive SHA256 matched the published checksum. Verification of `SHA256SUMS.asc` reported 11 valid and 0 bad signatures.
@@ -60,4 +82,6 @@ The Rust test performs network, cursor, UTXO, maturity, and reorganization check
 
 ## Remaining integration tests
 
-The repository still lacks a multi-process test with two Holders, three independent committee members, the Ledger, and Bitcoin Core. That gate must exercise durable outboxes and cursors, lost acknowledgements, duplicate delivery, quorum loss, role restarts, and the Open-to-Finalize settlement path. Open and Finalize cannot pass faithfully until the DKG, `R_own`, and combined-key FROST designs are implemented.
+The repository still lacks a multi-process test with two Holders, three independent committee members, the version 2 Ledger application, consensus, and Bitcoin Core. That gate must exercise a production rollback-floor backend, a process killed between vault persistence and checkpoint advancement, durable outboxes and cursors, cross-block request indexing, lost acknowledgements, duplicate delivery, quorum loss, role restarts, and settlement.
+
+Executed blocks and Merkle proofs must also be tested behind a real ABCI and CometBFT integration before they are treated as finality evidence. Open and Finalize cannot pass faithfully until the DKG, `R_own`, and combined-key FROST designs are implemented.
