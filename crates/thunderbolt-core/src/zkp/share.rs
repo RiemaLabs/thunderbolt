@@ -3,7 +3,8 @@ use secp::Point;
 
 use crate::paillier::{
     add_ciphertexts, build_response_lhs, combine_response_nonce, compose_ciphertext, exponentiate_ciphertext,
-    random_nonce_in_group, validate_ciphertext, validate_nonce, validate_plaintext, validate_protocol_encryption_key,
+    random_nonce_in_group, validate_ciphertext, validate_nonce, validate_paillier_backend, validate_plaintext,
+    validate_protocol_encryption_key, PaillierModulusProfile,
 };
 use crate::zkp::transcript::ProofTranscript;
 use crate::zkp::types::{
@@ -60,6 +61,7 @@ fn validate_statement(statement: &ShareEncryptionStatement) -> Result<()> {
     Ok(())
 }
 
+/// Generates a legacy RC/v1 2048-bit share-encryption proof.
 pub fn prove_share_encryption(
     statement: &ShareEncryptionStatement,
     witness: &ShareEncryptionWitness,
@@ -104,6 +106,22 @@ pub fn prove_share_encryption(
     })
 }
 
+/// Generates a share-encryption proof under an explicit Paillier profile.
+pub fn prove_share_encryption_with_profile(
+    profile: PaillierModulusProfile,
+    statement: &ShareEncryptionStatement,
+    witness: &ShareEncryptionWitness,
+) -> Result<ShareEncryptionProof> {
+    validate_paillier_backend(profile)?;
+    match profile {
+        PaillierModulusProfile::LegacyRc2048V1 => prove_share_encryption(statement, witness),
+        PaillierModulusProfile::ProtocolV2Production3072 => Err(ThunderboltError::CryptographicError(
+            "3072-bit Paillier share-proof generation requires an approved arbitrary-precision backend".to_string(),
+        )),
+    }
+}
+
+/// Verifies a legacy RC/v1 2048-bit share-encryption proof.
 pub fn verify_share_encryption(statement: &ShareEncryptionStatement, proof: &ShareEncryptionProof) -> Result<()> {
     validate_statement(statement)?;
     validate_ciphertext(&statement.recipient_key, &proof.a_ciphertext)?;
@@ -133,6 +151,23 @@ pub fn verify_share_encryption(statement: &ShareEncryptionStatement, proof: &Sha
     }
 
     Ok(())
+}
+
+/// Verifies a share-encryption proof under an explicit Paillier profile.
+///
+/// Profile/backend validation runs before statement-controlled arithmetic.
+pub fn verify_share_encryption_with_profile(
+    profile: PaillierModulusProfile,
+    statement: &ShareEncryptionStatement,
+    proof: &ShareEncryptionProof,
+) -> Result<()> {
+    validate_paillier_backend(profile)?;
+    match profile {
+        PaillierModulusProfile::LegacyRc2048V1 => verify_share_encryption(statement, proof),
+        PaillierModulusProfile::ProtocolV2Production3072 => Err(ThunderboltError::CryptographicError(
+            "3072-bit Paillier share-proof verification requires an approved arbitrary-precision backend".to_string(),
+        )),
+    }
 }
 
 #[cfg(test)]

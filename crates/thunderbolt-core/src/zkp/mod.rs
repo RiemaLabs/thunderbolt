@@ -13,12 +13,16 @@ pub(crate) mod transcript;
 pub mod transfer;
 pub mod types;
 
-pub use invoice::{prove_invoice, verify_invoice, InvoiceProof, InvoiceStatement, InvoiceWitness};
+pub use invoice::{
+    prove_invoice, prove_invoice_with_profile, verify_invoice, verify_invoice_with_profile, InvoiceProof,
+    InvoiceStatement, InvoiceWitness,
+};
 pub use share::{
-    prove_share_encryption, verify_share_encryption, ShareEncryptionProof, ShareEncryptionStatement,
-    ShareEncryptionWitness,
+    prove_share_encryption, prove_share_encryption_with_profile, verify_share_encryption,
+    verify_share_encryption_with_profile, ShareEncryptionProof, ShareEncryptionStatement, ShareEncryptionWitness,
 };
 pub use transfer::{
-    prove_transfer, verify_anchor_transition, verify_transfer, TransferProof, TransferStatement, TransferWitness,
+    prove_transfer, prove_transfer_with_profile, verify_anchor_transition, verify_transfer,
+    verify_transfer_with_profile, TransferProof, TransferStatement, TransferWitness,
 };
 pub use types::{ProofContext, ProofTag};

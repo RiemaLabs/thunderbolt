@@ -4,7 +4,7 @@ use secp::{MaybePoint, Point, Scalar};
 use crate::paillier::{
     add_ciphertexts, build_response_lhs, combine_response_nonce, compose_ciphertext, encrypt_plaintext,
     exponentiate_ciphertext, random_nonce_in_group, subtract_ciphertexts, validate_ciphertext, validate_nonce,
-    validate_plaintext, validate_protocol_encryption_key,
+    validate_paillier_backend, validate_plaintext, validate_protocol_encryption_key, PaillierModulusProfile,
 };
 use crate::zkp::transcript::ProofTranscript;
 use crate::zkp::types::{
@@ -62,6 +62,7 @@ fn transfer_challenge(
     transcript.challenge()
 }
 
+/// Generates a legacy RC/v1 2048-bit transfer proof.
 pub fn prove_transfer(statement: &TransferStatement, witness: &TransferWitness) -> Result<TransferProof> {
     validate_statement(statement)?;
     validate_nonce(&statement.bob_key, &witness.holder_nonce)?;
@@ -105,6 +106,22 @@ pub fn prove_transfer(statement: &TransferStatement, witness: &TransferWitness) 
     })
 }
 
+/// Generates a transfer proof under an explicit versioned Paillier profile.
+pub fn prove_transfer_with_profile(
+    profile: PaillierModulusProfile,
+    statement: &TransferStatement,
+    witness: &TransferWitness,
+) -> Result<TransferProof> {
+    validate_paillier_backend(profile)?;
+    match profile {
+        PaillierModulusProfile::LegacyRc2048V1 => prove_transfer(statement, witness),
+        PaillierModulusProfile::ProtocolV2Production3072 => Err(ThunderboltError::CryptographicError(
+            "3072-bit Paillier proof generation requires an approved arbitrary-precision backend".to_string(),
+        )),
+    }
+}
+
+/// Verifies a legacy RC/v1 2048-bit transfer proof.
 pub fn verify_transfer(statement: &TransferStatement, proof: &TransferProof) -> Result<()> {
     validate_statement(statement)?;
     validate_ciphertext(&statement.bob_key, &proof.a_ciphertext)?;
@@ -139,6 +156,23 @@ pub fn verify_transfer(statement: &TransferStatement, proof: &TransferProof) -> 
     }
 
     Ok(())
+}
+
+/// Verifies a transfer proof under an explicit versioned Paillier profile.
+///
+/// Profile/backend validation runs before statement-controlled arithmetic.
+pub fn verify_transfer_with_profile(
+    profile: PaillierModulusProfile,
+    statement: &TransferStatement,
+    proof: &TransferProof,
+) -> Result<()> {
+    validate_paillier_backend(profile)?;
+    match profile {
+        PaillierModulusProfile::LegacyRc2048V1 => verify_transfer(statement, proof),
+        PaillierModulusProfile::ProtocolV2Production3072 => Err(ThunderboltError::CryptographicError(
+            "3072-bit Paillier proof verification requires an approved arbitrary-precision backend".to_string(),
+        )),
+    }
 }
 
 pub fn verify_anchor_transition(current_anchor: &Point, delta: &Point, next_anchor: &Point) -> Result<()> {

@@ -476,6 +476,21 @@ impl OperationBindingV2 {
         }
         Ok(())
     }
+
+    pub(crate) fn append_canonical(&self, hasher: &mut CanonicalHasher) {
+        self.channel().append_canonical(hasher);
+        match self {
+            Self::Invoice { invoice_id, .. } => {
+                hasher.u8(0);
+                hasher.bytes(invoice_id.as_bytes());
+            }
+            Self::Transfer { invoice_id, step, .. } => {
+                hasher.u8(1);
+                hasher.bytes(invoice_id.as_bytes());
+                hasher.u64(*step);
+            }
+        }
+    }
 }
 
 impl ValidateWire for OperationBindingV2 {
@@ -494,18 +509,7 @@ impl CanonicalDigest for OperationBindingV2 {
     fn canonical_digest(&self) -> Result<[u8; 32]> {
         self.validate_wire()?;
         let mut hasher = CanonicalHasher::new(b"operation_binding_v2");
-        self.channel().append_canonical(&mut hasher);
-        match self {
-            Self::Invoice { invoice_id, .. } => {
-                hasher.u8(0);
-                hasher.bytes(invoice_id.as_bytes());
-            }
-            Self::Transfer { invoice_id, step, .. } => {
-                hasher.u8(1);
-                hasher.bytes(invoice_id.as_bytes());
-                hasher.u64(*step);
-            }
-        }
+        self.append_canonical(&mut hasher);
         Ok(hasher.finish())
     }
 }

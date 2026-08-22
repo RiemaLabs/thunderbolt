@@ -3,8 +3,8 @@ use secp::{Point, Scalar};
 
 use crate::paillier::{
     add_ciphertexts, build_response_lhs, combine_response_nonce, compose_ciphertext, encrypt_plaintext,
-    exponentiate_ciphertext, random_nonce_in_group, validate_ciphertext, validate_nonce, validate_plaintext,
-    validate_protocol_encryption_key,
+    exponentiate_ciphertext, random_nonce_in_group, validate_ciphertext, validate_nonce, validate_paillier_backend,
+    validate_plaintext, validate_protocol_encryption_key, PaillierModulusProfile,
 };
 use crate::zkp::transcript::ProofTranscript;
 use crate::zkp::types::{
@@ -70,6 +70,7 @@ fn invoice_challenge(
     transcript.challenge()
 }
 
+/// Generates a legacy RC/v1 2048-bit invoice proof.
 pub fn prove_invoice(statement: &InvoiceStatement, witness: &InvoiceWitness) -> Result<InvoiceProof> {
     validate_statement(statement)?;
     validate_nonce(&statement.bob_key, &witness.bob_nonce)?;
@@ -131,6 +132,26 @@ pub fn prove_invoice(statement: &InvoiceStatement, witness: &InvoiceWitness) -> 
     })
 }
 
+/// Generates an invoice proof under an explicit versioned Paillier profile.
+///
+/// The legacy profile delegates to `prove_invoice` without changing its
+/// transcript or validation behavior. Unsupported production profiles fail
+/// before inspecting statement keys, ciphertexts, or witness nonces.
+pub fn prove_invoice_with_profile(
+    profile: PaillierModulusProfile,
+    statement: &InvoiceStatement,
+    witness: &InvoiceWitness,
+) -> Result<InvoiceProof> {
+    validate_paillier_backend(profile)?;
+    match profile {
+        PaillierModulusProfile::LegacyRc2048V1 => prove_invoice(statement, witness),
+        PaillierModulusProfile::ProtocolV2Production3072 => Err(ThunderboltError::CryptographicError(
+            "3072-bit Paillier proof generation requires an approved arbitrary-precision backend".to_string(),
+        )),
+    }
+}
+
+/// Verifies a legacy RC/v1 2048-bit invoice proof.
 pub fn verify_invoice(statement: &InvoiceStatement, proof: &InvoiceProof) -> Result<()> {
     validate_statement(statement)?;
     validate_ciphertext(&statement.bob_key, &proof.a_bob)?;
@@ -178,6 +199,23 @@ pub fn verify_invoice(statement: &InvoiceStatement, proof: &InvoiceProof) -> Res
     }
 
     Ok(())
+}
+
+/// Verifies an invoice proof under an explicit versioned Paillier profile.
+///
+/// Profile/backend validation runs before statement-controlled arithmetic.
+pub fn verify_invoice_with_profile(
+    profile: PaillierModulusProfile,
+    statement: &InvoiceStatement,
+    proof: &InvoiceProof,
+) -> Result<()> {
+    validate_paillier_backend(profile)?;
+    match profile {
+        PaillierModulusProfile::LegacyRc2048V1 => verify_invoice(statement, proof),
+        PaillierModulusProfile::ProtocolV2Production3072 => Err(ThunderboltError::CryptographicError(
+            "3072-bit Paillier proof verification requires an approved arbitrary-precision backend".to_string(),
+        )),
+    }
 }
 
 #[cfg(test)]

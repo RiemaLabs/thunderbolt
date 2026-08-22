@@ -20,6 +20,15 @@ This prevents an admitted bad proof from poisoning every proposal round while
 keeping proposer work bounded. `ProcessProposal` repeats full deterministic
 validation through that same path.
 
+The proposer scan cursor is intentionally in-memory and resets after process
+restart. A production deployment therefore still needs bounded CometBFT
+mempool bytes/count, admission rate and fee policy, and supervisor crash-loop
+limits; otherwise repeated restarts can repeatedly expose the first scan
+window. Contextual New/Recheck admission also takes an immediate rollback-only
+SQLite transaction and runs proof verification. The production ABCI boundary
+must cap mempool-connection concurrency/rate so broadcast traffic cannot starve
+consensus `Commit`.
+
 `FinalizeBlock` repeats that rollback-only execution and keeps an opaque
 `PreparedBlockV2` in shared memory. It does not advance SQLite. `Commit`
 re-executes the prepared block, compares the exact block, application hash, and

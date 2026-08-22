@@ -12,7 +12,7 @@ use secp::{MaybePoint, MaybeScalar, Point, Scalar};
 
 #[cfg(any(test, feature = "insecure-regression"))]
 use crate::paillier::decrypt_to_big_number;
-use crate::paillier::{encrypt_plaintext, random_nonce_in_group};
+use crate::paillier::{encrypt_plaintext, random_nonce_in_group, validate_paillier_backend, PaillierModulusProfile};
 #[cfg(any(test, feature = "insecure-regression"))]
 use crate::zkp::types::{big_number_to_scalar, curve_order, scalar_to_big_number};
 use crate::zkp::{
@@ -196,6 +196,7 @@ fn verify_member_share(
     Ok(committed_point)
 }
 
+/// Creates a legacy RC/v1 2048-bit threshold refresh distribution.
 pub fn create_threshold_refresh_distribution(
     context: ProofContext,
     anchor_base: Point,
@@ -269,6 +270,27 @@ pub fn create_threshold_refresh_distribution(
     })
 }
 
+/// Creates a threshold refresh distribution under an explicit Paillier profile.
+pub fn create_threshold_refresh_distribution_with_profile(
+    profile: PaillierModulusProfile,
+    context: ProofContext,
+    anchor_base: Point,
+    threshold: usize,
+    refresh: Scalar,
+    recipients: &[ThresholdMemberPublicKey],
+) -> Result<ThresholdRefreshDistribution> {
+    validate_paillier_backend(profile)?;
+    match profile {
+        PaillierModulusProfile::LegacyRc2048V1 => {
+            create_threshold_refresh_distribution(context, anchor_base, threshold, refresh, recipients)
+        }
+        PaillierModulusProfile::ProtocolV2Production3072 => Err(ThunderboltError::CryptographicError(
+            "3072-bit threshold refresh generation requires an approved arbitrary-precision backend".to_string(),
+        )),
+    }
+}
+
+/// Verifies a legacy RC/v1 2048-bit threshold refresh distribution.
 pub fn verify_threshold_refresh_distribution(distribution: &ThresholdRefreshDistribution) -> Result<()> {
     distribution.context.expect_invoice()?;
     if distribution.threshold == 0 {
@@ -314,6 +336,22 @@ pub fn verify_threshold_refresh_distribution(distribution: &ThresholdRefreshDist
     Ok(())
 }
 
+/// Verifies a threshold refresh distribution under an explicit Paillier profile.
+///
+/// Profile/backend validation runs before distribution-controlled arithmetic.
+pub fn verify_threshold_refresh_distribution_with_profile(
+    profile: PaillierModulusProfile,
+    distribution: &ThresholdRefreshDistribution,
+) -> Result<()> {
+    validate_paillier_backend(profile)?;
+    match profile {
+        PaillierModulusProfile::LegacyRc2048V1 => verify_threshold_refresh_distribution(distribution),
+        PaillierModulusProfile::ProtocolV2Production3072 => Err(ThunderboltError::CryptographicError(
+            "3072-bit threshold refresh verification requires an approved arbitrary-precision backend".to_string(),
+        )),
+    }
+}
+
 #[cfg(any(test, feature = "insecure-regression"))]
 impl ThresholdCommittee {
     pub fn new(threshold: usize, committee_size: usize, anchor_base: Point, committee_secret: Scalar) -> Result<Self> {
@@ -352,6 +390,25 @@ impl ThresholdCommittee {
             anchor_base,
             members,
         })
+    }
+
+    /// Creates the regression-only committee under an explicit Paillier profile.
+    pub fn new_with_profile(
+        profile: PaillierModulusProfile,
+        threshold: usize,
+        committee_size: usize,
+        anchor_base: Point,
+        committee_secret: Scalar,
+    ) -> Result<Self> {
+        validate_paillier_backend(profile)?;
+        match profile {
+            PaillierModulusProfile::LegacyRc2048V1 => {
+                Self::new(threshold, committee_size, anchor_base, committee_secret)
+            }
+            PaillierModulusProfile::ProtocolV2Production3072 => Err(ThunderboltError::CryptographicError(
+                "3072-bit committee fixtures require an approved arbitrary-precision backend".to_string(),
+            )),
+        }
     }
 
     pub fn threshold(&self) -> usize {
@@ -438,6 +495,22 @@ impl ThresholdCommittee {
             refresh_share,
             updated_share,
         })
+    }
+
+    /// Applies one refresh share under an explicit Paillier profile.
+    pub fn apply_refresh_share_with_profile(
+        &mut self,
+        profile: PaillierModulusProfile,
+        distribution: &ThresholdRefreshDistribution,
+        member_id: u32,
+    ) -> Result<ThresholdMemberUpdate> {
+        validate_paillier_backend(profile)?;
+        match profile {
+            PaillierModulusProfile::LegacyRc2048V1 => self.apply_refresh_share(distribution, member_id),
+            PaillierModulusProfile::ProtocolV2Production3072 => Err(ThunderboltError::CryptographicError(
+                "3072-bit committee share application requires an approved arbitrary-precision backend".to_string(),
+            )),
+        }
     }
 
     pub fn reconstruct_secret(&self, member_ids: &[u32]) -> Result<Scalar> {

@@ -9,10 +9,15 @@ mod codec;
 mod error;
 mod hex;
 mod invoice;
+mod invoice_v2;
 mod message;
+mod message_v2;
 mod share;
 mod threshold;
+mod threshold_v2;
 mod transfer;
+mod transfer_v2;
+mod v2_values;
 
 pub use binding::{
     BindingContext, ChannelId, DeploymentId, InvoiceId, MAX_CHANNEL_ID_BYTES, MAX_DEPLOYMENT_ID_BYTES,
@@ -30,10 +35,22 @@ pub use codec::{
 pub use error::{Result, WireError};
 pub use hex::{CanonicalInteger, HexBytes};
 pub use invoice::{InvoiceEnvelopeV1, InvoiceProofV1, InvoiceStatementV1};
+pub use invoice_v2::{InvoiceEnvelopeV2, InvoiceProofV2, InvoiceStatementV2};
 pub use message::PublicMessageV1;
+pub use message_v2::{decode_public_message_v2, PublicMessageV2};
 pub use share::{ShareEnvelopeV1, ShareProofV1, ShareStatementV1};
 pub use threshold::{
     threshold_invoice_package_digest, ThresholdDistributionV1, ThresholdEncryptedShareV1, ThresholdEnvelopeV1,
     MAX_COMMITTEE_MEMBERS, RECIPIENT_SHARE_MEMBER_ID,
 };
+pub use threshold_v2::{
+    threshold_invoice_package_digest_v2, validate_threshold_package_v2, RecipientShareEnvelopeV2,
+    RecipientShareStatementV2, ShareProofV2, ThresholdDistributionV2, ThresholdEncryptedShareV2, ThresholdEnvelopeV2,
+    ThresholdPackageBindingV2, ThresholdPackageIdV2, ThresholdRosterMemberV2, ThresholdRosterV2,
+};
 pub use transfer::{AnchorTransitionV1, TransferEnvelopeV1, TransferProofV1, TransferStatementV1};
+pub use transfer_v2::{AnchorTransitionV2, TransferEnvelopeV2, TransferProofV2, TransferStatementV2};
+pub use v2_values::{
+    PaillierCiphertextBytesV2, PaillierModulusBytesV2, PaillierModulusProfileV2, PaillierNonceBytesV2,
+    ProofResponseBytesV2, PAILLIER_V2_CIPHERTEXT_BYTES, PAILLIER_V2_MODULUS_BYTES, PROOF_RESPONSE_V2_BYTES,
+};

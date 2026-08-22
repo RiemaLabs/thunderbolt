@@ -66,6 +66,19 @@ where
     Ok(message)
 }
 
+pub(crate) fn require_canonical_json<T>(message: &T, encoded: &[u8]) -> Result<()>
+where
+    T: Serialize,
+{
+    if serde_json::to_vec(message)?.as_slice() != encoded {
+        return Err(WireError::InvalidMessage {
+            message: "protocol v2 JSON",
+            reason: "input must use the canonical compact JSON encoding",
+        });
+    }
+    Ok(())
+}
+
 pub(crate) fn point_to_wire(field: &'static str, point: &Point) -> Result<PointHex> {
     PointHex::from_bytes(field, point.serialize())
 }
