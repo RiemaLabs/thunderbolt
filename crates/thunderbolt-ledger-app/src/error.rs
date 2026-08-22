@@ -109,6 +109,14 @@ pub enum ApplicationError {
     #[error("actor-scoped request digest conflicts with a durable entry mapping")]
     RequestConflict,
 
+    /// A range cursor or page limit is inconsistent with durable execution.
+    #[error("executed block range request is invalid: {0}")]
+    InvalidRange(&'static str),
+
+    /// The first requested block cannot fit in the caller's byte budget.
+    #[error("executed block range byte budget cannot contain its first block")]
+    RangeByteLimitTooSmall,
+
     /// Re-execution no longer matches the exact rollback-only preview.
     #[error("prepared block execution differs from its rollback-only preview")]
     PreparedBlockMismatch,

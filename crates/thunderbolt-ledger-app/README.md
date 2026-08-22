@@ -44,6 +44,24 @@ hash, and disposition counts match the preview. This is the intended
 `FinalizeBlock`/`Commit` boundary for an ABCI adapter; previewing never advances
 the durable application head.
 
+Schema version 3 adds a covering, non-unique
+`(channel_context_id, entry_hash, height, block_index)` index. Non-uniqueness is
+intentional because an exact signed request may be executed again as a replay.
+`first_entry_location_through` always returns the earliest matching position at
+or before a caller-selected execution checkpoint, and verifies the checkpoint
+app hash, index row, pointed block, channel, and entry in one SQLite read
+transaction. This makes an earlier `None` meaningful only for that exact
+checkpoint; it cannot be reused as a later absence claim.
+
+`block_range` returns an exact positive count of globally contiguous whole
+`ExecutedBlockV2` values. Empty consensus blocks remain explicit elements and
+pages never split a block. The cursor binds the chain, first height, and exact
+predecessor app hash. SQLite blob lengths and the complete JSON-array byte
+budget are checked before response blobs are decoded, then every accepted
+block is canonically decoded and successor-validated. Range reads are limited
+to 64 blocks and 23 MiB of canonical block-array bytes. They fail rather than
+returning an empty or provider-truncated page.
+
 This crate is not a network, consensus engine, ABCI server, finality verifier,
 wallet, or role runtime. `ExecutedBlockV2`, its application hash, and its Merkle
 proofs establish deterministic execution only. A future consensus integration

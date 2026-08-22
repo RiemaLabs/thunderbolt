@@ -1,0 +1,32 @@
+[package]
+name = "thunderbolt-floor-abci"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bounded CometBFT ABCI adapter for the Bitcoin Thunderbolt rollback floor"
+keywords = ["bitcoin", "cometbft", "abci", "thunderbolt"]
+categories = ["cryptography::cryptocurrencies", "database"]
+
+[lints]
+workspace = true
+
+[dependencies]
+bytes = "1.10.1"
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.145"
+sha2 = "0.10.9"
+tendermint-abci = "0.40.4"
+tendermint = "0.40.4"
+tendermint-proto = "0.40.4"
+thiserror = "2.0.16"
+thunderbolt-floor = { path = "../thunderbolt-floor" }
+thunderbolt-floor-app = { path = "../thunderbolt-floor-app" }
+thunderbolt-keystore = { path = "../thunderbolt-keystore" }
+
+[dev-dependencies]
+proptest = "1.9.0"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+secp256k1 = "0.31.1"
+tempfile = "3.27.0"

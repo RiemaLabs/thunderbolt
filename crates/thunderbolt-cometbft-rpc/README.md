@@ -5,6 +5,12 @@
 complete current/next validator sets, then returns an undecoded bounded trace
 body plus a non-serializable authenticated-session capability.
 
+The same pinned peer/session implementation exposes two additional fixed
+Ledger operations. `broadcast_tx_sync` accepts only a typed
+`SignedProposalV2`; `abci_query` accepts only `LedgerAbciQueryV2` constructors
+for the committed Thunderbolt Ledger paths. There is no public arbitrary
+JSON-RPC method, path, provider label, or raw JSON result.
+
 Production peers use HTTPS with a caller-supplied CA set, exact DNS name,
 expected CometBFT node id, exact leaf-SPKI SHA-256, and a client-certificate
 resolver supplied by a private-key provider. The built-in PEM provider opens
@@ -21,6 +27,15 @@ All RPC bodies are byte-capped before JSON decode. Status, HTTP status,
 content type, JSON-RPC id, chain id, node id, height, validator pagination,
 validator hashes, and aggregate trace work are checked. Retries are limited to
 configured idempotent reads and share the coordinator deadline.
+
+Ledger query responses additionally bind the exact fixed path key, requested
+height, application code/codespace, returned key, canonical application bytes,
+configured node and chain, SPKI/exporter session, and complete status-plus-query
+transcript. Base64 length is checked against the 24 MiB application value cap
+before decoded output is allocated. A full-size execution-range response needs
+an explicit `LedgerRpcLimits` override with a 33 MiB response cap and at least
+34 MiB aggregate cap. Trace limits stay independently capped at 8 MiB per
+response and 64 MiB aggregate. Runtime policy must commit both limit sets.
 
 One authenticated HTTP/1.1 connection is reused for the complete trace. The
 session transcript binds the actual leaf SPKI and TLS exporter, status-derived
@@ -41,8 +56,9 @@ use std::str::FromStr;
 use std::time::Duration;
 use tendermint::node::Id;
 use thunderbolt_cometbft_rpc::{
-    CometBftRpcTransport, HttpsPeer, OwnerOnlyPemClientIdentity, RetryPolicy,
-    RpcLimits, RpcPeer, RpcTransportConfig,
+    CometBftRpcTransport, HttpsPeer, LedgerRpcLimits,
+    OwnerOnlyPemClientIdentity, RetryPolicy, RpcLimits, RpcPeer,
+    RpcTransportConfig,
 };
 
 # fn configure(
@@ -73,11 +89,12 @@ let retry = RetryPolicy::new(
     NonZeroU8::new(3).ok_or("attempts")?,
     Duration::from_millis(100),
 )?;
-let transport = CometBftRpcTransport::new(RpcTransportConfig::new(
+let config = RpcTransportConfig::new(
     vec![RpcPeer::Https(peer)],
     limits,
     retry,
-)?)?;
+)?.with_ledger_limits(LedgerRpcLimits::new(33 << 20, 34 << 20)?);
+let transport = CometBftRpcTransport::new(config)?;
 # Ok(transport)
 # }
 ```
@@ -97,6 +114,21 @@ requires the key to be owner-readable with no group/other permissions (normally
 
 ## Operations
 
+- `broadcast_tx_sync` may retry the idempotent authenticated `status` preflight,
+  but hands the transaction to Hyper exactly once. Any HTTP, timeout, framing,
+  correlation, content, hash, codespace, or body uncertainty after that handoff
+  returns `RpcTransportError::AmbiguousWrite` with the deterministic transaction
+  hash. Cancellation after handoff is also ambiguous; callers reconcile through
+  the signed proposal's stable Ledger request key before resubmitting.
+- `BroadcastAdmissionV2::Accepted` means only that one authenticated peer
+  returned CheckTx code zero. It does not establish block execution or finality.
+  `AuthenticatedAbciQueryV2` likewise carries validated deterministic execution
+  bytes only. A role client must compare those bytes and the execution app hash
+  with a separately verified TrustCoordinator header before issuing finality.
+- Idempotent ABCI reads retry the complete status-plus-query attempt, so every
+  successful retry reauthenticates node ID and chain on its final TLS session.
+  Successful responses reject `ProofOps`; the Ledger's execution proof remains
+  distinct from CometBFT finality.
 - Certificate or CA rotation is an explicit roster change. Deploy the new
   server and client trust material first, calculate the new leaf-SPKI pin, then
   install a new immutable peer and advance the coordinator source-configuration
@@ -132,3 +164,9 @@ cargo test -p thunderbolt-cometbft-rpc --features regtest \
 
 Every URL in this gate must be a literal loopback HTTP origin. The gate is for
 wire/schema compatibility only and does not weaken the production HTTPS path.
+
+The separate ignored `optional_live_pinned_https_ledger_query_gate` exercises
+the fixed block-query schema over production HTTPS/mTLS. Set
+`THUNDERBOLT_COMETBFT_LEDGER_LIVE_CONFIG` to an owner-controlled JSON file with
+the pinned URL, node ID, SPKI digest, CA PEM path, owner-only client certificate
+and key paths, Ledger chain ID, and an existing positive execution height.

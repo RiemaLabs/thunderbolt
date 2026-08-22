@@ -5,38 +5,67 @@ Committee member. It combines the one-member cryptographic engine and encrypted
 checkpoint-fenced keystore with a bounded SQLite inbox, acknowledgement outbox,
 and finalized Ledger cursor.
 
-It consumes exact `SignedProposalV2`, `ExecutedBlockV2`, and
-`EntryMerkleProofV2` values. Those prove authentication and deterministic
-execution only. An operator-supplied `LedgerFinalityVerifier` must authenticate
-a CometBFT quorum or light-client receipt before an item enters the inbox. The
-crate ships only a verifier that fails closed.
+It consumes bounded, whole-block, globally contiguous `ExecutedBlockV2`
+segments beginning at an exact durable height and predecessor application
+hash. Empty blocks are explicit and pages never end mid-block. A compact
+commitment, exact entry, and Merkle proof are retained only for matched
+Invoice/Transfer pairs. Full blocks and raw receipts remain transient. An
+operator-supplied `LedgerFinalityVerifier` must authenticate every complete
+block before the global cursor advances. The crate ships only a verifier that
+fails closed.
 
-The verifier must issue one durable paired capability proving the Invoice and
-Transfer share a finalized ancestry and strict total order. Its refresh ordinal
-and prior-refresh hash must come from Ledger application state committed by the
-verified app hash. The service stores only this bounded attestation, not an
-expiring raw light-client receipt, and authenticates it again on restart.
+The Ledger does not commit a refresh ordinal or refresh index. The service
+therefore derives its own processed-refresh count and last-Transfer hash only
+while scanning every finalized block and every executed position in order. A
+server-filtered refresh feed, locator response, or RPC continuation token is
+never treated as a completeness proof. Unmatched, relevant Invoice evidence is
+stored locally until a later contiguous Transfer consumes it or trusted block
+time expires it.
+
+The service stores bounded durable attestations only for retained pending
+Invoices, compact matched pairs, and the last global cursor block, never an
+expiring raw light-client receipt. Each retained attestation is reauthenticated
+before it can authorize later scanning or private processing.
 The verifier profile ID, covering the Ledger app version, Comet trust policy,
 authenticator domain, and attestation key, is immutable in node configuration,
 SQLite identity, and every capability. A different per-call verifier is rejected
 before it can verify or mutate state.
 
-Schema-v1 databases with pending inbox work are rejected before any migration
-or profile backfill. They require an offline migrator that authenticates every
-legacy attestation under the selected pinned profile. The runtime never guesses
-that binding or marks such a database schema v2.
+Schema-v1/v2 databases with any legacy inbox or outbox record are rejected
+before migration. Those rows may contain full blocks, v1 envelopes, or raw
+receipts and require an offline verified migrator. Empty legacy databases may
+migrate atomically to schema v3.
 
-The SQLite cursor advances only for the exact next refresh ordinal whose prior
-refresh hash equals the current cursor. Poll batches are sorted by that ordinal;
-gaps, forks, backwards positions, and conflicting duplicate requests fail
+Pending-Invoice changes, compact matched records, the locally derived refresh
+chain, and the whole-block global cursor commit in one immediate SQLite
+transaction. Gaps, omitted empty blocks, forks, backwards heads, oversized
+segments, alternate exact replays, and conflicting duplicate requests fail
 closed before the cursor changes.
 
-The service rechecks the committed Invoice's Recipient share proof, threshold
-distribution, and consumed Transfer package before updating its one local
-Shamir share. A crash after the encrypted share update but before SQLite commit
-is recovered by deterministic engine replay.
+SQLite requires an absolute normalized path under an existing owner-only safe
+ancestry. The node creates mode-0600 files, opens with no-follow semantics,
+rejects symlinks and hardlinks, retains and rechecks the exact device/inode,
+prevents a second in-process handle to the same file, and reads back
+foreign-key, WAL, and FULL-synchronous settings. In-memory and URI databases
+are not production modes. The last block's bounded durable finality capability
+is stored with the cursor and externally reauthenticated before that cursor is
+used for another scan.
 
-No Committee-authored v2 event currently exists, so update acknowledgements
-remain unsigned local outbox records. The shipped signer hook fails closed. The
-crate does not implement or claim DKG, FROST signing or aggregation, CometBFT
+The service reparses `PublicMessageV2` RecipientShare, ThresholdRefresh, and
+Transfer artifacts only from authenticated signed event bytes. It exact-binds
+their channel, invoice, step, roster, anchor, ciphertext, event, inclusion, and
+finality fields, then requires the private runtime's non-mutating proof/roster
+validation before cursor advance. A crash after a future v2
+engine's encrypted share update but before SQLite acknowledgement commit is
+recoverable by deterministic runtime replay.
+
+The committed `CommitteeMemberEngine` still accepts legacy v1 transcripts, so
+its adapter reports `V2RuntimeUnavailable` before fetching, persistence, cursor
+advance, private mutation, or acknowledgement. A real share update waits on the
+reviewed core-v2/Committee migration; v2 transcripts are never reinterpreted as
+v1. The concrete async Ledger-Comet client is also an external deployment gate.
+
+No Committee-authored v2 event currently exists, so acknowledgements remain
+unsigned local outbox records. The shipped signer hook fails closed. The crate
+does not implement or claim DKG, FROST signing or aggregation, CometBFT
 finality, automatic reorg recovery, mainnet readiness, or Testnet4 support.

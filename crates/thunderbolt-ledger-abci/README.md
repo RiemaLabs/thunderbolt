@@ -53,11 +53,18 @@ The application hash returned while executing height `H` is the state placed in
 the header at height `H + 1`. `Commit` does not return an application hash under
 ABCI 2.0.
 
-The adapter supports bounded `status`, `block`, `channel`, `request`, and
-execution-proof query paths. The proof response is deterministic execution
-evidence only and returns no CometBFT `ProofOps` or finality capability. A
-request setting ABCI's `prove` flag is rejected even on the execution-proof
-path. State-sync snapshots fail closed. With vote extensions disabled,
+The adapter supports bounded `status`, `block`, `channel`, `request`,
+execution-proof, `execution-range`, and `entry-location` query paths. An
+execution range uses a fixed 46-byte key containing start height, predecessor
+app hash, exact whole-block count, and block-array byte cap; ABCI `height` must
+equal its exact last execution height. An entry-location key contains the exact
+channel, entry hash, inclusive historical height, and app hash at that height.
+Both responses use the canonical request-correlated Ledger RPC v2 envelope.
+They include empty blocks, never split a block, and never claim finality.
+
+All three execution-evidence paths return no CometBFT `ProofOps` or finality
+capability. A request setting ABCI's `prove` flag is rejected. State-sync
+snapshots fail closed. With vote extensions disabled,
 verification accepts only the required empty extension and rejects nonempty
 values. The adapter does not run
 CometBFT, configure validator governance, verify quorum finality, provide a

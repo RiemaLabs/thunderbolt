@@ -39,6 +39,7 @@ tendermint-proto = "0.40.4"
 thiserror = "2.0.16"
 thunderbolt-ledger = { path = "../thunderbolt-ledger" }
 thunderbolt-ledger-app = { path = "../thunderbolt-ledger-app" }
+thunderbolt-ledger-rpc = { path = "../thunderbolt-ledger-rpc" }
 thunderbolt-protocol = { path = "../thunderbolt-protocol" }
 
 [dev-dependencies]

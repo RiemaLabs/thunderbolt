@@ -21,6 +21,8 @@ pub enum NodeError {
     RefreshBindingMismatch,
     #[error("committee private runtime failed: {0}")]
     Runtime(String),
+    #[error("protocol-v2 Committee share updates are unavailable until the reviewed v2 engine migration lands")]
+    V2RuntimeUnavailable,
     #[error("committee proposal signing is unavailable")]
     SigningUnavailable,
     #[error("consensus finality integration is unavailable")]
@@ -33,8 +35,8 @@ pub enum NodeError {
     NumericRange,
     #[error("stored committee node state is corrupt")]
     CorruptState,
-    #[error("schema-v1 database has pending records requiring offline verified migration")]
-    LegacyPendingRecords,
+    #[error("legacy compact-evidence records require offline verified migration")]
+    LegacyEvidenceRecords,
     #[error("injected crash after private commit")]
     InjectedCrash,
 }

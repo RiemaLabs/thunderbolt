@@ -8,6 +8,10 @@ use crate::{Result, RollbackFloorCasRequestV2, RpcCodecError};
 
 /// Maximum number of executed metadata records returned in one history page.
 pub const MAX_HISTORY_PAGE_ENTRIES: u16 = 64;
+/// Maximum whole executed blocks in one globally contiguous range page.
+pub const MAX_EXECUTION_RANGE_BLOCKS: u16 = 64;
+/// Maximum canonical JSON bytes occupied by the block array in one range page.
+pub const MAX_EXECUTION_RANGE_ENCODED_BYTES: u32 = 23 * 1024 * 1024;
 
 /// Request to admit one exact actor-signed proposal into the Ledger mempool.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -146,6 +150,186 @@ impl RequestStatusRequestV2 {
     /// Returns the original channel- and actor-scoped request digest.
     pub const fn request_digest(&self) -> &RequestDigestV2 {
         &self.request_digest
+    }
+}
+
+/// Exact continuation cursor between whole globally ordered executed blocks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionRangeCursorV2 {
+    ledger_chain_id: LedgerChainIdV2,
+    next_height: u64,
+    expected_previous_app_hash: AppHashV2,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionRangeCursorInput {
+    ledger_chain_id: LedgerChainIdV2,
+    next_height: u64,
+    expected_previous_app_hash: AppHashV2,
+}
+
+impl ExecutionRangeCursorInput {
+    fn into_cursor(self) -> Result<ExecutionRangeCursorV2> {
+        ExecutionRangeCursorV2::new(self.ledger_chain_id, self.next_height, self.expected_previous_app_hash)
+    }
+}
+
+impl ExecutionRangeCursorV2 {
+    /// Constructs a chain-bound cursor. Height one alone uses the zero predecessor hash.
+    pub fn new(
+        ledger_chain_id: LedgerChainIdV2,
+        next_height: u64,
+        expected_previous_app_hash: AppHashV2,
+    ) -> Result<Self> {
+        if next_height == 0
+            || next_height > i64::MAX as u64
+            || (next_height == 1) != expected_previous_app_hash.is_zero()
+        {
+            return Err(RpcCodecError::InvalidField("execution range cursor is invalid"));
+        }
+        Ok(Self {
+            ledger_chain_id,
+            next_height,
+            expected_previous_app_hash,
+        })
+    }
+
+    /// Returns the exact Ledger chain.
+    pub const fn ledger_chain_id(&self) -> &LedgerChainIdV2 {
+        &self.ledger_chain_id
+    }
+
+    /// Returns the next whole execution height.
+    pub const fn next_height(&self) -> u64 {
+        self.next_height
+    }
+
+    /// Returns the exact application hash immediately before `next_height`.
+    pub const fn expected_previous_app_hash(&self) -> &AppHashV2 {
+        &self.expected_previous_app_hash
+    }
+}
+
+/// Bounded request for whole globally contiguous executed blocks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionRangeRequestV2 {
+    cursor: ExecutionRangeCursorV2,
+    block_count: u16,
+    max_encoded_bytes: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionRangeRequestInput {
+    cursor: ExecutionRangeCursorInput,
+    block_count: u16,
+    max_encoded_bytes: u32,
+}
+
+impl ExecutionRangeRequestV2 {
+    /// Constructs a positive count- and byte-bounded range request.
+    pub fn new(cursor: ExecutionRangeCursorV2, block_count: u16, max_encoded_bytes: u32) -> Result<Self> {
+        let through_height = cursor
+            .next_height()
+            .checked_add(u64::from(block_count).saturating_sub(1));
+        if block_count == 0
+            || block_count > MAX_EXECUTION_RANGE_BLOCKS
+            || !(2..=MAX_EXECUTION_RANGE_ENCODED_BYTES).contains(&max_encoded_bytes)
+            || through_height.is_none_or(|height| height >= i64::MAX as u64)
+        {
+            return Err(RpcCodecError::InvalidField("execution range bound is invalid"));
+        }
+        Ok(Self {
+            cursor,
+            block_count,
+            max_encoded_bytes,
+        })
+    }
+
+    /// Returns the exact start cursor.
+    pub const fn cursor(&self) -> &ExecutionRangeCursorV2 {
+        &self.cursor
+    }
+
+    /// Returns the exact whole-block count.
+    pub const fn block_count(&self) -> u16 {
+        self.block_count
+    }
+
+    /// Returns the maximum canonical block-array byte count.
+    pub const fn max_encoded_bytes(&self) -> u32 {
+        self.max_encoded_bytes
+    }
+}
+
+/// Exact channel-and-entry key for immutable first-location lookup.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EntryLocationRequestV2 {
+    ledger_chain_id: LedgerChainIdV2,
+    channel_context_id: ChannelContextIdV2,
+    entry_hash: thunderbolt_ledger::EntryHashV2,
+    through_height: u64,
+    expected_through_app_hash: AppHashV2,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EntryLocationRequestInput {
+    ledger_chain_id: LedgerChainIdV2,
+    channel_context_id: ChannelContextIdV2,
+    entry_hash: thunderbolt_ledger::EntryHashV2,
+    through_height: u64,
+    expected_through_app_hash: AppHashV2,
+}
+
+impl EntryLocationRequestV2 {
+    /// Constructs a complete immutable entry locator key.
+    pub fn new(
+        ledger_chain_id: LedgerChainIdV2,
+        channel_context_id: ChannelContextIdV2,
+        entry_hash: thunderbolt_ledger::EntryHashV2,
+        through_height: u64,
+        expected_through_app_hash: AppHashV2,
+    ) -> Result<Self> {
+        if through_height == 0 || through_height > i64::MAX as u64 || expected_through_app_hash.is_zero() {
+            return Err(RpcCodecError::InvalidField("entry location checkpoint is invalid"));
+        }
+        Ok(Self {
+            ledger_chain_id,
+            channel_context_id,
+            entry_hash,
+            through_height,
+            expected_through_app_hash,
+        })
+    }
+
+    /// Returns the exact Ledger chain.
+    pub const fn ledger_chain_id(&self) -> &LedgerChainIdV2 {
+        &self.ledger_chain_id
+    }
+
+    /// Returns the stable channel context.
+    pub const fn channel_context_id(&self) -> &ChannelContextIdV2 {
+        &self.channel_context_id
+    }
+
+    /// Returns the exact deterministic entry hash.
+    pub const fn entry_hash(&self) -> &thunderbolt_ledger::EntryHashV2 {
+        &self.entry_hash
+    }
+
+    /// Returns the inclusive durable height at which the lookup is meaningful.
+    pub const fn through_height(&self) -> u64 {
+        self.through_height
+    }
+
+    /// Returns the exact durable app hash at `through_height`.
+    pub const fn expected_through_app_hash(&self) -> &AppHashV2 {
+        &self.expected_through_app_hash
     }
 }
 
@@ -331,6 +515,27 @@ pub(crate) fn decode_history_cursor_value(value: serde_json::Value) -> Result<Hi
     input.into_cursor()
 }
 
+pub(crate) fn decode_execution_range_request_value(value: serde_json::Value) -> Result<ExecutionRangeRequestV2> {
+    let input: ExecutionRangeRequestInput = serde_json::from_value(value).map_err(RpcCodecError::InvalidEnvelope)?;
+    ExecutionRangeRequestV2::new(input.cursor.into_cursor()?, input.block_count, input.max_encoded_bytes)
+}
+
+pub(crate) fn decode_execution_range_cursor_value(value: serde_json::Value) -> Result<ExecutionRangeCursorV2> {
+    let input: ExecutionRangeCursorInput = serde_json::from_value(value).map_err(RpcCodecError::InvalidEnvelope)?;
+    input.into_cursor()
+}
+
+pub(crate) fn decode_entry_location_request_value(value: serde_json::Value) -> Result<EntryLocationRequestV2> {
+    let input: EntryLocationRequestInput = serde_json::from_value(value).map_err(RpcCodecError::InvalidEnvelope)?;
+    EntryLocationRequestV2::new(
+        input.ledger_chain_id,
+        input.channel_context_id,
+        input.entry_hash,
+        input.through_height,
+        input.expected_through_app_hash,
+    )
+}
+
 /// One method in the version-two transport-neutral Ledger control plane.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
@@ -343,6 +548,10 @@ pub enum RpcRequestV2 {
     RequestStatus(RequestStatusRequestV2),
     /// Page through deterministic executed metadata.
     History(HistoryRequestV2),
+    /// Read whole globally contiguous executed blocks.
+    ExecutionRange(ExecutionRangeRequestV2),
+    /// Locate the immutable first occurrence of one exact channel entry.
+    EntryLocation(EntryLocationRequestV2),
     /// Submit one exact rollback-floor checkpoint CAS.
     RollbackFloorCas(RollbackFloorCasRequestV2),
 }
@@ -351,7 +560,11 @@ impl RpcRequestV2 {
     pub(crate) fn validate(&self) -> Result<()> {
         match self {
             Self::SubmitProposal(request) => request.validate(),
-            Self::ChannelStatus(_) | Self::RequestStatus(_) | Self::History(_) => Ok(()),
+            Self::ChannelStatus(_)
+            | Self::RequestStatus(_)
+            | Self::History(_)
+            | Self::ExecutionRange(_)
+            | Self::EntryLocation(_) => Ok(()),
             Self::RollbackFloorCas(request) => request.validate(),
         }
     }

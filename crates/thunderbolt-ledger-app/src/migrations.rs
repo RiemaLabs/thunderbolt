@@ -9,7 +9,7 @@ use crate::{ApplicationError, Result};
 
 pub(crate) const APPLICATION_ID: i64 = 0x5442_4c41; // "TBLA"
 /// Latest schema version understood by this crate.
-pub const CURRENT_SCHEMA_VERSION: i64 = 2;
+pub const CURRENT_SCHEMA_VERSION: i64 = 3;
 
 const MIGRATION_1: &str = r#"
 CREATE TABLE schema_migrations (
@@ -111,6 +111,11 @@ ADD COLUMN consensus_profile_digest BLOB
 CHECK (consensus_profile_digest IS NULL OR length(consensus_profile_digest) = 32);
 "#;
 
+const MIGRATION_3: &str = r#"
+CREATE INDEX executed_entries_channel_entry_first_idx
+ON executed_entries(channel_context_id, entry_hash, height, block_index);
+"#;
+
 pub(crate) fn migrate(
     connection: &mut Connection,
     path: &Path,
@@ -200,6 +205,18 @@ fn migrate_locked(
             params!["bind consensus profile", migration_checksum(MIGRATION_2).as_slice()],
         )?;
         connection.pragma_update(None, "user_version", 2_i64)?;
+        version = 2;
+    }
+    if version < 3 {
+        connection.execute_batch(MIGRATION_3)?;
+        connection.execute(
+            "INSERT INTO schema_migrations(version, name, checksum) VALUES (3, ?1, ?2)",
+            params![
+                "index first channel entry locations",
+                migration_checksum(MIGRATION_3).as_slice()
+            ],
+        )?;
+        connection.pragma_update(None, "user_version", 3_i64)?;
     }
     if let Some(digest) = consensus_profile_digest {
         connection.execute(
@@ -237,6 +254,7 @@ fn verify_migration(connection: &Connection) -> Result<()> {
     for (version, name, sql) in [
         (1_i64, "initial v2 Ledger application", MIGRATION_1),
         (2_i64, "bind consensus profile", MIGRATION_2),
+        (3_i64, "index first channel entry locations", MIGRATION_3),
     ] {
         let checksum: Option<Vec<u8>> = connection
             .query_row(

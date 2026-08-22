@@ -30,7 +30,7 @@ use crate::{Result, RpcTransportError};
 
 const RESPONSE_TRANSCRIPT_DOMAIN: &[u8] = b"bitcoin-thunderbolt/cometbft-rpc/response/v1";
 const USER_AGENT_VALUE: &str = "bitcoin-thunderbolt-cometbft-rpc/1.0";
-const MAX_RPC_REQUEST_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_RPC_REQUEST_BYTES: usize = 6 * 1024 * 1024;
 
 trait TokioStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T> TokioStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -259,9 +259,11 @@ async fn fetch_validators(
     Ok(ValidatorSet::without_proposer(validators))
 }
 
-struct RpcContext {
+pub(crate) struct RpcContext {
     deadline: Instant,
     limits: RpcLimits,
+    response_bytes: usize,
+    aggregate_limit: usize,
     retry: RetryPolicy,
     aggregate_bytes: usize,
     request_id: u64,
@@ -270,12 +272,14 @@ struct RpcContext {
 }
 
 impl RpcContext {
-    fn new(deadline: Instant, limits: RpcLimits, retry: RetryPolicy) -> Self {
+    pub(crate) fn new(deadline: Instant, limits: RpcLimits, retry: RetryPolicy) -> Self {
         let mut transcript = Sha256::new();
         transcript.update(RESPONSE_TRANSCRIPT_DOMAIN);
         Self {
             deadline,
             limits,
+            response_bytes: limits.response_bytes(),
+            aggregate_limit: limits.aggregate_bytes(),
             retry,
             aggregate_bytes: 0,
             request_id: 1,
@@ -284,27 +288,72 @@ impl RpcContext {
         }
     }
 
-    async fn call<T: DeserializeOwned>(
+    pub(crate) fn with_body_limits(
+        deadline: Instant,
+        limits: RpcLimits,
+        retry: RetryPolicy,
+        response_bytes: usize,
+        aggregate_limit: usize,
+    ) -> Result<Self> {
+        if response_bytes == 0 || aggregate_limit < response_bytes {
+            return Err(RpcTransportError::InvalidConfiguration(
+                "RPC body limits are inconsistent",
+            ));
+        }
+        let mut context = Self::new(deadline, limits, retry);
+        context.response_bytes = response_bytes;
+        context.aggregate_limit = aggregate_limit;
+        Ok(context)
+    }
+
+    pub(crate) async fn call<T: DeserializeOwned>(
         &mut self,
         peer: &RuntimePeer,
         method: &str,
         params: serde_json::Value,
     ) -> Result<T> {
-        let id = self.request_id;
-        self.request_id = self.request_id.checked_add(1).ok_or(RpcTransportError::TraceBound)?;
-        let request_body = serde_json::to_vec(&json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params
-        }))
-        .map_err(|_| RpcTransportError::Json)?;
-        if request_body.is_empty() || request_body.len() > MAX_RPC_REQUEST_BYTES {
-            return Err(RpcTransportError::TraceBound);
+        self.call_evidenced(peer, method, params).await.map(|call| call.value)
+    }
+
+    pub(crate) async fn call_with_limit<T: DeserializeOwned>(
+        &mut self,
+        peer: &RuntimePeer,
+        method: &str,
+        params: serde_json::Value,
+        response_limit: usize,
+    ) -> Result<T> {
+        self.call_evidenced_with_limit(peer, method, params, response_limit)
+            .await
+            .map(|call| call.value)
+    }
+
+    pub(crate) async fn call_evidenced<T: DeserializeOwned>(
+        &mut self,
+        peer: &RuntimePeer,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<RpcCall<T>> {
+        self.call_evidenced_with_limit(peer, method, params, self.response_bytes)
+            .await
+    }
+
+    pub(crate) async fn call_evidenced_with_limit<T: DeserializeOwned>(
+        &mut self,
+        peer: &RuntimePeer,
+        method: &str,
+        params: serde_json::Value,
+        response_limit: usize,
+    ) -> Result<RpcCall<T>> {
+        let response_limit = response_limit.min(self.response_bytes);
+        if response_limit == 0 {
+            return Err(RpcTransportError::InvalidConfiguration(
+                "read response limit is outside the configured RPC bound",
+            ));
         }
+        let (id, request_body) = self.prepare_request(method, params)?;
         let attempts = self.retry.attempts().get();
         for attempt in 0..attempts {
-            match request_once(peer, method, id, &request_body, self).await {
+            match request_once(peer, method, id, &request_body, response_limit, self).await {
                 Ok(response) => return Ok(response),
                 Err(failure) if failure.retryable && attempt + 1 < attempts => {
                     self.session = None;
@@ -325,12 +374,53 @@ impl RpcContext {
         Err(RpcTransportError::RetryExhausted)
     }
 
+    pub(crate) async fn call_write_once<T: DeserializeOwned>(
+        &mut self,
+        peer: &RuntimePeer,
+        method: &'static str,
+        params: serde_json::Value,
+        tx_hash: [u8; 32],
+        response_limit: usize,
+    ) -> Result<RpcCall<T>> {
+        if response_limit == 0 || response_limit > self.response_bytes {
+            return Err(RpcTransportError::InvalidConfiguration(
+                "write response limit is outside the configured RPC bound",
+            ));
+        }
+        let (id, request_body) = self.prepare_request(method, params)?;
+        if self.session.is_none() {
+            return Err(RpcTransportError::Connect);
+        }
+        if self.deadline <= Instant::now() {
+            return Err(RpcTransportError::Deadline);
+        }
+        request_once(peer, method, id, &request_body, response_limit, self)
+            .await
+            .map_err(|_| RpcTransportError::AmbiguousWrite { tx_hash })
+    }
+
+    fn prepare_request(&mut self, method: &str, params: serde_json::Value) -> Result<(u64, Vec<u8>)> {
+        let id = self.request_id;
+        self.request_id = self.request_id.checked_add(1).ok_or(RpcTransportError::TraceBound)?;
+        let request_body = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params
+        }))
+        .map_err(|_| RpcTransportError::Json)?;
+        if request_body.is_empty() || request_body.len() > MAX_RPC_REQUEST_BYTES {
+            return Err(RpcTransportError::TraceBound);
+        }
+        Ok((id, request_body))
+    }
+
     fn account(&mut self, length: usize) -> Result<()> {
         self.aggregate_bytes = self
             .aggregate_bytes
             .checked_add(length)
             .ok_or(RpcTransportError::AggregateTooLarge)?;
-        if self.aggregate_bytes > self.limits.aggregate_bytes() {
+        if self.aggregate_bytes > self.aggregate_limit {
             return Err(RpcTransportError::AggregateTooLarge);
         }
         Ok(())
@@ -355,9 +445,16 @@ impl RpcContext {
         Ok(())
     }
 
-    fn transcript_digest(self) -> [u8; 32] {
+    pub(crate) fn transcript_digest(self) -> [u8; 32] {
         self.transcript.finalize().into()
     }
+}
+
+pub(crate) struct RpcCall<T> {
+    pub value: T,
+    pub request_digest: [u8; 32],
+    pub response_digest: [u8; 32],
+    pub security_binding: [u8; 32],
 }
 
 struct AttemptFailure {
@@ -431,8 +528,9 @@ async fn request_once<T: DeserializeOwned>(
     method: &str,
     id: u64,
     request_body: &[u8],
+    response_limit: usize,
     context: &mut RpcContext,
-) -> std::result::Result<T, AttemptFailure> {
+) -> std::result::Result<RpcCall<T>, AttemptFailure> {
     if context.session.is_none() {
         context.session = Some(
             open_session(peer, context.deadline, context.limits)
@@ -476,7 +574,7 @@ async fn request_once<T: DeserializeOwned>(
         .get(CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<usize>().ok())
-        .is_some_and(|length| length > context.limits.response_bytes())
+        .is_some_and(|length| length > response_limit)
     {
         return Err(AttemptFailure::permanent(RpcTransportError::ResponseTooLarge));
     }
@@ -492,7 +590,7 @@ async fn request_once<T: DeserializeOwned>(
                 .len()
                 .checked_add(data.len())
                 .ok_or_else(|| AttemptFailure::permanent(RpcTransportError::ResponseTooLarge))?;
-            if next > context.limits.response_bytes() {
+            if next > response_limit {
                 return Err(AttemptFailure::permanent(RpcTransportError::ResponseTooLarge));
             }
             body.extend_from_slice(data);
@@ -515,9 +613,15 @@ async fn request_once<T: DeserializeOwned>(
     {
         return Err(AttemptFailure::permanent(RpcTransportError::Json));
     }
-    envelope
+    let value = envelope
         .result
-        .ok_or_else(|| AttemptFailure::permanent(RpcTransportError::Json))
+        .ok_or_else(|| AttemptFailure::permanent(RpcTransportError::Json))?;
+    Ok(RpcCall {
+        value,
+        request_digest: Sha256::digest(request_body).into(),
+        response_digest: Sha256::digest(&body).into(),
+        security_binding,
+    })
 }
 
 async fn open_session(peer: &RuntimePeer, deadline: Instant, limits: RpcLimits) -> Result<RpcSession> {
@@ -601,7 +705,7 @@ fn valid_content_type(value: Option<&http::HeaderValue>) -> bool {
         })
 }
 
-async fn timeout_at<F: std::future::Future>(deadline: Instant, future: F) -> Result<F::Output> {
+pub(crate) async fn timeout_at<F: std::future::Future>(deadline: Instant, future: F) -> Result<F::Output> {
     let remaining = deadline
         .checked_duration_since(Instant::now())
         .filter(|duration| !duration.is_zero())
@@ -620,20 +724,20 @@ struct JsonRpcEnvelope<T> {
 }
 
 #[derive(Deserialize)]
-struct StatusResult {
-    node_info: StatusNodeInfo,
-    sync_info: StatusSyncInfo,
+pub(crate) struct StatusResult {
+    pub node_info: StatusNodeInfo,
+    pub sync_info: StatusSyncInfo,
 }
 
 #[derive(Deserialize)]
-struct StatusNodeInfo {
-    id: NodeId,
-    network: chain::Id,
+pub(crate) struct StatusNodeInfo {
+    pub id: NodeId,
+    pub network: chain::Id,
 }
 
 #[derive(Deserialize)]
-struct StatusSyncInfo {
-    latest_block_height: Height,
+pub(crate) struct StatusSyncInfo {
+    pub latest_block_height: Height,
 }
 
 #[derive(Deserialize)]

@@ -45,6 +45,21 @@ pub enum RpcTransportError {
     /// JSON or JSON-RPC framing was malformed, conflicting, or truncated.
     #[error("invalid CometBFT JSON-RPC response")]
     Json,
+    /// A post-send transaction outcome could not be determined safely.
+    #[error("CometBFT transaction write outcome is ambiguous")]
+    AmbiguousWrite {
+        /// Deterministic SHA-256 transaction hash used for reconciliation.
+        tx_hash: [u8; 32],
+    },
+    /// The ABCI application rejected an exact read-only query.
+    #[error("Thunderbolt ABCI query rejected with code {code}")]
+    AbciQueryRejected {
+        /// Stable application response code; provider log strings are discarded.
+        code: u32,
+    },
+    /// ABCI response bytes did not match the fixed requested query contract.
+    #[error("Thunderbolt ABCI query response differs from the exact request")]
+    ApplicationResponse,
     /// Status returned another authenticated node identity.
     #[error("CometBFT status node id differs")]
     NodeIdentity,

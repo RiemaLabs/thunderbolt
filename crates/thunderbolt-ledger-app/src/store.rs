@@ -22,6 +22,10 @@ const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_BUSY_TIMEOUT: Duration = Duration::from_secs(60);
 const DISPOSITION_APPLIED: i64 = 1;
 const DISPOSITION_REPLAYED: i64 = 2;
+/// Maximum whole executed blocks returned in one contiguous range read.
+pub const MAX_BLOCK_RANGE_BLOCKS: u16 = 64;
+/// Maximum canonical JSON bytes occupied by the block array in one range read.
+pub const MAX_BLOCK_RANGE_ENCODED_BYTES: usize = 23 * 1024 * 1024;
 
 /// Marker for deterministic proof verification used by the v2 application.
 ///
@@ -170,6 +174,149 @@ impl ApplicationStatusV2 {
     /// `last_height + 1`.
     pub const fn last_app_hash(&self) -> &AppHashV2 {
         &self.last_app_hash
+    }
+}
+
+/// Exact bounded cursor and resource limits for one contiguous block-range read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockRangeRequestV2 {
+    start_height: u64,
+    expected_previous_app_hash: AppHashV2,
+    block_count: u16,
+    max_encoded_bytes: usize,
+}
+
+impl BlockRangeRequestV2 {
+    /// Constructs an exact whole-block range request.
+    pub fn new(
+        start_height: u64,
+        expected_previous_app_hash: AppHashV2,
+        block_count: u16,
+        max_encoded_bytes: usize,
+    ) -> Result<Self> {
+        let through_height = start_height.checked_add(u64::from(block_count).saturating_sub(1));
+        if start_height == 0
+            || start_height > i64::MAX as u64
+            || block_count == 0
+            || block_count > MAX_BLOCK_RANGE_BLOCKS
+            || !(2..=MAX_BLOCK_RANGE_ENCODED_BYTES).contains(&max_encoded_bytes)
+            || (start_height == 1) != expected_previous_app_hash.is_zero()
+            || through_height.is_none_or(|height| height >= i64::MAX as u64)
+        {
+            return Err(ApplicationError::InvalidRange("cursor or resource bound"));
+        }
+        Ok(Self {
+            start_height,
+            expected_previous_app_hash,
+            block_count,
+            max_encoded_bytes,
+        })
+    }
+
+    /// Returns the first required execution height.
+    pub const fn start_height(&self) -> u64 {
+        self.start_height
+    }
+
+    /// Returns the exact application hash immediately before `start_height`.
+    pub const fn expected_previous_app_hash(&self) -> &AppHashV2 {
+        &self.expected_previous_app_hash
+    }
+
+    /// Returns the exact whole-block count.
+    pub const fn block_count(&self) -> u16 {
+        self.block_count
+    }
+
+    /// Returns the aggregate canonical block-array byte cap.
+    pub const fn max_encoded_bytes(&self) -> usize {
+        self.max_encoded_bytes
+    }
+}
+
+/// One exact immutable execution position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EntryLocationV2 {
+    height: u64,
+    block_index: u32,
+}
+
+/// One first-location lookup and exact execution checkpoint observed atomically.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntryLocationReadV2 {
+    location: Option<EntryLocationV2>,
+    through_height: u64,
+    through_app_hash: AppHashV2,
+}
+
+impl EntryLocationReadV2 {
+    /// Returns the immutable first location, or `None` through the bound checkpoint.
+    pub const fn location(&self) -> Option<EntryLocationV2> {
+        self.location
+    }
+
+    /// Returns the inclusive durable height paired with the lookup.
+    pub const fn through_height(&self) -> u64 {
+        self.through_height
+    }
+
+    /// Returns the exact application hash at `through_height`.
+    pub const fn through_app_hash(&self) -> &AppHashV2 {
+        &self.through_app_hash
+    }
+}
+
+impl EntryLocationV2 {
+    /// Constructs a positive bounded execution location.
+    pub fn new(height: u64, block_index: u32) -> Result<Self> {
+        if height == 0
+            || height > i64::MAX as u64
+            || usize::try_from(block_index).map_or(true, |index| index >= MAX_BLOCK_ENTRIES)
+        {
+            return Err(ApplicationError::InvalidRange("entry location"));
+        }
+        Ok(Self { height, block_index })
+    }
+
+    /// Returns the positive execution height.
+    pub const fn height(self) -> u64 {
+        self.height
+    }
+
+    /// Returns the zero-based block position.
+    pub const fn block_index(self) -> u32 {
+        self.block_index
+    }
+}
+
+/// Atomic read of one exact globally contiguous whole-block page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockRangeReadV2 {
+    blocks: Vec<ExecutedBlockV2>,
+    next_height: u64,
+    next_previous_app_hash: AppHashV2,
+    encoded_block_bytes: usize,
+}
+
+impl BlockRangeReadV2 {
+    /// Returns whole blocks in strict global execution order, including empty blocks.
+    pub fn blocks(&self) -> &[ExecutedBlockV2] {
+        &self.blocks
+    }
+
+    /// Returns the next whole-block height after the exact range.
+    pub const fn next_height(&self) -> u64 {
+        self.next_height
+    }
+
+    /// Returns the exact predecessor application hash for `next_height`.
+    pub const fn next_previous_app_hash(&self) -> &AppHashV2 {
+        &self.next_previous_app_hash
+    }
+
+    /// Returns canonical JSON bytes occupied by the block array.
+    pub const fn encoded_block_bytes(&self) -> usize {
+        self.encoded_block_bytes
     }
 }
 
@@ -522,6 +669,96 @@ impl LedgerApplication {
         let height = to_sql_u64("block height", height)?;
         let connection = self.lock_connection()?;
         load_block(&connection, height)
+    }
+
+    /// Loads a byte- and count-bounded page of whole globally contiguous blocks.
+    ///
+    /// The durable head and range are read in one rollback-only transaction.
+    /// Empty executed blocks are retained as ordinary page elements; the page
+    /// never starts or ends in the middle of a block.
+    pub fn block_range(&self, request: &BlockRangeRequestV2) -> Result<BlockRangeReadV2> {
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let result = load_block_range(&transaction, &self.chain_id, request);
+        rollback_preview(transaction, result)
+    }
+
+    /// Returns the immutable first location through one exact execution checkpoint.
+    pub fn first_entry_location_through(
+        &self,
+        channel: &ChannelContextIdV2,
+        entry_hash: &EntryHashV2,
+        through_height: u64,
+        expected_through_app_hash: &AppHashV2,
+    ) -> Result<EntryLocationReadV2> {
+        let through_height_sql = to_sql_u64("entry location through height", through_height)?;
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let result = (|| {
+            let status = load_status(&transaction)?;
+            if through_height == 0 || through_height > status.last_height() {
+                return Err(ApplicationError::InvalidRange(
+                    "entry location checkpoint is outside durable execution",
+                ));
+            }
+            let through_block = load_block(&transaction, through_height_sql)?.ok_or_else(|| {
+                ApplicationError::CorruptData("entry location checkpoint block is missing".to_owned())
+            })?;
+            through_block.validate_chain_id(&self.chain_id)?;
+            if through_block.height() != through_height || through_block.app_hash() != expected_through_app_hash {
+                return Err(ApplicationError::AppHashMismatch);
+            }
+            let row = transaction
+                .query_row(
+                    "SELECT height, block_index
+                     FROM executed_entries
+                     WHERE channel_context_id = ?1 AND entry_hash = ?2 AND height <= ?3
+                     ORDER BY height, block_index
+                     LIMIT 1",
+                    params![
+                        channel.as_bytes().as_slice(),
+                        entry_hash.as_bytes().as_slice(),
+                        through_height_sql,
+                    ],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .optional()?;
+            let location = row
+                .map(|(height, index)| {
+                    let location = EntryLocationV2::new(
+                        from_sql_u64("entry location height", height)?,
+                        from_sql_u32("entry location index", index)?,
+                    )?;
+                    let block = load_block(&transaction, height)?
+                        .ok_or_else(|| ApplicationError::CorruptData("entry location block is missing".to_owned()))?;
+                    block.validate_chain_id(&self.chain_id)?;
+                    if block.height() != location.height() {
+                        return Err(ApplicationError::CorruptData(
+                            "entry location block height differs from index".to_owned(),
+                        ));
+                    }
+                    let entry = block
+                        .entries()
+                        .get(
+                            usize::try_from(location.block_index)
+                                .map_err(|_| ApplicationError::IntegerRange("entry location"))?,
+                        )
+                        .ok_or_else(|| ApplicationError::CorruptData("entry location index is missing".to_owned()))?;
+                    if entry.metadata().channel_context_id() != channel || entry.metadata().entry_hash() != entry_hash {
+                        return Err(ApplicationError::CorruptData(
+                            "entry location index differs from executed entry".to_owned(),
+                        ));
+                    }
+                    Ok(location)
+                })
+                .transpose()?;
+            Ok(EntryLocationReadV2 {
+                location,
+                through_height,
+                through_app_hash: through_block.app_hash().clone(),
+            })
+        })();
+        rollback_preview(transaction, result)
     }
 
     /// Loads one materialized channel snapshot by stable binding.
@@ -916,6 +1153,149 @@ fn load_block(connection: &Connection, height: i64) -> Result<Option<ExecutedBlo
         )
         .optional()?;
     bytes.map(|value| decode_json(&value, "executed block")).transpose()
+}
+
+fn load_block_range(
+    connection: &Connection,
+    chain_id: &LedgerChainIdV2,
+    request: &BlockRangeRequestV2,
+) -> Result<BlockRangeReadV2> {
+    let status = load_status(connection)?;
+    let through_height = request
+        .start_height()
+        .checked_add(u64::from(request.block_count()).saturating_sub(1))
+        .ok_or(ApplicationError::InvalidRange("range end height overflows"))?;
+    if through_height > status.last_height() {
+        return Err(ApplicationError::InvalidRange(
+            "exact range extends beyond the durable tip",
+        ));
+    }
+    let mut previous_block = if request.start_height() == 1 {
+        None
+    } else {
+        let previous_height = request.start_height().saturating_sub(1);
+        let previous_height_sql = to_sql_u64("range predecessor height", previous_height)?;
+        let previous_length: i64 = connection
+            .query_row(
+                "SELECT length(executed_block_json) FROM blocks WHERE height = ?1",
+                [previous_height_sql],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| ApplicationError::CorruptData("range predecessor block is missing".to_owned()))?;
+        if usize::try_from(previous_length).map_or(true, |length| length > MAX_BLOCK_RANGE_ENCODED_BYTES) {
+            return Err(ApplicationError::CorruptData(
+                "range predecessor block exceeds the decode bound".to_owned(),
+            ));
+        }
+        let previous = load_block(connection, previous_height_sql)?
+            .ok_or_else(|| ApplicationError::CorruptData("range predecessor block is missing".to_owned()))?;
+        previous.validate_chain_id(chain_id)?;
+        if previous.height() != previous_height || previous.app_hash() != request.expected_previous_app_hash() {
+            return Err(ApplicationError::InvalidRange(
+                "cursor predecessor differs from durable execution",
+            ));
+        }
+        Some(previous)
+    };
+    let count_limit = i64::from(request.block_count());
+    let mut lengths = connection.prepare(
+        "SELECT height, length(executed_block_json)
+         FROM blocks
+         WHERE height >= ?1 AND height <= ?2
+         ORDER BY height
+         LIMIT ?3",
+    )?;
+    let length_rows = lengths
+        .query_map(
+            params![
+                to_sql_u64("range start", request.start_height())?,
+                to_sql_u64("range end", through_height)?,
+                count_limit,
+            ],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if length_rows.len() != usize::from(request.block_count()) {
+        return Err(ApplicationError::CorruptData(
+            "exact durable block range contains a height gap".to_owned(),
+        ));
+    }
+    let mut expected_height = request.start_height();
+    let mut encoded_block_bytes = 2_usize;
+    for (position, (height, length)) in length_rows.iter().enumerate() {
+        if from_sql_u64("range block height", *height)? != expected_height {
+            return Err(ApplicationError::CorruptData(
+                "exact durable block range is not contiguous".to_owned(),
+            ));
+        }
+        let length = usize::try_from(*length)
+            .map_err(|_| ApplicationError::CorruptData("range block length is invalid".to_owned()))?;
+        encoded_block_bytes = encoded_block_bytes
+            .checked_add(usize::from(position != 0))
+            .and_then(|total| total.checked_add(length))
+            .ok_or(ApplicationError::InvalidRange("range byte count overflows"))?;
+        if encoded_block_bytes > request.max_encoded_bytes() {
+            return Err(ApplicationError::RangeByteLimitTooSmall);
+        }
+        expected_height = expected_height
+            .checked_add(1)
+            .ok_or(ApplicationError::InvalidRange("range height overflows"))?;
+    }
+
+    let mut blocks = Vec::with_capacity(usize::from(request.block_count()));
+    let mut expected_height = request.start_height();
+    for (_, stored_length) in length_rows {
+        let block = load_block(connection, to_sql_u64("range block height", expected_height)?)?
+            .ok_or_else(|| ApplicationError::CorruptData("exact range block is missing".to_owned()))?;
+        let canonical_length = serde_json::to_vec(&block)?.len();
+        if i64::try_from(canonical_length).map_err(|_| ApplicationError::IntegerRange("range block length"))?
+            != stored_length
+            || block.height() != expected_height
+        {
+            return Err(ApplicationError::CorruptData(
+                "executed block range is not canonical and contiguous".to_owned(),
+            ));
+        }
+        block.validate_chain_id(chain_id)?;
+        match previous_block.as_ref() {
+            Some(previous) => block.validate_successor(previous)?,
+            None => {
+                block.validate_previous_block_time(None)?;
+                if !block.previous_app_hash().is_zero() {
+                    return Err(ApplicationError::CorruptData(
+                        "first executed block has a nonzero predecessor".to_owned(),
+                    ));
+                }
+            }
+        }
+        expected_height = expected_height
+            .checked_add(1)
+            .ok_or(ApplicationError::InvalidRange("range height overflows"))?;
+        previous_block = Some(block.clone());
+        blocks.push(block);
+    }
+    if blocks.len() != usize::from(request.block_count()) {
+        return Err(ApplicationError::CorruptData(
+            "exact range block count differs".to_owned(),
+        ));
+    }
+    let next_previous_app_hash = previous_block
+        .as_ref()
+        .map(ExecutedBlockV2::app_hash)
+        .cloned()
+        .ok_or_else(|| ApplicationError::CorruptData("exact block range is empty".to_owned()))?;
+    if through_height == status.last_height() && &next_previous_app_hash != status.last_app_hash() {
+        return Err(ApplicationError::CorruptData(
+            "exact block range tip differs from durable application state".to_owned(),
+        ));
+    }
+    Ok(BlockRangeReadV2 {
+        blocks,
+        next_height: expected_height,
+        next_previous_app_hash,
+        encoded_block_bytes,
+    })
 }
 
 fn load_channel(connection: &Connection, context: &[u8; 32]) -> Result<Option<LoadedChannel>> {

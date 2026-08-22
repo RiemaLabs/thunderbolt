@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Cursor;
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::Instant;
 
 use sha2::{Digest, Sha256};
@@ -11,8 +12,13 @@ use thunderbolt_cometbft_client::{
     AuthenticationContext, FetchedTrace, PeerIdentity, SourceRole, TraceFetchRequest, TraceFuture,
     TracePeerAuthenticator, TraceTransport,
 };
+use thunderbolt_ledger::{LedgerChainIdV2, SignedProposalV2};
 
 use crate::config::RpcTransportConfig;
+use crate::ledger::{
+    abci_query, broadcast_tx_sync, AuthenticatedAbciQueryV2, AuthenticatedBroadcastTxSyncV2, LedgerAbciQueryV2,
+    LedgerCallPolicy,
+};
 use crate::rpc::{fetch_trace, RpcFetchSpec, RuntimePeer};
 use crate::{Result, RpcTransportError};
 
@@ -20,10 +26,11 @@ const REQUEST_DOMAIN: &[u8] = b"bitcoin-thunderbolt/cometbft-rpc/fetch-request/v
 const TRACE_DOMAIN: &[u8] = b"bitcoin-thunderbolt/cometbft-rpc/trace/v1";
 const SESSION_DOMAIN: &[u8] = b"bitcoin-thunderbolt/cometbft-rpc/session-evidence/v1";
 
-/// Concrete authenticated streaming transport for CometBFT adjacent traces.
+/// Concrete authenticated transport for adjacent traces and fixed Ledger RPC.
 pub struct CometBftRpcTransport {
     peers: BTreeMap<[u8; 32], Arc<RuntimePeer>>,
     limits: crate::RpcLimits,
+    ledger_limits: crate::LedgerRpcLimits,
     retry: crate::RetryPolicy,
 }
 
@@ -43,8 +50,79 @@ impl CometBftRpcTransport {
         Ok(Self {
             peers,
             limits: config.limits(),
+            ledger_limits: config.ledger_limits(),
             retry: config.retry(),
         })
+    }
+
+    /// Submits one exact signed proposal with no write retry.
+    ///
+    /// A returned acceptance is CheckTx/mempool admission only. Any uncertainty
+    /// after the request is handed to the authenticated HTTP session returns
+    /// [`RpcTransportError::AmbiguousWrite`]. Dropping or cancelling this future
+    /// after transmission is likewise ambiguous; reconcile by the proposal's
+    /// stable Ledger request key before resubmitting.
+    pub async fn broadcast_tx_sync(
+        &self,
+        peer: &PeerIdentity,
+        ledger_chain_id: &LedgerChainIdV2,
+        proposal: &SignedProposalV2,
+        timeout: Duration,
+    ) -> Result<AuthenticatedBroadcastTxSyncV2> {
+        let runtime = self.runtime_peer(peer)?;
+        broadcast_tx_sync(
+            runtime,
+            peer,
+            ledger_chain_id,
+            proposal,
+            LedgerCallPolicy {
+                limits: self.limits,
+                ledger_limits: self.ledger_limits,
+                retry: self.retry,
+                timeout,
+            },
+        )
+        .await
+    }
+
+    /// Executes one bounded idempotent fixed-path Thunderbolt Ledger query.
+    ///
+    /// The result authenticates peer/session transport and exact application
+    /// bytes. It remains deterministic execution evidence, never finality.
+    pub async fn abci_query(
+        &self,
+        peer: &PeerIdentity,
+        ledger_chain_id: &LedgerChainIdV2,
+        query: &LedgerAbciQueryV2,
+        timeout: Duration,
+    ) -> Result<AuthenticatedAbciQueryV2> {
+        let runtime = self.runtime_peer(peer)?;
+        abci_query(
+            runtime,
+            peer,
+            ledger_chain_id,
+            query,
+            LedgerCallPolicy {
+                limits: self.limits,
+                ledger_limits: self.ledger_limits,
+                retry: self.retry,
+                timeout,
+            },
+        )
+        .await
+    }
+
+    fn runtime_peer(&self, peer: &PeerIdentity) -> Result<&RuntimePeer> {
+        let runtime = self
+            .peers
+            .get(peer.transport_binding())
+            .ok_or(RpcTransportError::UnknownPeer)?;
+        if runtime.peer.identity().node_id() != peer.node_id()
+            || runtime.peer.identity().transport_binding() != peer.transport_binding()
+        {
+            return Err(RpcTransportError::UnknownPeer);
+        }
+        Ok(runtime)
     }
 }
 
@@ -54,6 +132,7 @@ impl fmt::Debug for CometBftRpcTransport {
             .debug_struct("CometBftRpcTransport")
             .field("peer_count", &self.peers.len())
             .field("limits", &self.limits)
+            .field("ledger_limits", &self.ledger_limits)
             .field("retry", &self.retry)
             .finish()
     }

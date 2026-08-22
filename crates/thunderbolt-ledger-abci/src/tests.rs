@@ -26,6 +26,7 @@ use thunderbolt_ledger::{
     MAX_BLOCK_ENTRIES,
 };
 use thunderbolt_ledger_app::{ApplicationOptions, LedgerApplication};
+use thunderbolt_ledger_rpc::{RpcRequestV2, MAX_EXECUTION_RANGE_ENCODED_BYTES};
 use thunderbolt_protocol::v2::{
     ArtifactV2, ChannelEventV2, ExternalVerifierV2, FinalizeVerificationRequestV2, InvoiceEventV2,
     InvoiceVerificationRequestV2, OpenEventV2, OpenVerificationRequestV2, TransferVerificationRequestV2,
@@ -1392,6 +1393,151 @@ fn exact_maximum_event_fits_the_abci_transaction_boundary() -> Result<()> {
         app.check_tx(RequestCheckTx {
             tx: transaction,
             r#type: 0,
+        })
+        .code,
+        OK_CODE
+    );
+    Ok(())
+}
+
+#[test]
+fn exact_execution_range_and_first_location_queries_are_bounded_and_correlated() -> Result<()> {
+    let directory = TempDir::new().map_err(|_| AbciAdapterError::InvalidRequest("tempdir"))?;
+    let app = adapter(&directory)?;
+    let proposal = signed_open(92, 92);
+    let body = proposal.body().clone();
+    let first = app.finalize_block(finalize_request(vec![transaction(&proposal)], 1, 10_000));
+    let first_hash = AppHashV2::from_bytes(first.app_hash.as_ref())?;
+    let _ = app.commit();
+    let second = app.finalize_block(finalize_request(Vec::new(), 2, 10_001));
+    let second_hash = AppHashV2::from_bytes(second.app_hash.as_ref())?;
+    let _ = app.commit();
+    let third = app.finalize_block(finalize_request(vec![transaction(&proposal)], 3, 10_002));
+    let third_hash = AppHashV2::from_bytes(third.app_hash.as_ref())?;
+    let _ = app.commit();
+
+    let range_request = ExecutionRangeRequestV2::new(
+        ExecutionRangeCursorV2::new(chain_id(), 1, AppHashV2::zero())
+            .map_err(|_| AbciAdapterError::InvalidRequest("range cursor"))?,
+        3,
+        MAX_EXECUTION_RANGE_ENCODED_BYTES,
+    )
+    .map_err(|_| AbciAdapterError::InvalidRequest("range request"))?;
+    let mut range_key = Vec::with_capacity(46);
+    range_key.extend_from_slice(&1_u64.to_be_bytes());
+    range_key.extend_from_slice(AppHashV2::zero().as_bytes());
+    range_key.extend_from_slice(&3_u16.to_be_bytes());
+    range_key.extend_from_slice(&MAX_EXECUTION_RANGE_ENCODED_BYTES.to_be_bytes());
+    let range = app.query(RequestQuery {
+        data: range_key.clone().into(),
+        path: QUERY_EXECUTION_RANGE_PATH.to_owned(),
+        height: 3,
+        ..RequestQuery::default()
+    });
+    assert_eq!(range.code, OK_CODE);
+    assert_eq!(range.height, 3);
+    assert!(range.proof_ops.is_none());
+    let decoded = RpcResponseV2::from_canonical_bytes_for(&range.value, &RpcRequestV2::ExecutionRange(range_request))
+        .map_err(|_| AbciAdapterError::InvalidRequest("range response"))?;
+    let RpcResponseV2::ExecutionRange(range) = decoded.response() else {
+        return Err(AbciAdapterError::InvalidRequest("range response method"));
+    };
+    assert_eq!(
+        range
+            .blocks()
+            .iter()
+            .map(thunderbolt_ledger::ExecutedBlockV2::height)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert!(range.blocks()[1].entries().is_empty());
+    assert_eq!(range.next_cursor().next_height(), 4);
+    assert_eq!(range.next_cursor().expected_previous_app_hash(), &third_hash);
+
+    assert_ne!(
+        app.query(RequestQuery {
+            data: range_key.clone().into(),
+            path: QUERY_EXECUTION_RANGE_PATH.to_owned(),
+            height: 2,
+            ..RequestQuery::default()
+        })
+        .code,
+        OK_CODE
+    );
+    assert_ne!(
+        app.query(RequestQuery {
+            data: range_key.clone().into(),
+            path: QUERY_EXECUTION_RANGE_PATH.to_owned(),
+            height: 3,
+            prove: true,
+        })
+        .code,
+        OK_CODE
+    );
+    range_key[40..42].copy_from_slice(&0_u16.to_be_bytes());
+    assert_ne!(
+        app.query(RequestQuery {
+            data: range_key.into(),
+            path: QUERY_EXECUTION_RANGE_PATH.to_owned(),
+            height: 3,
+            ..RequestQuery::default()
+        })
+        .code,
+        OK_CODE
+    );
+
+    let channel = ChannelContextIdV2::from_bytes(
+        body.channel()
+            .context_id()
+            .map_err(|_| AbciAdapterError::InvalidRequest("channel context"))?,
+    )?;
+    let entry_hash = body.entry_hash()?;
+    let location_request =
+        EntryLocationRequestV2::new(chain_id(), channel.clone(), entry_hash.clone(), 2, second_hash.clone())
+            .map_err(|_| AbciAdapterError::InvalidRequest("location request"))?;
+    let mut location_key = Vec::with_capacity(104);
+    location_key.extend_from_slice(channel.as_bytes());
+    location_key.extend_from_slice(entry_hash.as_bytes());
+    location_key.extend_from_slice(&2_u64.to_be_bytes());
+    location_key.extend_from_slice(second_hash.as_bytes());
+    let location = app.query(RequestQuery {
+        data: location_key.clone().into(),
+        path: QUERY_ENTRY_LOCATION_PATH.to_owned(),
+        height: 2,
+        ..RequestQuery::default()
+    });
+    assert_eq!(location.code, OK_CODE);
+    let decoded =
+        RpcResponseV2::from_canonical_bytes_for(&location.value, &RpcRequestV2::EntryLocation(location_request))
+            .map_err(|_| AbciAdapterError::InvalidRequest("location response"))?;
+    let RpcResponseV2::EntryLocation(location) = decoded.response() else {
+        return Err(AbciAdapterError::InvalidRequest("location response method"));
+    };
+    assert_eq!(
+        location
+            .location()
+            .ok_or(AbciAdapterError::NotFound("location"))?
+            .height(),
+        1
+    );
+
+    location_key[72..104].copy_from_slice(first_hash.as_bytes());
+    assert_ne!(
+        app.query(RequestQuery {
+            data: location_key.clone().into(),
+            path: QUERY_ENTRY_LOCATION_PATH.to_owned(),
+            height: 2,
+            ..RequestQuery::default()
+        })
+        .code,
+        OK_CODE
+    );
+    assert_ne!(
+        app.query(RequestQuery {
+            data: location_key.into(),
+            path: QUERY_ENTRY_LOCATION_PATH.to_owned(),
+            height: 2,
+            prove: true,
         })
         .code,
         OK_CODE

@@ -9,12 +9,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
+use bitcoin::Network;
 use ed25519_consensus::SigningKey;
 use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose};
 use rustls::client::ResolvesClientCert;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::sign::CertifiedKey;
+use secp256k1::{Keypair, Secp256k1, SecretKey};
 use serde_json::json;
+use sha2::{Digest as _, Sha256};
 use tendermint::block::parts::Header as PartSetHeader;
 use tendermint::block::signed_header::SignedHeader;
 use tendermint::block::{self, Commit, CommitSig, Header, Round};
@@ -33,7 +38,16 @@ use thunderbolt_cometbft_client::{
     PeerIdentity, SourceConfiguration, TraceFetchRequest, TraceFuture, TraceTransport, TrustCheckpoint,
     TrustCheckpointCasOutcome, TrustCheckpointStore, TrustCoordinator, TrustCoordinatorIdentity,
 };
-use thunderbolt_ledger::{AppHashV2, ExecutedBlockV2, LedgerChainIdV2, PendingBlockV2};
+use thunderbolt_ledger::{
+    ActorKeyAlgorithmV2, ActorPublicKeyV2, ActorRoleV2, ActorSignatureV2, AppHashV2, CanonicalEventV2,
+    ClientRequestNonceV2, EntryHashV2, ExecutedBlockV2, LedgerChainIdV2, PendingBlockV2, ProposalBodyV2,
+    SignedProposalV2,
+};
+use thunderbolt_ledger_abci::{ABCI_CODESPACE, QUERY_BLOCK_PATH};
+use thunderbolt_wire::{
+    AnchorParameterSuiteIdV2, BitcoinGenesisHashV2, ChannelBindingV2, CommitteeDescriptorDigestV2, FundingOutpointV2,
+    ProtocolSuiteIdV2,
+};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
@@ -41,8 +55,8 @@ use tokio_rustls::TlsAcceptor;
 use crate::rpc::{fetch_trace, RpcFetchSpec, RuntimePeer};
 use crate::transport::TestEvidenceFault;
 use crate::{
-    ClientIdentityProvider, CometBftRpcTransport, HttpsPeer, LoopbackHttpPeer, RetryPolicy, RpcLimits, RpcPeer,
-    RpcPeerAuthenticator, RpcTransportConfig, RpcTransportError,
+    BroadcastAdmissionV2, ClientIdentityProvider, CometBftRpcTransport, HttpsPeer, LedgerAbciQueryV2, LedgerRpcLimits,
+    LoopbackHttpPeer, RetryPolicy, RpcLimits, RpcPeer, RpcPeerAuthenticator, RpcTransportConfig, RpcTransportError,
 };
 
 const CHAIN_ID: &str = "thunderbolt-rpc-regtest-2";
@@ -72,6 +86,19 @@ enum Behavior {
     ExcessivePower,
     Hang,
     TamperedCommit,
+    BroadcastReject,
+    WrongTxHash,
+    DropBroadcastRequest,
+    TruncateBroadcast,
+    HangBroadcast,
+    BroadcastStatus,
+    WrongOperationId,
+    RetryAbci,
+    WrongQueryHeight,
+    WrongQueryKey,
+    WrongQueryValue,
+    ChunkedOversizeQuery,
+    HangQuery,
 }
 
 struct RpcFixture {
@@ -112,13 +139,30 @@ impl MockTlsServer {
         fixture: Arc<RpcFixture>,
         config: Arc<rustls::ServerConfig>,
     ) -> std::result::Result<Self, Box<dyn Error>> {
-        Self::start_with_node(fixture, config, NODE_ID.to_owned()).await
+        Self::start_with_node_and_behavior(fixture, config, NODE_ID.to_owned(), Behavior::Good).await
+    }
+
+    async fn start_with_behavior(
+        fixture: Arc<RpcFixture>,
+        config: Arc<rustls::ServerConfig>,
+        behavior: Behavior,
+    ) -> std::result::Result<Self, Box<dyn Error>> {
+        Self::start_with_node_and_behavior(fixture, config, NODE_ID.to_owned(), behavior).await
     }
 
     async fn start_with_node(
         fixture: Arc<RpcFixture>,
         config: Arc<rustls::ServerConfig>,
         node_id: String,
+    ) -> std::result::Result<Self, Box<dyn Error>> {
+        Self::start_with_node_and_behavior(fixture, config, node_id, Behavior::Good).await
+    }
+
+    async fn start_with_node_and_behavior(
+        fixture: Arc<RpcFixture>,
+        config: Arc<rustls::ServerConfig>,
+        node_id: String,
+        behavior: Behavior,
     ) -> std::result::Result<Self, Box<dyn Error>> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
         let address = listener.local_addr()?;
@@ -130,8 +174,7 @@ impl MockTlsServer {
                 let node_id = node_id.clone();
                 tokio::spawn(async move {
                     if let Ok(tls) = acceptor.accept(stream).await {
-                        let _ = serve_connection(tls, fixture, Behavior::Good, Arc::new(AtomicUsize::new(0)), &node_id)
-                            .await;
+                        let _ = serve_connection(tls, fixture, behavior, Arc::new(AtomicUsize::new(0)), &node_id).await;
                     }
                 });
             }
@@ -324,6 +367,11 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     loop {
+        if matches!(behavior, Behavior::DropBroadcastRequest) && calls.load(Ordering::SeqCst) == 1 {
+            read_partial_rpc_request(&mut stream).await?;
+            calls.fetch_add(1, Ordering::SeqCst);
+            return Ok(());
+        }
         let Some(request) = read_rpc_request(&mut stream).await? else {
             return Ok(());
         };
@@ -341,7 +389,19 @@ where
             let _ = stream.read(&mut probe).await?;
             return Ok(());
         }
-        if matches!(behavior, Behavior::ChunkedOversize) {
+        if matches!(behavior, Behavior::HangBroadcast) && request.method == "broadcast_tx_sync" {
+            let mut probe = [0_u8; 1];
+            let _ = stream.read(&mut probe).await?;
+            return Ok(());
+        }
+        if matches!(behavior, Behavior::HangQuery) && request.method == "abci_query" {
+            let mut probe = [0_u8; 1];
+            let _ = stream.read(&mut probe).await?;
+            return Ok(());
+        }
+        if matches!(behavior, Behavior::ChunkedOversize)
+            || (matches!(behavior, Behavior::ChunkedOversizeQuery) && request.method == "abci_query")
+        {
             write_chunked_oversize(&mut stream).await?;
             continue;
         }
@@ -360,12 +420,43 @@ where
             write_response(&mut stream, 200, content_type, &oversized, false).await?;
             continue;
         }
-        if matches!(behavior, Behavior::TruncateOnce) && call == 0 {
+        if (matches!(behavior, Behavior::TruncateOnce) && call == 0)
+            || (matches!(behavior, Behavior::TruncateBroadcast) && request.method == "broadcast_tx_sync")
+        {
             write_response(&mut stream, 200, content_type, &body, true).await?;
             return Ok(());
         }
+        if matches!(behavior, Behavior::BroadcastStatus) && request.method == "broadcast_tx_sync" {
+            write_response(&mut stream, 503, content_type, b"{}", false).await?;
+            continue;
+        }
+        if matches!(behavior, Behavior::RetryAbci) && request.method == "abci_query" && call == 1 {
+            write_response(&mut stream, 503, content_type, b"{}", false).await?;
+            continue;
+        }
         write_response(&mut stream, 200, content_type, &body, false).await?;
     }
+}
+
+async fn read_partial_rpc_request<S>(stream: &mut S) -> std::io::Result<()>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    let mut header = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !header.ends_with(b"\r\n\r\n") {
+        if stream.read(&mut byte).await? == 0 {
+            return Err(std::io::Error::other("truncated partial request header"));
+        }
+        header.push(byte[0]);
+        if header.len() > 16 * 1024 {
+            return Err(std::io::Error::other("partial request header too large"));
+        }
+    }
+    if stream.read(&mut byte).await? == 0 {
+        return Err(std::io::Error::other("partial request body missing"));
+    }
+    Ok(())
 }
 
 struct MockRpcRequest {
@@ -417,7 +508,7 @@ where
             })
         })
         .ok_or_else(|| std::io::Error::other("missing content length"))?;
-    if content_length > 16 * 1024 {
+    if content_length > crate::rpc::MAX_RPC_REQUEST_BYTES {
         return Err(std::io::Error::other("request body too large"));
     }
     while bytes.len().saturating_sub(header_end) < content_length {
@@ -597,6 +688,79 @@ fn response_body(
             "count": values.as_array().map_or(0, Vec::len).to_string(),
             "total": total.to_string()
         })
+    } else if request.method == "broadcast_tx_sync" {
+        let transaction = request
+            .params
+            .get("tx")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|encoded| BASE64_STANDARD.decode(encoded).ok())
+            .unwrap_or_default();
+        let proposal = serde_json::from_slice::<SignedProposalV2>(&transaction).ok();
+        let mut transaction_hash: [u8; 32] = Sha256::digest(&transaction).into();
+        if matches!(behavior, Behavior::WrongTxHash) {
+            transaction_hash[0] ^= 1;
+        }
+        let rejected = matches!(behavior, Behavior::BroadcastReject);
+        let data = if rejected {
+            String::new()
+        } else {
+            proposal
+                .as_ref()
+                .and_then(|proposal| proposal.body().entry_hash().ok())
+                .map(|hash| hex::encode_upper(hash.as_bytes()))
+                .unwrap_or_default()
+        };
+        json!({
+            "code": if rejected { "7" } else { "0" },
+            "data": data,
+            "log": if rejected { "rejected" } else { "" },
+            "codespace": ABCI_CODESPACE,
+            "hash": hex::encode_upper(transaction_hash),
+        })
+    } else if request.method == "abci_query" {
+        let path = request
+            .params
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let mut key = request
+            .params
+            .get("data")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|encoded| hex::decode(encoded).ok())
+            .unwrap_or_default();
+        if matches!(behavior, Behavior::WrongQueryKey) {
+            key.push(0xff);
+        }
+        let requested_height = param_number(&request.params, "height").unwrap_or(0);
+        let height = if matches!(behavior, Behavior::WrongQueryHeight) {
+            requested_height.saturating_add(1)
+        } else {
+            requested_height
+        };
+        let valid = path == QUERY_BLOCK_PATH
+            && request.params.get("prove") == Some(&serde_json::Value::Bool(false))
+            && requested_height == fixture.execution.height();
+        let value = if matches!(behavior, Behavior::WrongQueryValue) {
+            serde_json::to_vec(&json!({})).unwrap_or_default()
+        } else if valid {
+            serde_json::to_vec(&fixture.execution).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        json!({
+            "response": {
+                "code": if valid { "0" } else { "2" },
+                "log": if valid { "" } else { "invalid query" },
+                "info": "",
+                "index": "0",
+                "key": BASE64_STANDARD.encode(key),
+                "value": BASE64_STANDARD.encode(value),
+                "proof_ops": null,
+                "height": height.to_string(),
+                "codespace": ABCI_CODESPACE,
+            }
+        })
     } else {
         json!({"unknown": request.method})
     };
@@ -605,7 +769,9 @@ fn response_body(
             object.insert("padding".to_owned(), json!("x".repeat(4 * 1024)));
         }
     }
-    let id = if matches!(behavior, Behavior::WrongId) {
+    let id = if matches!(behavior, Behavior::WrongId)
+        || (matches!(behavior, Behavior::WrongOperationId) && request.method != "status")
+    {
         request.id.saturating_add(1)
     } else {
         request.id
@@ -651,6 +817,53 @@ fn fetch_spec() -> RpcFetchSpec {
 fn runtime(url: &str) -> RuntimePeer {
     let peer = LoopbackHttpPeer::new_regtest(url, NodeId::from_str(NODE_ID).unwrap(), [0x44; 32]).unwrap();
     RuntimePeer::new(RpcPeer::RegtestLoopback(peer)).unwrap()
+}
+
+fn ledger_transport(url: &str, attempts: u8) -> (CometBftRpcTransport, PeerIdentity) {
+    let peer = LoopbackHttpPeer::new_regtest(url, NodeId::from_str(NODE_ID).unwrap(), [0x44; 32]).unwrap();
+    let identity = peer.identity().clone();
+    let transport = CometBftRpcTransport::new(
+        RpcTransportConfig::new(vec![RpcPeer::RegtestLoopback(peer)], limits(), retry(attempts)).unwrap(),
+    )
+    .unwrap();
+    (transport, identity)
+}
+
+fn signed_ledger_proposal(discriminator: u8) -> SignedProposalV2 {
+    let secp = Secp256k1::new();
+    let mut secret_bytes = [0_u8; 32];
+    secret_bytes[31] = discriminator.max(1);
+    let secret = SecretKey::from_byte_array(secret_bytes).unwrap();
+    let keypair = Keypair::from_secret_key(&secp, &secret);
+    let (public_key, _) = keypair.x_only_public_key();
+    let mut txid = [discriminator.max(1); 32];
+    txid[31] ^= 0x5a;
+    let binding = ChannelBindingV2::new(
+        ProtocolSuiteIdV2::from_bytes([0x11; 32]).unwrap(),
+        Network::Regtest,
+        BitcoinGenesisHashV2::for_network(Network::Regtest).unwrap(),
+        b"ledger-rpc-tests",
+        FundingOutpointV2::new(txid, u32::from(discriminator)).unwrap(),
+        1,
+        CommitteeDescriptorDigestV2::from_bytes([0x22; 32]).unwrap(),
+        AnchorParameterSuiteIdV2::from_bytes([0x33; 32]).unwrap(),
+    )
+    .unwrap();
+    let body = ProposalBodyV2::new(
+        LedgerChainIdV2::new(CHAIN_ID).unwrap(),
+        binding,
+        0,
+        EntryHashV2::zero(),
+        ClientRequestNonceV2::from_bytes([discriminator.max(1); 16]).unwrap(),
+        ActorKeyAlgorithmV2::Bip340V1,
+        ActorPublicKeyV2::from_bytes(public_key.serialize()).unwrap(),
+        ActorRoleV2::Holder,
+        thunderbolt_ledger::EventKindV2::Open,
+        CanonicalEventV2::from_bytes(vec![0x41; 4 * 1024]).unwrap(),
+    )
+    .unwrap();
+    let signature = secp.sign_schnorr_no_aux_rand(body.proposal_digest().unwrap().as_bytes(), &keypair);
+    SignedProposalV2::new(body, ActorSignatureV2::from_bytes(signature.to_byte_array()).unwrap()).unwrap()
 }
 
 async fn wait_for_counter(counter: &AtomicUsize, expected: usize) {
@@ -1041,6 +1254,23 @@ fn plaintext_profile_rejects_nonliteral_or_nonloopback_hosts() {
     assert_eq!(ipv6.endpoint.authority, "[::1]:26657");
 }
 
+#[test]
+fn ledger_body_limits_are_explicit_and_independent_from_trace_limits() {
+    let peer = LoopbackHttpPeer::new_regtest("http://127.0.0.1:26657", NodeId::from_str(NODE_ID).unwrap(), [0x44; 32])
+        .unwrap();
+    let inherited = RpcTransportConfig::new(vec![RpcPeer::RegtestLoopback(peer.clone())], limits(), retry(1)).unwrap();
+    assert_eq!(inherited.ledger_limits().response_bytes(), limits().response_bytes());
+    assert_eq!(inherited.ledger_limits().aggregate_bytes(), limits().aggregate_bytes());
+
+    let ledger_limits = LedgerRpcLimits::new(33 * 1024 * 1024, 34 * 1024 * 1024).unwrap();
+    let configured = RpcTransportConfig::new(vec![RpcPeer::RegtestLoopback(peer)], limits(), retry(1))
+        .unwrap()
+        .with_ledger_limits(ledger_limits);
+    assert_eq!(configured.ledger_limits(), ledger_limits);
+    assert!(LedgerRpcLimits::new(33 * 1024 * 1024 + 1, 34 * 1024 * 1024).is_err());
+    assert!(LedgerRpcLimits::new(1024 * 1024, 1024 * 1024 - 1).is_err());
+}
+
 #[cfg(unix)]
 #[test]
 fn pem_identity_requires_owner_private_nofollow_key_path() {
@@ -1141,6 +1371,265 @@ async fn wrong_ca_spki_and_optional_client_auth_fail_closed() {
 }
 
 #[tokio::test]
+async fn pinned_mtls_ledger_broadcast_and_query_return_only_typed_execution_results() {
+    let fixture = Arc::new(build_fixture());
+    let expected_block = fixture.execution.clone();
+    let material = tls_material();
+    let server = MockTlsServer::start(Arc::clone(&fixture), server_config(&material, true))
+        .await
+        .unwrap();
+    let spki = crate::tls::spki_sha256(&material.server_certificate).unwrap();
+    let peer = HttpsPeer::new(
+        &server.url(),
+        NodeId::from_str(NODE_ID).unwrap(),
+        spki,
+        vec![material.ca.clone()],
+        &material.client_provider,
+    )
+    .unwrap();
+    let identity = peer.identity().clone();
+    let transport =
+        CometBftRpcTransport::new(RpcTransportConfig::new(vec![RpcPeer::Https(peer)], limits(), retry(1)).unwrap())
+            .unwrap();
+    let chain = LedgerChainIdV2::new(CHAIN_ID).unwrap();
+    let proposal = signed_ledger_proposal(61);
+    let broadcast = transport
+        .broadcast_tx_sync(&identity, &chain, &proposal, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(broadcast.admission(), BroadcastAdmissionV2::Accepted);
+    assert_eq!(broadcast.evidence().transport_binding(), &spki);
+    assert_eq!(broadcast.evidence().node_id(), identity.node_id());
+    assert_eq!(broadcast.evidence().ledger_chain_id(), &chain);
+    assert_ne!(broadcast.evidence().session_digest(), &[0_u8; 32]);
+
+    let query = LedgerAbciQueryV2::block(2).unwrap();
+    let response = transport
+        .abci_query(&identity, &chain, &query, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(response.query(), &query);
+    assert_eq!(response.height(), 2);
+    assert_eq!(response.value(), serde_json::to_vec(&expected_block).unwrap());
+    assert_eq!(response.evidence().transport_binding(), &spki);
+    assert_ne!(
+        response.evidence().session_digest(),
+        broadcast.evidence().session_digest()
+    );
+}
+
+#[tokio::test]
+async fn broadcast_rejection_is_definite_and_post_send_failures_are_ambiguous_without_retry() {
+    let chain = LedgerChainIdV2::new(CHAIN_ID).unwrap();
+    let proposal = signed_ledger_proposal(62);
+
+    let rejected = MockServer::start(Arc::new(build_fixture()), Behavior::BroadcastReject)
+        .await
+        .unwrap();
+    let (transport, identity) = ledger_transport(&rejected.url(), 5);
+    let response = transport
+        .broadcast_tx_sync(&identity, &chain, &proposal, Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(response.admission(), BroadcastAdmissionV2::Rejected { code: 7 });
+    assert_eq!(rejected.calls.load(Ordering::SeqCst), 2);
+
+    for behavior in [
+        Behavior::WrongTxHash,
+        Behavior::DropBroadcastRequest,
+        Behavior::TruncateBroadcast,
+        Behavior::HangBroadcast,
+        Behavior::BroadcastStatus,
+        Behavior::WrongOperationId,
+    ] {
+        let server = MockServer::start(Arc::new(build_fixture()), behavior).await.unwrap();
+        let (transport, identity) = ledger_transport(&server.url(), 5);
+        let error = transport
+            .broadcast_tx_sync(&identity, &chain, &proposal, Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, RpcTransportError::AmbiguousWrite { .. }),
+            "unexpected {error:?} for {behavior:?}"
+        );
+        assert_eq!(server.calls.load(Ordering::SeqCst), 2, "write retried for {behavior:?}");
+        wait_for_counter(&server.connections, 0).await;
+    }
+
+    let cancelled = MockServer::start(Arc::new(build_fixture()), Behavior::HangBroadcast)
+        .await
+        .unwrap();
+    let (transport, identity) = ledger_transport(&cancelled.url(), 5);
+    let transport = Arc::new(transport);
+    let task_transport = Arc::clone(&transport);
+    let task_chain = chain.clone();
+    let task_proposal = proposal.clone();
+    let task = tokio::spawn(async move {
+        task_transport
+            .broadcast_tx_sync(&identity, &task_chain, &task_proposal, Duration::from_secs(5))
+            .await
+    });
+    wait_for_counter(&cancelled.calls, 2).await;
+    task.abort();
+    let _ = task.await;
+    assert_eq!(cancelled.calls.load(Ordering::SeqCst), 2);
+    wait_for_counter(&cancelled.connections, 0).await;
+}
+
+#[tokio::test]
+async fn pinned_mtls_partial_broadcast_fails_as_ambiguous() {
+    let fixture = Arc::new(build_fixture());
+    let material = tls_material();
+    let server =
+        MockTlsServer::start_with_behavior(fixture, server_config(&material, true), Behavior::DropBroadcastRequest)
+            .await
+            .unwrap();
+    let peer = HttpsPeer::new(
+        &server.url(),
+        NodeId::from_str(NODE_ID).unwrap(),
+        crate::tls::spki_sha256(&material.server_certificate).unwrap(),
+        vec![material.ca.clone()],
+        &material.client_provider,
+    )
+    .unwrap();
+    let identity = peer.identity().clone();
+    let transport =
+        CometBftRpcTransport::new(RpcTransportConfig::new(vec![RpcPeer::Https(peer)], limits(), retry(5)).unwrap())
+            .unwrap();
+    assert!(matches!(
+        transport
+            .broadcast_tx_sync(
+                &identity,
+                &LedgerChainIdV2::new(CHAIN_ID).unwrap(),
+                &signed_ledger_proposal(63),
+                Duration::from_secs(1),
+            )
+            .await,
+        Err(RpcTransportError::AmbiguousWrite { .. })
+    ));
+}
+
+#[tokio::test]
+async fn abci_query_retries_whole_authenticated_reads_and_rejects_binding_tamper() {
+    let chain = LedgerChainIdV2::new(CHAIN_ID).unwrap();
+    let query = LedgerAbciQueryV2::block(2).unwrap();
+    let retrying = MockServer::start(Arc::new(build_fixture()), Behavior::RetryAbci)
+        .await
+        .unwrap();
+    let (transport, identity) = ledger_transport(&retrying.url(), 3);
+    let response = transport
+        .abci_query(&identity, &chain, &query, Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(response.height(), 2);
+    assert_eq!(retrying.calls.load(Ordering::SeqCst), 4);
+
+    for behavior in [
+        Behavior::WrongOperationId,
+        Behavior::WrongQueryHeight,
+        Behavior::WrongQueryKey,
+        Behavior::WrongQueryValue,
+    ] {
+        let server = MockServer::start(Arc::new(build_fixture()), behavior).await.unwrap();
+        let (transport, identity) = ledger_transport(&server.url(), 3);
+        assert!(transport
+            .abci_query(&identity, &chain, &query, Duration::from_secs(1))
+            .await
+            .is_err());
+        assert_eq!(
+            server.calls.load(Ordering::SeqCst),
+            2,
+            "permanent read retried for {behavior:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn ledger_operations_reject_wrong_authenticated_node_or_chain_before_writes() {
+    let chain = LedgerChainIdV2::new(CHAIN_ID).unwrap();
+    let proposal = signed_ledger_proposal(64);
+    let query = LedgerAbciQueryV2::block(2).unwrap();
+    for (behavior, expected) in [(Behavior::WrongNode, "node"), (Behavior::WrongChain, "chain")] {
+        let server = MockServer::start(Arc::new(build_fixture()), behavior).await.unwrap();
+        let (transport, identity) = ledger_transport(&server.url(), 3);
+        let broadcast_error = transport
+            .broadcast_tx_sync(&identity, &chain, &proposal, Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                (&broadcast_error, expected),
+                (RpcTransportError::NodeIdentity, "node") | (RpcTransportError::ChainIdentity, "chain")
+            ),
+            "unexpected {broadcast_error:?}"
+        );
+        assert_eq!(server.calls.load(Ordering::SeqCst), 1);
+
+        let query_error = transport
+            .abci_query(&identity, &chain, &query, Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                (&query_error, expected),
+                (RpcTransportError::NodeIdentity, "node") | (RpcTransportError::ChainIdentity, "chain")
+            ),
+            "unexpected {query_error:?}"
+        );
+        assert_eq!(server.calls.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[tokio::test]
+async fn abci_query_stream_cap_deadline_and_cancellation_close_the_session() {
+    let chain = LedgerChainIdV2::new(CHAIN_ID).unwrap();
+    let query = LedgerAbciQueryV2::block(2).unwrap();
+    let oversized = MockServer::start(Arc::new(build_fixture()), Behavior::ChunkedOversizeQuery)
+        .await
+        .unwrap();
+    let (transport, identity) = ledger_transport(&oversized.url(), 3);
+    assert!(matches!(
+        transport
+            .abci_query(&identity, &chain, &query, Duration::from_secs(1))
+            .await,
+        Err(RpcTransportError::ResponseTooLarge)
+    ));
+    assert_eq!(oversized.calls.load(Ordering::SeqCst), 2);
+
+    let hanging = MockServer::start(Arc::new(build_fixture()), Behavior::HangQuery)
+        .await
+        .unwrap();
+    let (transport, identity) = ledger_transport(&hanging.url(), 3);
+    assert!(matches!(
+        transport
+            .abci_query(&identity, &chain, &query, Duration::from_millis(25))
+            .await,
+        Err(RpcTransportError::Deadline)
+    ));
+    assert_eq!(hanging.calls.load(Ordering::SeqCst), 2);
+    wait_for_counter(&hanging.connections, 0).await;
+
+    let cancelled = MockServer::start(Arc::new(build_fixture()), Behavior::HangQuery)
+        .await
+        .unwrap();
+    let (transport, identity) = ledger_transport(&cancelled.url(), 3);
+    let transport = Arc::new(transport);
+    let task_transport = Arc::clone(&transport);
+    let task_chain = chain.clone();
+    let task_query = query.clone();
+    let task = tokio::spawn(async move {
+        task_transport
+            .abci_query(&identity, &task_chain, &task_query, Duration::from_secs(5))
+            .await
+    });
+    wait_for_counter(&cancelled.calls, 2).await;
+    task.abort();
+    let _ = task.await;
+    assert_eq!(cancelled.calls.load(Ordering::SeqCst), 2);
+    wait_for_counter(&cancelled.connections, 0).await;
+}
+
+#[tokio::test]
 #[ignore = "requires an explicit four-node local CometBFT regtest fixture"]
 async fn optional_live_four_node_regtest_gate() {
     #[derive(serde::Deserialize)]
@@ -1203,6 +1692,74 @@ async fn optional_live_four_node_regtest_gate() {
         .expect("authenticated live trace");
         assert_eq!(trace.blocks.len(), block_count);
     }
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit pinned HTTPS/mTLS CometBFT Ledger endpoint"]
+async fn optional_live_pinned_https_ledger_query_gate() {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct LiveConfig {
+        url: String,
+        node_id: String,
+        spki_sha256_hex: String,
+        ca_pem_path: std::path::PathBuf,
+        client_certificate_path: std::path::PathBuf,
+        client_key_path: std::path::PathBuf,
+        ledger_chain_id: String,
+        execution_height: u64,
+    }
+
+    let path = std::env::var_os("THUNDERBOLT_COMETBFT_LEDGER_LIVE_CONFIG")
+        .expect("set THUNDERBOLT_COMETBFT_LEDGER_LIVE_CONFIG to the pinned HTTPS JSON file");
+    let config: LiveConfig =
+        serde_json::from_slice(&std::fs::read(path).expect("read live config")).expect("decode live config");
+    let identity = crate::OwnerOnlyPemClientIdentity::load(&config.client_certificate_path, &config.client_key_path)
+        .expect("load owner-only client identity");
+    let ca_bytes = std::fs::read(&config.ca_pem_path).expect("read CA bundle");
+    let roots = rustls_pemfile::certs(&mut Cursor::new(ca_bytes))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .expect("decode CA bundle");
+    let peer = HttpsPeer::new(
+        &config.url,
+        NodeId::from_str(&config.node_id).expect("node id"),
+        decode_hex_32(&config.spki_sha256_hex).expect("SPKI digest"),
+        roots,
+        &identity,
+    )
+    .expect("pinned HTTPS peer");
+    let peer_identity = peer.identity().clone();
+    let transport = CometBftRpcTransport::new(
+        RpcTransportConfig::new(
+            vec![RpcPeer::Https(peer)],
+            RpcLimits::new(
+                8 * 1024 * 1024,
+                64 * 1024 * 1024,
+                8,
+                64,
+                NonZeroU8::new(64).expect("page"),
+                32,
+                32 * 1024,
+            )
+            .expect("live limits"),
+            retry(3),
+        )
+        .expect("live transport config")
+        .with_ledger_limits(LedgerRpcLimits::new(33 * 1024 * 1024, 34 * 1024 * 1024).expect("live Ledger limits")),
+    )
+    .expect("live transport");
+    let query = LedgerAbciQueryV2::block(config.execution_height).expect("block query");
+    let response = transport
+        .abci_query(
+            &peer_identity,
+            &LedgerChainIdV2::new(config.ledger_chain_id).expect("chain"),
+            &query,
+            Duration::from_secs(120),
+        )
+        .await
+        .expect("authenticated live query");
+    assert_eq!(response.height(), config.execution_height);
+    assert!(!response.value().is_empty());
 }
 
 fn decode_hex_32(encoded: &str) -> Option<[u8; 32]> {

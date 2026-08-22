@@ -22,9 +22,10 @@ mod store;
 pub use error::{ApplicationError, Result};
 pub use migrations::CURRENT_SCHEMA_VERSION;
 pub use store::{
-    ApplicationOptions, ApplicationStatusV2, BlockExecutionOutcomeV2, BlockInputV2, ChannelHeadReadV2,
-    IntegrityReportV2, LedgerApplication, LedgerApplicationVerifierV2, PreparedBlockV2, RequestHeadReadV2,
-    StoredRequestV2,
+    ApplicationOptions, ApplicationStatusV2, BlockExecutionOutcomeV2, BlockInputV2, BlockRangeReadV2,
+    BlockRangeRequestV2, ChannelHeadReadV2, EntryLocationReadV2, EntryLocationV2, IntegrityReportV2, LedgerApplication,
+    LedgerApplicationVerifierV2, PreparedBlockV2, RequestHeadReadV2, StoredRequestV2, MAX_BLOCK_RANGE_BLOCKS,
+    MAX_BLOCK_RANGE_ENCODED_BYTES,
 };
 
 /// Application version reported by a future CometBFT ABCI `Info`/`InitChain`

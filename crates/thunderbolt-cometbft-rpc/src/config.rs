@@ -19,14 +19,23 @@ use crate::{ClientIdentityProvider, Result, RpcTransportError};
 /// must be advanced in multiple coordinator updates.
 pub const MAX_RPC_ADJACENT_HEADERS: usize = 256;
 
-/// Maximum raw bytes accepted for one JSON-RPC response.
+/// Maximum raw bytes accepted for one trace-fetch JSON-RPC response.
 pub const MAX_RPC_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// Maximum aggregate raw JSON-RPC bytes accepted for one fetched trace.
 pub const MAX_RPC_AGGREGATE_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum raw JSON-RPC response for one fixed Ledger ABCI query.
+pub const MAX_LEDGER_RPC_RESPONSE_BYTES: usize = 33 * 1024 * 1024;
+/// Maximum status-plus-operation raw bytes for one fixed Ledger attempt.
+pub const MAX_LEDGER_RPC_AGGREGATE_BYTES: usize = 34 * 1024 * 1024;
+/// Maximum authenticated CometBFT status response used before a Ledger operation.
+pub const MAX_LEDGER_STATUS_RESPONSE_BYTES: usize = 64 * 1024;
 /// Maximum accepted HTTP response headers.
 pub const MAX_HTTP_HEADERS: usize = 64;
 /// Maximum HTTP/1 read buffer used for response headers.
 pub const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
+
+const _: () =
+    assert!(MAX_LEDGER_RPC_RESPONSE_BYTES + MAX_LEDGER_STATUS_RESPONSE_BYTES <= MAX_LEDGER_RPC_AGGREGATE_BYTES);
 
 /// Immutable retry policy for idempotent CometBFT JSON-RPC reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +64,13 @@ impl RetryPolicy {
     pub const fn base_delay(&self) -> Duration {
         self.base_delay
     }
+
+    pub(crate) const fn single_attempt() -> Self {
+        Self {
+            attempts: NonZeroU8::MIN,
+            base_delay: Duration::from_millis(1),
+        }
+    }
 }
 
 /// Compositional network and RPC decoding limits.
@@ -67,6 +83,53 @@ pub struct RpcLimits {
     validator_page_size: NonZeroU8,
     max_headers: usize,
     max_header_bytes: usize,
+}
+
+/// Independent raw-body limits for fixed Ledger status, query, and broadcast operations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LedgerRpcLimits {
+    response_bytes: usize,
+    aggregate_bytes: usize,
+}
+
+impl LedgerRpcLimits {
+    /// Constructs bounded Ledger RPC body limits.
+    pub fn new(response_bytes: usize, aggregate_bytes: usize) -> Result<Self> {
+        let minimum_aggregate = response_bytes
+            .checked_add(response_bytes.min(MAX_LEDGER_STATUS_RESPONSE_BYTES))
+            .ok_or(RpcTransportError::InvalidConfiguration(
+                "Ledger RPC aggregate limit overflows",
+            ))?;
+        if !(1_024..=MAX_LEDGER_RPC_RESPONSE_BYTES).contains(&response_bytes)
+            || aggregate_bytes < minimum_aggregate
+            || aggregate_bytes > MAX_LEDGER_RPC_AGGREGATE_BYTES
+        {
+            return Err(RpcTransportError::InvalidConfiguration(
+                "Ledger RPC body limit is outside bounds",
+            ));
+        }
+        Ok(Self {
+            response_bytes,
+            aggregate_bytes,
+        })
+    }
+
+    /// Returns the per-response raw JSON cap.
+    pub const fn response_bytes(self) -> usize {
+        self.response_bytes
+    }
+
+    /// Returns the status-plus-operation aggregate raw JSON cap.
+    pub const fn aggregate_bytes(self) -> usize {
+        self.aggregate_bytes
+    }
+
+    fn inherited(limits: RpcLimits) -> Self {
+        Self {
+            response_bytes: limits.response_bytes.min(MAX_LEDGER_RPC_RESPONSE_BYTES),
+            aggregate_bytes: limits.aggregate_bytes.min(MAX_LEDGER_RPC_AGGREGATE_BYTES),
+        }
+    }
 }
 
 impl RpcLimits {
@@ -274,11 +337,16 @@ impl RpcPeer {
 pub struct RpcTransportConfig {
     peers: Vec<RpcPeer>,
     limits: RpcLimits,
+    ledger_limits: LedgerRpcLimits,
     retry: RetryPolicy,
 }
 
 impl RpcTransportConfig {
     /// Constructs a distinct one-to-five-peer transport roster.
+    ///
+    /// Fixed Ledger operations initially inherit the trace body limits. Use
+    /// [`Self::with_ledger_limits`] when full-size Ledger query values are
+    /// required, and bind that override in runtime policy.
     pub fn new(peers: Vec<RpcPeer>, limits: RpcLimits, retry: RetryPolicy) -> Result<Self> {
         if peers.is_empty() || peers.len() > MAX_WITNESSES + 1 {
             return Err(RpcTransportError::InvalidConfiguration(
@@ -294,7 +362,12 @@ impl RpcTransportConfig {
                 ));
             }
         }
-        Ok(Self { peers, limits, retry })
+        Ok(Self {
+            peers,
+            limits,
+            ledger_limits: LedgerRpcLimits::inherited(limits),
+            retry,
+        })
     }
 
     /// Returns configured immutable peers.
@@ -305,6 +378,18 @@ impl RpcTransportConfig {
     /// Returns RPC resource limits.
     pub const fn limits(&self) -> RpcLimits {
         self.limits
+    }
+
+    /// Overrides fixed Ledger body limits. Runtime policy must bind this value.
+    #[must_use]
+    pub const fn with_ledger_limits(mut self, limits: LedgerRpcLimits) -> Self {
+        self.ledger_limits = limits;
+        self
+    }
+
+    /// Returns fixed Ledger operation body limits.
+    pub const fn ledger_limits(&self) -> LedgerRpcLimits {
+        self.ledger_limits
     }
 
     /// Returns the idempotent retry policy.

@@ -13,9 +13,10 @@ use thunderbolt_wire::ChannelBindingV2;
 use crate::bytes::{deserialize_opaque_consensus_receipt, deserialize_snapshot_bytes};
 use crate::primitives::FixedHex32Wire;
 use crate::{
-    ChannelStatusRequestV2, HistoryCursorV2, HistoryRequestV2, OpaqueConsensusReceiptV2, RequestStatusRequestV2,
-    Result, RpcCodecError, RpcRequestDigestV2, RpcRequestV2, SnapshotBytesV2, SubmitProposalRequestV2,
-    TransportAcceptanceIdV2, MAX_HISTORY_PAGE_ENTRIES,
+    ChannelStatusRequestV2, EntryLocationRequestV2, ExecutionRangeCursorV2, ExecutionRangeRequestV2, HistoryCursorV2,
+    HistoryRequestV2, OpaqueConsensusReceiptV2, RequestStatusRequestV2, Result, RpcCodecError, RpcRequestDigestV2,
+    RpcRequestV2, SnapshotBytesV2, SubmitProposalRequestV2, TransportAcceptanceIdV2, MAX_EXECUTION_RANGE_BLOCKS,
+    MAX_HISTORY_PAGE_ENTRIES,
 };
 
 /// Fixed rejection reasons returned by deterministic admission policy.
@@ -918,6 +919,266 @@ impl HistoryResponseV2 {
     }
 }
 
+/// Positive bounded location of one immutable executed entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionLocationV2 {
+    height: u64,
+    block_index: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionLocationInput {
+    height: u64,
+    block_index: u32,
+}
+
+impl ExecutionLocationV2 {
+    /// Constructs an execution position inside the per-block bound.
+    pub fn new(height: u64, block_index: u32) -> Result<Self> {
+        if height == 0
+            || height > i64::MAX as u64
+            || usize::try_from(block_index).map_or(true, |index| index >= MAX_BLOCK_ENTRIES)
+        {
+            return Err(RpcCodecError::InvalidField("execution location is outside bounds"));
+        }
+        Ok(Self { height, block_index })
+    }
+
+    /// Returns the positive execution height.
+    pub const fn height(self) -> u64 {
+        self.height
+    }
+
+    /// Returns the zero-based block index.
+    pub const fn block_index(self) -> u32 {
+        self.block_index
+    }
+}
+
+/// Request-correlated immutable first-location response.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EntryLocationResponseV2 {
+    request_digest: RpcRequestDigestV2,
+    application_version: u64,
+    location: Option<ExecutionLocationV2>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EntryLocationResponseInput {
+    request_digest: FixedHex32Wire,
+    application_version: u64,
+    location: Option<ExecutionLocationInput>,
+}
+
+impl EntryLocationResponseV2 {
+    /// Constructs a response bound to the complete chain/channel/entry request.
+    pub fn new(request: &EntryLocationRequestV2, location: Option<ExecutionLocationV2>) -> Result<Self> {
+        let response = Self {
+            request_digest: RpcRequestV2::EntryLocation(request.clone()).request_digest()?,
+            application_version: 2,
+            location,
+        };
+        response.validate_for(request)?;
+        Ok(response)
+    }
+
+    /// Returns the immutable first location, or `None` at the observed state.
+    pub const fn location(&self) -> Option<ExecutionLocationV2> {
+        self.location
+    }
+
+    /// Returns the exact Ledger application version.
+    pub const fn application_version(&self) -> u64 {
+        self.application_version
+    }
+
+    /// Validates complete request correlation.
+    pub fn validate_for(&self, request: &EntryLocationRequestV2) -> Result<()> {
+        if self.request_digest != RpcRequestV2::EntryLocation(request.clone()).request_digest()?
+            || self.application_version != 2
+            || self
+                .location
+                .is_some_and(|location| location.height() > request.through_height())
+        {
+            return Err(RpcCodecError::BindingMismatch(
+                "entry location differs from the complete query key",
+            ));
+        }
+        Ok(())
+    }
+}
+
+struct BoundedExecutedBlockList(Vec<thunderbolt_ledger::ExecutedBlockV2>);
+
+struct ExecutedBlockListVisitor;
+
+impl<'de> Visitor<'de> for ExecutedBlockListVisitor {
+    type Value = BoundedExecutedBlockList;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "at most {MAX_EXECUTION_RANGE_BLOCKS} whole executed blocks")
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        if sequence
+            .size_hint()
+            .is_some_and(|size| size > usize::from(MAX_EXECUTION_RANGE_BLOCKS))
+        {
+            return Err(A::Error::custom("execution range exceeds block bound"));
+        }
+        let mut blocks = Vec::with_capacity(
+            sequence
+                .size_hint()
+                .unwrap_or_default()
+                .min(usize::from(MAX_EXECUTION_RANGE_BLOCKS)),
+        );
+        while let Some(block) = sequence.next_element::<thunderbolt_ledger::ExecutedBlockV2>()? {
+            if blocks.len() == usize::from(MAX_EXECUTION_RANGE_BLOCKS) {
+                return Err(A::Error::custom("execution range exceeds block bound"));
+            }
+            blocks.push(block);
+        }
+        Ok(BoundedExecutedBlockList(blocks))
+    }
+}
+
+impl<'de> Deserialize<'de> for BoundedExecutedBlockList {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(ExecutedBlockListVisitor)
+    }
+}
+
+/// Request-correlated page of whole globally contiguous executed blocks.
+///
+/// This is deterministic execution evidence only. It never carries or creates
+/// a consensus-finality capability.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionRangeResponseV2 {
+    request_digest: RpcRequestDigestV2,
+    application_version: u64,
+    blocks: Vec<thunderbolt_ledger::ExecutedBlockV2>,
+    next_cursor: ExecutionRangeCursorV2,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionRangeResponseInput {
+    request_digest: FixedHex32Wire,
+    application_version: u64,
+    blocks: BoundedExecutedBlockList,
+    next_cursor: serde_json::Value,
+}
+
+impl ExecutionRangeResponseV2 {
+    /// Constructs and validates one exact whole-block page.
+    pub fn new(
+        request: &ExecutionRangeRequestV2,
+        blocks: Vec<thunderbolt_ledger::ExecutedBlockV2>,
+        next_cursor: ExecutionRangeCursorV2,
+    ) -> Result<Self> {
+        let response = Self {
+            request_digest: RpcRequestV2::ExecutionRange(request.clone()).request_digest()?,
+            application_version: 2,
+            blocks,
+            next_cursor,
+        };
+        response.validate_for(request)?;
+        Ok(response)
+    }
+
+    /// Returns whole blocks in strict global execution order, including empty blocks.
+    pub fn blocks(&self) -> &[thunderbolt_ledger::ExecutedBlockV2] {
+        &self.blocks
+    }
+
+    /// Returns the exact Ledger application version.
+    pub const fn application_version(&self) -> u64 {
+        self.application_version
+    }
+
+    /// Returns the mandatory exact cursor immediately after the requested range.
+    pub const fn next_cursor(&self) -> &ExecutionRangeCursorV2 {
+        &self.next_cursor
+    }
+
+    /// Revalidates chain, cursor, count, bytes, continuity, and continuation.
+    pub fn validate_for(&self, request: &ExecutionRangeRequestV2) -> Result<()> {
+        if self.request_digest != RpcRequestV2::ExecutionRange(request.clone()).request_digest()?
+            || self.application_version != 2
+            || self.blocks.len() != usize::from(request.block_count())
+            || self.blocks.len() > usize::from(MAX_EXECUTION_RANGE_BLOCKS)
+            || serde_json::to_vec(&self.blocks)
+                .map_err(RpcCodecError::InvalidEnvelope)?
+                .len()
+                > usize::try_from(request.max_encoded_bytes())
+                    .map_err(|_| RpcCodecError::InvalidField("range byte bound does not fit usize"))?
+        {
+            return Err(RpcCodecError::InvalidField(
+                "execution range response bounds are invalid",
+            ));
+        }
+        let mut expected_height = request.cursor().next_height();
+        let mut expected_previous = request.cursor().expected_previous_app_hash().clone();
+        let mut previous_block: Option<&thunderbolt_ledger::ExecutedBlockV2> = None;
+        for block in &self.blocks {
+            block.validate_chain_id(request.cursor().ledger_chain_id())?;
+            if block.height() != expected_height || block.previous_app_hash() != &expected_previous {
+                return Err(RpcCodecError::BindingMismatch(
+                    "executed blocks are not globally contiguous from the exact cursor",
+                ));
+            }
+            if let Some(previous) = previous_block {
+                block.validate_successor(previous)?;
+            }
+            expected_height = expected_height
+                .checked_add(1)
+                .ok_or(RpcCodecError::InvalidField("execution range height overflows"))?;
+            expected_previous = block.app_hash().clone();
+            previous_block = Some(block);
+        }
+        if self.next_cursor.ledger_chain_id() != request.cursor().ledger_chain_id()
+            || self.next_cursor.next_height() != expected_height
+            || self.next_cursor.expected_previous_app_hash() != &expected_previous
+        {
+            return Err(RpcCodecError::BindingMismatch("execution range continuation differs"));
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn decode_entry_location_response_value(value: serde_json::Value) -> Result<EntryLocationResponseV2> {
+    let input: EntryLocationResponseInput = serde_json::from_value(value).map_err(RpcCodecError::InvalidEnvelope)?;
+    Ok(EntryLocationResponseV2 {
+        request_digest: RpcRequestDigestV2::from_bytes(input.request_digest.into_bytes())?,
+        application_version: input.application_version,
+        location: input
+            .location
+            .map(|location| ExecutionLocationV2::new(location.height, location.block_index))
+            .transpose()?,
+    })
+}
+
+pub(crate) fn decode_execution_range_response_value(value: serde_json::Value) -> Result<ExecutionRangeResponseV2> {
+    let input: ExecutionRangeResponseInput = serde_json::from_value(value).map_err(RpcCodecError::InvalidEnvelope)?;
+    Ok(ExecutionRangeResponseV2 {
+        request_digest: RpcRequestDigestV2::from_bytes(input.request_digest.into_bytes())?,
+        application_version: input.application_version,
+        blocks: input.blocks.0,
+        next_cursor: crate::request::decode_execution_range_cursor_value(input.next_cursor)?,
+    })
+}
+
 pub(crate) fn decode_history_response_value(value: serde_json::Value) -> Result<HistoryResponseV2> {
     let input: HistoryResponseInput = serde_json::from_value(value).map_err(RpcCodecError::InvalidEnvelope)?;
     Ok(HistoryResponseV2 {
@@ -942,6 +1203,10 @@ pub enum RpcResponseV2 {
     RequestStatus(Box<RequestStatusResponseV2>),
     /// Bounded deterministic metadata page.
     History(HistoryResponseV2),
+    /// Whole globally contiguous executed blocks.
+    ExecutionRange(ExecutionRangeResponseV2),
+    /// Immutable first location of one exact channel entry.
+    EntryLocation(EntryLocationResponseV2),
     /// Rollback-floor CAS transport/result response.
     RollbackFloorCas(crate::RollbackFloorCasResponseV2),
 }
@@ -992,6 +1257,8 @@ impl RpcResponseV2 {
             (Self::ChannelStatus(response), RpcRequestV2::ChannelStatus(request)) => response.validate_for(request),
             (Self::RequestStatus(response), RpcRequestV2::RequestStatus(request)) => response.validate_for(request),
             (Self::History(response), RpcRequestV2::History(request)) => response.validate_for(request),
+            (Self::ExecutionRange(response), RpcRequestV2::ExecutionRange(request)) => response.validate_for(request),
+            (Self::EntryLocation(response), RpcRequestV2::EntryLocation(request)) => response.validate_for(request),
             (Self::RollbackFloorCas(response), RpcRequestV2::RollbackFloorCas(request)) => {
                 response.validate_for(request.request())
             }
@@ -1011,6 +1278,13 @@ impl RpcResponseV2 {
                 }
                 Ok(())
             }
+            Self::ExecutionRange(response) => {
+                if response.blocks.len() > usize::from(MAX_EXECUTION_RANGE_BLOCKS) {
+                    return Err(RpcCodecError::InvalidField("execution range exceeds block bound"));
+                }
+                Ok(())
+            }
+            Self::EntryLocation(_) => Ok(()),
             Self::RollbackFloorCas(response) => response.validate(),
         }
     }

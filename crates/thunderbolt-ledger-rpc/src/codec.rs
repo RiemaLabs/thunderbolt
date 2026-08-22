@@ -32,6 +32,8 @@ enum RequestWire {
     ChannelStatus(serde_json::Value),
     RequestStatus(serde_json::Value),
     History(serde_json::Value),
+    ExecutionRange(serde_json::Value),
+    EntryLocation(serde_json::Value),
     RollbackFloorCas(serde_json::Value),
 }
 
@@ -56,6 +58,8 @@ enum ResponseWire {
     ChannelStatus(serde_json::Value),
     RequestStatus(serde_json::Value),
     History(serde_json::Value),
+    ExecutionRange(serde_json::Value),
+    EntryLocation(serde_json::Value),
     RollbackFloorCas(serde_json::Value),
 }
 
@@ -74,6 +78,12 @@ impl TryFrom<RequestWire> for RpcRequestV2 {
                 Self::RequestStatus(crate::request::decode_request_status_request_value(value)?)
             }
             RequestWire::History(value) => Self::History(crate::request::decode_history_request_value(value)?),
+            RequestWire::ExecutionRange(value) => {
+                Self::ExecutionRange(crate::request::decode_execution_range_request_value(value)?)
+            }
+            RequestWire::EntryLocation(value) => {
+                Self::EntryLocation(crate::request::decode_entry_location_request_value(value)?)
+            }
             RequestWire::RollbackFloorCas(value) => {
                 Self::RollbackFloorCas(crate::floor_codec::decode_floor_request_value(value)?)
             }
@@ -96,6 +106,12 @@ impl TryFrom<ResponseWire> for RpcResponseV2 {
                 Self::RequestStatus(Box::new(crate::response::decode_request_status_response_value(value)?))
             }
             ResponseWire::History(value) => Self::History(crate::response::decode_history_response_value(value)?),
+            ResponseWire::ExecutionRange(value) => {
+                Self::ExecutionRange(crate::response::decode_execution_range_response_value(value)?)
+            }
+            ResponseWire::EntryLocation(value) => {
+                Self::EntryLocation(crate::response::decode_entry_location_response_value(value)?)
+            }
             ResponseWire::RollbackFloorCas(value) => {
                 Self::RollbackFloorCas(crate::floor_codec::decode_floor_response_value(value)?)
             }

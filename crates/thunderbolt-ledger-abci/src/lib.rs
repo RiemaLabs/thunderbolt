@@ -46,12 +46,18 @@ use tendermint_proto::v0_38::abci::{
 };
 use tendermint_proto::v0_38::types::{AbciParams, ConsensusParams, VersionParams};
 use thunderbolt_ledger::{
-    ActorSignatureV2, AppHashV2, ChannelContextIdV2, ParticipantIdV2, PendingBlockV2, ProposalBodyV2, RequestDigestV2,
-    SignedProposalV2, EVENT_BYTES_MAX, MAX_BLOCK_ENTRIES, MAX_BLOCK_EVENT_BYTES, MAX_SIGNED_PROPOSAL_JSON_BYTES,
-    SIGNED_PROPOSAL_RPC_METADATA_ALLOWANCE_BYTES,
+    ActorSignatureV2, AppHashV2, ChannelContextIdV2, EntryHashV2, ParticipantIdV2, PendingBlockV2, ProposalBodyV2,
+    RequestDigestV2, SignedProposalV2, EVENT_BYTES_MAX, MAX_BLOCK_ENTRIES, MAX_BLOCK_EVENT_BYTES,
+    MAX_SIGNED_PROPOSAL_JSON_BYTES, SIGNED_PROPOSAL_RPC_METADATA_ALLOWANCE_BYTES,
 };
 use thunderbolt_ledger_app::{
-    ApplicationStatusV2, BlockInputV2, LedgerApplication, LedgerApplicationVerifierV2, PreparedBlockV2,
+    ApplicationStatusV2, BlockInputV2, BlockRangeRequestV2, LedgerApplication, LedgerApplicationVerifierV2,
+    PreparedBlockV2, MAX_BLOCK_RANGE_BLOCKS, MAX_BLOCK_RANGE_ENCODED_BYTES,
+};
+use thunderbolt_ledger_rpc::{
+    EntryLocationRequestV2, EntryLocationResponseV2, ExecutionLocationV2, ExecutionRangeCursorV2,
+    ExecutionRangeRequestV2, ExecutionRangeResponseV2, RpcResponseV2, MAX_EXECUTION_RANGE_BLOCKS,
+    MAX_EXECUTION_RANGE_ENCODED_BYTES,
 };
 use thunderbolt_protocol::v2::{
     ChannelEventV2, ChannelSnapshotV2, ProtocolLimitsV2, MAX_ARTIFACT_BYTES_V2, MAX_CANONICAL_SNAPSHOT_BYTES_V2,
@@ -80,6 +86,12 @@ pub const QUERY_REQUEST_PATH: &str = "/thunderbolt/v2/request";
 /// Canonical query path for execution inclusion evidence. Data is a big-endian
 /// `u64` block height followed by a big-endian `u32` entry index.
 pub const QUERY_PROOF_PATH: &str = "/thunderbolt/v2/proof";
+/// Canonical query path for whole globally contiguous executed blocks. Data is
+/// start height, predecessor app hash, exact block count, then byte cap.
+pub const QUERY_EXECUTION_RANGE_PATH: &str = "/thunderbolt/v2/execution-range";
+/// Canonical query path for the immutable first location of a channel entry.
+/// Data is channel, entry hash, inclusive height, then the app hash at that height.
+pub const QUERY_ENTRY_LOCATION_PATH: &str = "/thunderbolt/v2/entry-location";
 
 /// Maximum canonical JSON bytes accepted for one signed proposal.
 pub const MAX_TRANSACTION_BYTES: usize = MAX_SIGNED_PROPOSAL_JSON_BYTES;
@@ -89,6 +101,9 @@ pub const MAX_BLOCK_TRANSACTION_BYTES: usize = 24 * 1024 * 1024;
 pub const MAX_QUERY_REQUEST_BYTES: usize = 128;
 /// Maximum serialized query value returned by this adapter.
 pub const MAX_QUERY_RESPONSE_BYTES: usize = 24 * 1024 * 1024;
+
+const _: () = assert!(MAX_BLOCK_RANGE_BLOCKS == MAX_EXECUTION_RANGE_BLOCKS);
+const _: () = assert!(MAX_BLOCK_RANGE_ENCODED_BYTES == MAX_EXECUTION_RANGE_ENCODED_BYTES as usize);
 /// Reserved JSON field and index overhead outside hex-encoded retained state.
 pub const SNAPSHOT_QUERY_JSON_METADATA_ALLOWANCE_BYTES: usize = 2 * 1024 * 1024;
 /// Maximum misbehavior records accepted in one consensus request.
@@ -1063,6 +1078,80 @@ where
                 };
                 (encode_query_value(&value)?, height)
             }
+            QUERY_EXECUTION_RANGE_PATH => {
+                if request.prove {
+                    return Err(AbciAdapterError::InvalidRequest(
+                        "execution range does not produce CometBFT ProofOps",
+                    ));
+                }
+                let rpc_request = parse_execution_range_request(self.ledger_chain_id(), request.data.as_ref())?;
+                let app_request = BlockRangeRequestV2::new(
+                    rpc_request.cursor().next_height(),
+                    rpc_request.cursor().expected_previous_app_hash().clone(),
+                    rpc_request.block_count(),
+                    usize::try_from(rpc_request.max_encoded_bytes())
+                        .map_err(|_| AbciAdapterError::InvalidRequest("range byte cap exceeds usize"))?,
+                )?;
+                let through_height = rpc_request
+                    .cursor()
+                    .next_height()
+                    .checked_add(u64::from(rpc_request.block_count()).saturating_sub(1))
+                    .ok_or(AbciAdapterError::InvalidRequest("range end height overflows"))?;
+                require_exact_query_height(request.height, through_height)?;
+                let read = self.inner.application.block_range(&app_request)?;
+                let next_cursor = ExecutionRangeCursorV2::new(
+                    self.ledger_chain_id().clone(),
+                    read.next_height(),
+                    read.next_previous_app_hash().clone(),
+                )
+                .map_err(|_| AbciAdapterError::InvalidRequest("range continuation is invalid"))?;
+                let response = ExecutionRangeResponseV2::new(&rpc_request, read.blocks().to_vec(), next_cursor)
+                    .map_err(|_| AbciAdapterError::InvalidRequest("execution range response is invalid"))?;
+                (
+                    encode_rpc_query_value(&RpcResponseV2::ExecutionRange(response))?,
+                    through_height,
+                )
+            }
+            QUERY_ENTRY_LOCATION_PATH => {
+                if request.prove {
+                    return Err(AbciAdapterError::InvalidRequest(
+                        "entry locator does not produce CometBFT ProofOps",
+                    ));
+                }
+                let (channel, entry_hash, through_height, expected_through_app_hash) =
+                    parse_entry_location_key(request.data.as_ref())?;
+                require_exact_query_height(request.height, through_height)?;
+                let rpc_request = EntryLocationRequestV2::new(
+                    self.ledger_chain_id().clone(),
+                    channel.clone(),
+                    entry_hash.clone(),
+                    through_height,
+                    expected_through_app_hash.clone(),
+                )
+                .map_err(|_| AbciAdapterError::InvalidRequest("entry location request is invalid"))?;
+                let read = self.inner.application.first_entry_location_through(
+                    &channel,
+                    &entry_hash,
+                    through_height,
+                    &expected_through_app_hash,
+                )?;
+                if read.through_height() != through_height || read.through_app_hash() != &expected_through_app_hash {
+                    return Err(AbciAdapterError::InvalidRequest(
+                        "entry location checkpoint differs from request",
+                    ));
+                }
+                let location = read
+                    .location()
+                    .map(|location| ExecutionLocationV2::new(location.height(), location.block_index()))
+                    .transpose()
+                    .map_err(|_| AbciAdapterError::InvalidRequest("entry location response is invalid"))?;
+                let response = EntryLocationResponseV2::new(&rpc_request, location)
+                    .map_err(|_| AbciAdapterError::InvalidRequest("entry location response is invalid"))?;
+                (
+                    encode_rpc_query_value(&RpcResponseV2::EntryLocation(response))?,
+                    through_height,
+                )
+            }
             _ => return Err(AbciAdapterError::InvalidRequest("unknown query path")),
         };
         Ok(ResponseQuery {
@@ -1584,6 +1673,16 @@ fn encode_query_value<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     Ok(writer.bytes)
 }
 
+fn encode_rpc_query_value(value: &RpcResponseV2) -> Result<Vec<u8>> {
+    let bytes = value
+        .to_canonical_bytes()
+        .map_err(|_| AbciAdapterError::InvalidRequest("Ledger RPC query response is invalid"))?;
+    if bytes.len() > MAX_QUERY_RESPONSE_BYTES {
+        return Err(AbciAdapterError::InvalidRequest("query response exceeds bound"));
+    }
+    Ok(bytes)
+}
+
 fn require_empty_data(data: &[u8]) -> Result<()> {
     if data.is_empty() {
         Ok(())
@@ -1641,6 +1740,53 @@ fn parse_proof_key(data: &[u8]) -> Result<(u64, usize)> {
     let index =
         usize::try_from(index).map_err(|_| AbciAdapterError::InvalidRequest("proof index exceeds platform size"))?;
     Ok((height, index))
+}
+
+fn parse_execution_range_request(
+    chain_id: &thunderbolt_ledger::LedgerChainIdV2,
+    data: &[u8],
+) -> Result<ExecutionRangeRequestV2> {
+    if data.len() != 46 {
+        return Err(AbciAdapterError::InvalidRequest("execution range key must be 46 bytes"));
+    }
+    let start_height = u64::from_be_bytes(
+        data[0..8]
+            .try_into()
+            .map_err(|_| AbciAdapterError::InvalidRequest("range start height is invalid"))?,
+    );
+    let previous = AppHashV2::from_bytes(parse_array::<32>(&data[8..40], "range predecessor hash is invalid")?)?;
+    let block_count = u16::from_be_bytes(
+        data[40..42]
+            .try_into()
+            .map_err(|_| AbciAdapterError::InvalidRequest("range block cap is invalid"))?,
+    );
+    let max_encoded_bytes = u32::from_be_bytes(
+        data[42..46]
+            .try_into()
+            .map_err(|_| AbciAdapterError::InvalidRequest("range byte cap is invalid"))?,
+    );
+    let cursor = ExecutionRangeCursorV2::new(chain_id.clone(), start_height, previous)
+        .map_err(|_| AbciAdapterError::InvalidRequest("execution range cursor is invalid"))?;
+    ExecutionRangeRequestV2::new(cursor, block_count, max_encoded_bytes)
+        .map_err(|_| AbciAdapterError::InvalidRequest("execution range bounds are invalid"))
+}
+
+fn parse_entry_location_key(data: &[u8]) -> Result<(ChannelContextIdV2, EntryHashV2, u64, AppHashV2)> {
+    if data.len() != 104 {
+        return Err(AbciAdapterError::InvalidRequest("entry location key must be 104 bytes"));
+    }
+    Ok((
+        ChannelContextIdV2::from_bytes(parse_array::<32>(&data[0..32], "entry location channel is invalid")?)?,
+        EntryHashV2::from_bytes(parse_array::<32>(&data[32..64], "entry location hash is invalid")?)?,
+        u64::from_be_bytes(parse_array::<8>(
+            &data[64..72],
+            "entry location head height is invalid",
+        )?),
+        AppHashV2::from_bytes(parse_array::<32>(
+            &data[72..104],
+            "entry location head app hash is invalid",
+        )?)?,
+    ))
 }
 
 fn parse_array<const N: usize>(data: &[u8], label: &'static str) -> Result<[u8; N]> {

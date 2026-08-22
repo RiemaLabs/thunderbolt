@@ -29,9 +29,12 @@ pub use traits::{
     SignedV2ProposalSigner,
 };
 pub use types::{
-    AcknowledgementRecord, ControlRequest, ControlResponse, DurableFinalityCapability, ExecutedEntryEvidenceV2,
-    FinalityDigest, FinalityVerifierProfileId, FinalizedEntryV2, FinalizedRefreshBundleV2, IngestDisposition,
-    LedgerCursor, NodeConfig, NodeStatus, OutboxItem, OutboxStatus, ProcessDisposition, VerifiedRefreshRecordV2,
+    AcknowledgementRecord, ControlRequest, ControlResponse, DurableBlockFinalityCapability, DurableFinalityCapability,
+    EntryOccurrenceKindV2, ExecutedEntryEvidenceV2, FinalityDigest, FinalityVerifierProfileId,
+    FinalizedEntryOccurrenceV2, FinalizedExecutedBlockV2, FinalizedExecutionSegmentV2, LedgerCursor, NodeConfig,
+    NodeStatus, OutboxItem, OutboxStatus, ProcessDisposition, RefreshBlockCommitmentsV2, RuntimeRefreshOutcome,
+    VerifiedEntryOccurrenceV2, VerifiedRefreshRecordV2, VerifiedV2Refresh, MAX_INBOX_RECORD_BYTES,
+    MAX_SCAN_SEGMENT_BYTES,
 };
 
 #[cfg(test)]

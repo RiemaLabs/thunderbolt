@@ -2,11 +2,12 @@ mod common;
 
 use thunderbolt_keystore::CheckpointCasOutcome;
 use thunderbolt_ledger_rpc::{
-    AdmissionStatusV2, AmbiguityTokenV2, ChannelStatusRequestV2, ChannelStatusResponseV2, FinalityStatusV2,
-    HistoryCursorV2, HistoryPageLimitV2, HistoryRequestV2, HistoryResponseV2, RequestLifecycleV2,
-    RequestStatusRequestV2, RequestStatusResponseV2, RollbackFloorCasRequestV2, RollbackFloorCasResponseV2,
-    RollbackFloorCasStatusV2, RpcRequestV2, RpcResponseV2, SnapshotBytesV2, SubmitProposalRequestV2,
-    SubmitProposalResponseV2, TransportAcceptanceIdV2,
+    AdmissionStatusV2, AmbiguityTokenV2, ChannelStatusRequestV2, ChannelStatusResponseV2, EntryLocationRequestV2,
+    ExecutionRangeCursorV2, ExecutionRangeRequestV2, FinalityStatusV2, HistoryCursorV2, HistoryPageLimitV2,
+    HistoryRequestV2, HistoryResponseV2, RequestLifecycleV2, RequestStatusRequestV2, RequestStatusResponseV2,
+    RollbackFloorCasRequestV2, RollbackFloorCasResponseV2, RollbackFloorCasStatusV2, RpcRequestV2, RpcResponseV2,
+    SnapshotBytesV2, SubmitProposalRequestV2, SubmitProposalResponseV2, TransportAcceptanceIdV2,
+    MAX_EXECUTION_RANGE_ENCODED_BYTES,
 };
 
 #[test]
@@ -26,10 +27,22 @@ fn every_request_variant_round_trips_canonically() -> Result<(), Box<dyn std::er
             request_digest,
         )),
         RpcRequestV2::History(HistoryRequestV2::new(
-            channel_context,
-            HistoryCursorV2::new(chain, 1, 0, thunderbolt_ledger::AppHashV2::zero())?,
+            channel_context.clone(),
+            HistoryCursorV2::new(chain.clone(), 1, 0, thunderbolt_ledger::AppHashV2::zero())?,
             HistoryPageLimitV2::new(16)?,
         )),
+        RpcRequestV2::ExecutionRange(ExecutionRangeRequestV2::new(
+            ExecutionRangeCursorV2::new(chain.clone(), 1, thunderbolt_ledger::AppHashV2::zero())?,
+            1,
+            MAX_EXECUTION_RANGE_ENCODED_BYTES,
+        )?),
+        RpcRequestV2::EntryLocation(EntryLocationRequestV2::new(
+            chain,
+            channel_context,
+            common::executed_block(7).entries()[0].metadata().entry_hash().clone(),
+            1,
+            common::executed_block(7).app_hash().clone(),
+        )?),
         RpcRequestV2::RollbackFloorCas(RollbackFloorCasRequestV2::new(common::floor_request(7))),
     ];
 

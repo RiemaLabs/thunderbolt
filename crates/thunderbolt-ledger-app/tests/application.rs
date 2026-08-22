@@ -9,7 +9,8 @@ use common::*;
 use tempfile::TempDir;
 use thunderbolt_ledger::{ActorRoleV2, AppHashV2, EntryHashV2};
 use thunderbolt_ledger_app::{
-    ApplicationError, ApplicationOptions, BlockInputV2, LedgerApplication, APPLICATION_VERSION_V2,
+    ApplicationError, ApplicationOptions, BlockInputV2, BlockRangeRequestV2, LedgerApplication, APPLICATION_VERSION_V2,
+    CURRENT_SCHEMA_VERSION, MAX_BLOCK_RANGE_ENCODED_BYTES,
 };
 use thunderbolt_protocol::v2::{
     ArtifactV2, ChannelEventV2, ExternalVerifierV2, FinalizeVerificationRequestV2, InvoiceVerificationRequestV2,
@@ -814,6 +815,208 @@ fn restart_rejects_snapshot_above_retained_state_byte_budget() -> Result<(), Box
     assert!(matches!(
         reopened.channel(&channel),
         Err(ApplicationError::CorruptData(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn exact_ranges_retain_empty_blocks_and_first_locations_across_restart() -> Result<(), Box<dyn Error>> {
+    let directory = TempDir::new()?;
+    let app = application(&directory)?;
+    let first_proposal = open_proposal(101);
+    let first = app.apply_block(
+        block(1, 1_000, zero_app_hash(), vec![first_proposal.clone()])?,
+        &AcceptAll,
+    )?;
+    let second = app.apply_block(
+        block(2, 1_001, first.block().app_hash().clone(), Vec::new())?,
+        &AcceptAll,
+    )?;
+    let third_proposal = open_proposal(102);
+    let third = app.apply_block(
+        block(
+            3,
+            1_002,
+            second.block().app_hash().clone(),
+            vec![third_proposal.clone()],
+        )?,
+        &AcceptAll,
+    )?;
+    let fourth = app.apply_block(
+        block(4, 1_003, third.block().app_hash().clone(), vec![first_proposal])?,
+        &AcceptAll,
+    )?;
+    assert_eq!(fourth.replayed_entries(), 1);
+
+    let whole = app.block_range(&BlockRangeRequestV2::new(
+        1,
+        AppHashV2::zero(),
+        4,
+        MAX_BLOCK_RANGE_ENCODED_BYTES,
+    )?)?;
+    assert_eq!(
+        whole
+            .blocks()
+            .iter()
+            .map(thunderbolt_ledger::ExecutedBlockV2::height)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
+    assert!(whole.blocks()[1].entries().is_empty());
+    assert_eq!(whole.next_height(), 5);
+    assert_eq!(whole.next_previous_app_hash(), fourth.block().app_hash());
+    assert_eq!(whole.encoded_block_bytes(), serde_json::to_vec(whole.blocks())?.len());
+
+    let tail = app.block_range(&BlockRangeRequestV2::new(
+        2,
+        first.block().app_hash().clone(),
+        3,
+        MAX_BLOCK_RANGE_ENCODED_BYTES,
+    )?)?;
+    assert_eq!(tail.blocks(), &whole.blocks()[1..]);
+    assert!(matches!(
+        app.block_range(&BlockRangeRequestV2::new(
+            2,
+            AppHashV2::from_bytes([0x99; 32])?,
+            1,
+            MAX_BLOCK_RANGE_ENCODED_BYTES,
+        )?),
+        Err(ApplicationError::InvalidRange(_))
+    ));
+    assert!(matches!(
+        app.block_range(&BlockRangeRequestV2::new(1, AppHashV2::zero(), 1, 2)?),
+        Err(ApplicationError::RangeByteLimitTooSmall)
+    ));
+
+    let first_channel = first.block().entries()[0].metadata().channel_context_id();
+    let first_hash = first.block().entries()[0].metadata().entry_hash();
+    let first_location = app.first_entry_location_through(first_channel, first_hash, 4, fourth.block().app_hash())?;
+    assert_eq!(first_location.location().ok_or("first location")?.height(), 1);
+    let third_channel = third.block().entries()[0].metadata().channel_context_id();
+    let third_hash = third.block().entries()[0].metadata().entry_hash();
+    assert!(app
+        .first_entry_location_through(third_channel, first_hash, 4, fourth.block().app_hash())?
+        .location()
+        .is_none());
+    assert!(app
+        .first_entry_location_through(third_channel, third_hash, 2, second.block().app_hash())?
+        .location()
+        .is_none());
+    assert_eq!(
+        app.first_entry_location_through(third_channel, third_hash, 3, third.block().app_hash())?
+            .location()
+            .ok_or("third location")?
+            .height(),
+        3
+    );
+
+    drop(app);
+    let reopened = application(&directory)?;
+    let replayed_location =
+        reopened.first_entry_location_through(first_channel, first_hash, 4, fourth.block().app_hash())?;
+    assert_eq!(replayed_location.location().ok_or("restarted location")?.height(), 1);
+    assert_eq!(
+        reopened
+            .block_range(&BlockRangeRequestV2::new(
+                1,
+                AppHashV2::zero(),
+                4,
+                MAX_BLOCK_RANGE_ENCODED_BYTES,
+            )?)?
+            .blocks(),
+        whole.blocks()
+    );
+    Ok(())
+}
+
+#[test]
+fn populated_v2_database_migrates_first_location_index_atomically() -> Result<(), Box<dyn Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("ledger-app.sqlite3");
+    let app = application(&directory)?;
+    let first = app.apply_block(block(1, 1_000, zero_app_hash(), vec![open_proposal(103)])?, &AcceptAll)?;
+    let channel = first.block().entries()[0].metadata().channel_context_id().clone();
+    let entry_hash = first.block().entries()[0].metadata().entry_hash().clone();
+    let app_hash = first.block().app_hash().clone();
+    drop(app);
+
+    let connection = rusqlite::Connection::open(&path)?;
+    connection.execute_batch("DROP INDEX executed_entries_channel_entry_first_idx")?;
+    connection.execute("DELETE FROM schema_migrations WHERE version = 3", [])?;
+    connection.pragma_update(None, "user_version", 2_i64)?;
+    drop(connection);
+
+    let reopened = application(&directory)?;
+    assert_eq!(
+        reopened
+            .first_entry_location_through(&channel, &entry_hash, 1, &app_hash)?
+            .location()
+            .ok_or("migrated location")?
+            .height(),
+        1
+    );
+    drop(reopened);
+    let connection = rusqlite::Connection::open(&path)?;
+    let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let index_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type = 'index' AND name = 'executed_entries_channel_entry_first_idx'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    assert_eq!(index_count, 1);
+    Ok(())
+}
+
+#[test]
+fn range_and_locator_fail_before_decoding_oversize_or_mismatched_rows() -> Result<(), Box<dyn Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("ledger-app.sqlite3");
+    let app = application(&directory)?;
+    let proposal = open_proposal(104);
+    let first = app.apply_block(block(1, 1_000, zero_app_hash(), vec![proposal.clone()])?, &AcceptAll)?;
+    let second = app.apply_block(
+        block(2, 1_001, first.block().app_hash().clone(), Vec::new())?,
+        &AcceptAll,
+    )?;
+    let third = app.apply_block(
+        block(3, 1_002, second.block().app_hash().clone(), vec![proposal])?,
+        &AcceptAll,
+    )?;
+    let channel = first.block().entries()[0].metadata().channel_context_id().clone();
+    let entry_hash = first.block().entries()[0].metadata().entry_hash().clone();
+    drop(app);
+
+    let connection = rusqlite::Connection::open(&path)?;
+    connection.execute_batch("DROP TRIGGER blocks_no_update")?;
+    connection.execute(
+        "UPDATE blocks SET executed_block_json = ?1 WHERE height = 1",
+        [serde_json::to_vec(third.block())?],
+    )?;
+    drop(connection);
+    let reopened = application(&directory)?;
+    assert!(matches!(
+        reopened.first_entry_location_through(&channel, &entry_hash, 2, second.block().app_hash()),
+        Err(ApplicationError::CorruptData(_))
+    ));
+    drop(reopened);
+
+    let connection = rusqlite::Connection::open(&path)?;
+    connection.execute(
+        "UPDATE blocks SET executed_block_json = zeroblob(?1) WHERE height = 1",
+        [i64::try_from(MAX_BLOCK_RANGE_ENCODED_BYTES + 1)?],
+    )?;
+    drop(connection);
+    let reopened = application(&directory)?;
+    assert!(matches!(
+        reopened.block_range(&BlockRangeRequestV2::new(
+            1,
+            AppHashV2::zero(),
+            1,
+            MAX_BLOCK_RANGE_ENCODED_BYTES,
+        )?),
+        Err(ApplicationError::RangeByteLimitTooSmall)
     ));
     Ok(())
 }

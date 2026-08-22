@@ -2,38 +2,47 @@ use std::error::Error;
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use thunderbolt_committee::{
-    CommittedTransfer, CommitteeMemberEngine, CommitteeVault, LedgerCommitmentVerifier, UpdateAcknowledgement,
-};
+use thunderbolt_committee::{CommitteeMemberEngine, CommitteeVault};
 use thunderbolt_ledger::{ActorSignatureV2, ProposalBodyV2, SignedProposalV2};
 
 use crate::{
-    DurableFinalityCapability, FinalityVerifierProfileId, FinalizedEntryV2, FinalizedRefreshBundleV2, LedgerCursor,
-    NodeError, Result, VerifiedRefreshRecordV2,
+    DurableBlockFinalityCapability, FinalityVerifierProfileId, FinalizedEntryOccurrenceV2, FinalizedExecutedBlockV2,
+    FinalizedExecutionSegmentV2, LedgerCursor, NodeError, Result, RuntimeRefreshOutcome, VerifiedEntryOccurrenceV2,
+    VerifiedV2Refresh,
 };
 
-/// Trusted consensus boundary for an otherwise deterministic execution entry.
+/// Trusted consensus boundary for one complete deterministic executed block.
 ///
-/// Implementations must prove both entries share one finalized ancestry and
-/// bind the receipt to chain id, block positions, exact app hash, entry hashes,
-/// inclusion proofs, and an authenticated trusted header or validator quorum.
-/// The refresh ordinal and previous-refresh hash must come from application
-/// state committed by that app hash. This crate provides no accepting implementation.
+/// Implementations authenticate the exact chain, height, application hash, and
+/// complete executed block through a trusted header or validator quorum. They
+/// never assign refresh ordinals or claim filtered-result completeness. The
+/// service derives its local refresh chain only from whole-block continuity.
+/// This crate provides no accepting production implementation.
 pub trait LedgerFinalityVerifier<R> {
     type Error: Error + Send + Sync + 'static;
     fn profile_id(&self) -> FinalityVerifierProfileId;
-    fn verify_finalized_refresh(
+    fn verify_finalized_block(
         &self,
-        invoice: &FinalizedEntryV2<R>,
-        transfer: &FinalizedEntryV2<R>,
-    ) -> std::result::Result<DurableFinalityCapability, Self::Error>;
+        block: &FinalizedExecutedBlockV2<R>,
+    ) -> std::result::Result<DurableBlockFinalityCapability, Self::Error>;
+    /// Authenticates an exact request-bound first-location lookup at the stated
+    /// finalized `(through_height, through_app_hash)` checkpoint. The returned
+    /// capability must bind every field, the canonical current-entry semantic
+    /// digest, and equality with the canonical entry at the authenticated first
+    /// location. It must distinguish first execution from an exact later
+    /// replay; a locator response alone is not sufficient.
+    fn verify_entry_occurrence(
+        &self,
+        occurrence: &FinalizedEntryOccurrenceV2<R>,
+    ) -> std::result::Result<VerifiedEntryOccurrenceV2, Self::Error>;
     /// Verifies the bounded persisted attestation without consulting mutable
     /// light-client state or requiring the original raw consensus receipt. The
-    /// authenticated attestation must cover every public capability field,
-    /// including both entry hashes/positions, transfer app hash, ordinal, and
-    /// prior-refresh hash; accepting shape-valid JSON alone is unsafe.
-    fn verify_durable_capability(&self, capability: &DurableFinalityCapability)
-        -> std::result::Result<(), Self::Error>;
+    /// authenticated attestation must cover the exact profile, chain, block
+    /// height, and application hash; accepting shape-valid JSON alone is unsafe.
+    fn verify_durable_capability(
+        &self,
+        capability: &DurableBlockFinalityCapability,
+    ) -> std::result::Result<(), Self::Error>;
     fn is_available(&self) -> bool {
         true
     }
@@ -47,16 +56,21 @@ impl<R> LedgerFinalityVerifier<R> for DisabledFinalityVerifier {
     fn profile_id(&self) -> FinalityVerifierProfileId {
         FinalityVerifierProfileId::DISABLED
     }
-    fn verify_finalized_refresh(
+    fn verify_finalized_block(
         &self,
-        _invoice: &FinalizedEntryV2<R>,
-        _transfer: &FinalizedEntryV2<R>,
-    ) -> std::result::Result<DurableFinalityCapability, Self::Error> {
+        _block: &FinalizedExecutedBlockV2<R>,
+    ) -> std::result::Result<DurableBlockFinalityCapability, Self::Error> {
+        Err(NodeError::FinalityUnavailable)
+    }
+    fn verify_entry_occurrence(
+        &self,
+        _occurrence: &FinalizedEntryOccurrenceV2<R>,
+    ) -> std::result::Result<VerifiedEntryOccurrenceV2, Self::Error> {
         Err(NodeError::FinalityUnavailable)
     }
     fn verify_durable_capability(
         &self,
-        _capability: &DurableFinalityCapability,
+        _capability: &DurableBlockFinalityCapability,
     ) -> std::result::Result<(), Self::Error> {
         Err(NodeError::FinalityUnavailable)
     }
@@ -65,15 +79,20 @@ impl<R> LedgerFinalityVerifier<R> for DisabledFinalityVerifier {
     }
 }
 
-/// Transport for exact signed-v2 proposals and externally finalized bundles.
+/// Transport for complete contiguous finalized whole-block pages.
+///
+/// `None` cursor means the exact genesis locator `(height=1, previous_app_hash=0)`.
+/// Returning `None` means no new complete finalized range is available. A
+/// returned segment must come from a request-correlated execution-range page;
+/// locators and filtered history responses are insufficient.
 pub trait SignedV2LedgerClient {
     type Receipt: Clone + Serialize + DeserializeOwned;
     type Error: Error + Send + Sync + 'static;
-    fn fetch_finalized_refreshes(
+    fn fetch_contiguous_finalized_segment(
         &mut self,
-        after: Option<&LedgerCursor>,
-        limit: u16,
-    ) -> std::result::Result<Vec<FinalizedRefreshBundleV2<Self::Receipt>>, Self::Error>;
+        cursor: Option<&LedgerCursor>,
+        max_blocks: u16,
+    ) -> std::result::Result<Option<FinalizedExecutionSegmentV2<Self::Receipt>>, Self::Error>;
     fn submit_signed_proposal(
         &mut self,
         proposal: &SignedProposalV2,
@@ -104,23 +123,20 @@ impl SignedV2ProposalSigner for DisabledProposalSigner {
     }
 }
 
-/// Minimal private one-member engine boundary used by the role service.
+/// Narrow trusted protocol-v2 private-runtime boundary used by the role service.
+///
+/// Implementations must verify the v2 proofs with the mandatory production
+/// profile, bind the exact roster keys to the provisioned descriptor/member,
+/// update exactly one member share crash-safely, and return only public
+/// acknowledgement metadata. This crate ships no accepting implementation
+/// until the reviewed Paillier/core-v2/Committee engine migration lands.
 pub trait CommitteeRuntime {
     fn descriptor(&self) -> &thunderbolt_committee::CommitteeDescriptor;
     fn member_id(&self) -> thunderbolt_committee::CommitteeMemberId;
-    fn apply_refresh(
-        &mut self,
-        bundle: &VerifiedRefreshRecordV2,
-        commitment: CommittedTransfer,
-    ) -> Result<UpdateAcknowledgement>;
-}
-
-struct ExactCommitmentVerifier(CommittedTransfer);
-impl LedgerCommitmentVerifier for ExactCommitmentVerifier {
-    type Receipt = ();
-    type Error = NodeError;
-    fn verify_committed(&self, _receipt: &()) -> std::result::Result<CommittedTransfer, Self::Error> {
-        Ok(self.0)
+    fn validate_verified_refresh(&self, refresh: &VerifiedV2Refresh) -> Result<()>;
+    fn apply_verified_refresh(&mut self, refresh: &VerifiedV2Refresh) -> Result<RuntimeRefreshOutcome>;
+    fn is_v2_available(&self) -> bool {
+        true
     }
 }
 
@@ -134,18 +150,13 @@ where
     fn member_id(&self) -> thunderbolt_committee::CommitteeMemberId {
         self.state().member_id()
     }
-    fn apply_refresh(
-        &mut self,
-        bundle: &VerifiedRefreshRecordV2,
-        commitment: CommittedTransfer,
-    ) -> Result<UpdateAcknowledgement> {
-        self.apply_committed_refresh(
-            &bundle.recipient_share,
-            &bundle.threshold_distribution,
-            &bundle.transfer_proof,
-            &ExactCommitmentVerifier(commitment),
-            &(),
-        )
-        .map_err(|error| NodeError::Runtime(error.to_string()))
+    fn validate_verified_refresh(&self, _refresh: &VerifiedV2Refresh) -> Result<()> {
+        Err(NodeError::V2RuntimeUnavailable)
+    }
+    fn apply_verified_refresh(&mut self, _refresh: &VerifiedV2Refresh) -> Result<RuntimeRefreshOutcome> {
+        Err(NodeError::V2RuntimeUnavailable)
+    }
+    fn is_v2_available(&self) -> bool {
+        false
     }
 }

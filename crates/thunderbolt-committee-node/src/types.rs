@@ -1,25 +1,33 @@
 use bitcoin::Network;
 use serde::{Deserialize, Serialize};
 use thunderbolt_ledger::{
-    AppHashV2, EntryHashV2, EntryMerkleProofV2, ExecutedBlockV2, LedgerChainIdV2, SignedProposalV2,
+    AppHashV2, EntryHashV2, EntryMerkleProofV2, ExecutedBlockCommitmentV2, ExecutedBlockV2, ExecutedEntryV2,
+    LedgerChainIdV2, SignedProposalV2,
 };
-use thunderbolt_wire::{ShareEnvelopeV1, ThresholdEnvelopeV1, TransferEnvelopeV1};
+use thunderbolt_wire::{RecipientShareEnvelopeV2, ThresholdEnvelopeV2, TransferEnvelopeV2};
 
 use crate::{NodeError, Result};
 
 pub const MAX_QUEUE_ROWS: u32 = 100_000;
-pub const MAX_BATCH_ITEMS: u16 = 256;
-pub const MAX_BUNDLE_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_BATCH_ITEMS: u16 = 64;
+/// Maximum aggregate canonical JSON bytes in one transient contiguous scan.
+pub const MAX_SCAN_SEGMENT_BYTES: usize = 23 * 1024 * 1024;
+/// Absolute canonical JSON bound for one compact durable inbox record.
+///
+/// Two maximum-sized signed proposals require at most eight MiB of hex JSON;
+/// commitments, proofs, finality metadata, and framing fit in the remaining
+/// measured headroom.
+pub const MAX_INBOX_RECORD_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_OUTBOX_BYTES: usize = 64 * 1024;
 pub const MAX_FINALITY_ATTESTATION_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct NodeConfig {
-    pub ledger_chain_id: LedgerChainIdV2,
-    pub finality_verifier_profile: FinalityVerifierProfileId,
-    pub max_inbox_rows: u32,
-    pub max_outbox_rows: u32,
-    pub fetch_batch_size: u16,
+    pub(crate) ledger_chain_id: LedgerChainIdV2,
+    pub(crate) finality_verifier_profile: FinalityVerifierProfileId,
+    pub(crate) max_inbox_rows: u32,
+    pub(crate) max_outbox_rows: u32,
+    pub(crate) fetch_batch_size: u16,
 }
 
 impl NodeConfig {
@@ -55,6 +63,26 @@ impl NodeConfig {
                 "mainnet and Testnet4 Committee services are disabled",
             )),
         }
+    }
+
+    pub const fn ledger_chain_id(&self) -> &LedgerChainIdV2 {
+        &self.ledger_chain_id
+    }
+
+    pub const fn finality_verifier_profile(&self) -> FinalityVerifierProfileId {
+        self.finality_verifier_profile
+    }
+
+    pub const fn max_inbox_rows(&self) -> u32 {
+        self.max_inbox_rows
+    }
+
+    pub const fn max_outbox_rows(&self) -> u32 {
+        self.max_outbox_rows
+    }
+
+    pub const fn fetch_batch_size(&self) -> u16 {
+        self.fetch_batch_size
     }
 }
 
@@ -93,110 +121,171 @@ impl FinalityDigest {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(bound(serialize = "R: Serialize", deserialize = "R: Deserialize<'de>"))]
-pub struct FinalizedEntryV2<R> {
+/// One complete finalized executed block in a transient contiguous scan.
+#[derive(Clone, Debug, Serialize)]
+#[serde(bound(serialize = "R: Serialize"), deny_unknown_fields)]
+pub struct FinalizedExecutedBlockV2<R> {
+    /// Full execution value used transiently to prove that no block entry was skipped.
     pub block: ExecutedBlockV2,
-    pub inclusion_proof: EntryMerkleProofV2,
-    pub entry_index: u32,
+    /// Opaque consensus receipt authenticated before the scan cursor advances.
     pub receipt: R,
 }
 
-impl<R> FinalizedEntryV2<R> {
-    pub fn entry(&self) -> Result<&thunderbolt_ledger::ExecutedEntryV2> {
-        self.block
-            .entries()
-            .get(usize::try_from(self.entry_index).map_err(|_| NodeError::NumericRange)?)
-            .ok_or(NodeError::InvalidLedgerArtifact)
-    }
+/// Bounded whole-block page beginning at one exact durable global cursor.
+#[derive(Clone, Debug, Serialize)]
+#[serde(bound(serialize = "R: Serialize"), deny_unknown_fields)]
+pub struct FinalizedExecutionSegmentV2<R> {
+    pub ledger_chain_id: LedgerChainIdV2,
+    pub start_height: u64,
+    pub expected_previous_app_hash: AppHashV2,
+    pub blocks: Vec<FinalizedExecutedBlockV2<R>>,
+    pub occurrences: Vec<FinalizedEntryOccurrenceV2<R>>,
+    pub next_height: u64,
+    pub next_expected_previous_app_hash: AppHashV2,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(bound(serialize = "R: Serialize", deserialize = "R: Deserialize<'de>"))]
-pub struct FinalizedRefreshBundleV2<R> {
-    pub invoice: FinalizedEntryV2<R>,
-    pub transfer: FinalizedEntryV2<R>,
-    pub recipient_share: ShareEnvelopeV1,
-    pub threshold_distribution: ThresholdEnvelopeV1,
-    pub transfer_proof: TransferEnvelopeV1,
+/// Locator classification for one relevant finalized execution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryOccurrenceKindV2 {
+    First,
+    Replay,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ExecutedEntryEvidenceV2 {
-    pub block: ExecutedBlockV2,
-    pub inclusion_proof: EntryMerkleProofV2,
-    pub entry_index: u32,
+/// Transient exact first-location result and its finality receipt.
+#[derive(Clone, Debug, Serialize)]
+#[serde(bound(serialize = "R: Serialize"), deny_unknown_fields)]
+pub struct FinalizedEntryOccurrenceV2<R> {
+    pub kind: EntryOccurrenceKindV2,
+    pub ledger_chain_id: LedgerChainIdV2,
+    pub channel_context_id: thunderbolt_ledger::ChannelContextIdV2,
+    pub entry_hash: EntryHashV2,
+    #[serde(with = "semantic_digest_serde")]
+    pub semantic_digest: [u8; 32],
+    pub observed_height: u64,
+    pub observed_index: u32,
+    pub first_height: u64,
+    pub first_index: u32,
+    pub through_height: u64,
+    pub expected_through_app_hash: AppHashV2,
+    pub receipt: R,
 }
 
-impl<R> From<&FinalizedEntryV2<R>> for ExecutedEntryEvidenceV2 {
-    fn from(value: &FinalizedEntryV2<R>) -> Self {
-        Self {
-            block: value.block.clone(),
-            inclusion_proof: value.inclusion_proof.clone(),
-            entry_index: value.entry_index,
+/// Finality-authenticated first-location capability with no raw receipt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedEntryOccurrenceV2 {
+    pub kind: EntryOccurrenceKindV2,
+    pub ledger_chain_id: LedgerChainIdV2,
+    pub channel_context_id: thunderbolt_ledger::ChannelContextIdV2,
+    pub entry_hash: EntryHashV2,
+    pub semantic_digest: [u8; 32],
+    pub observed_height: u64,
+    pub observed_index: u32,
+    pub first_height: u64,
+    pub first_index: u32,
+    pub through_height: u64,
+    pub expected_through_app_hash: AppHashV2,
+    pub verifier_profile: FinalityVerifierProfileId,
+    pub verifier_digest: FinalityDigest,
+}
+
+/// Deduplicated compact block commitments for one Invoice/Transfer pair.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "layout", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RefreshBlockCommitmentsV2 {
+    /// Both entries are included in one executed block.
+    Shared {
+        /// Exact compact commitment shared by both inclusion proofs.
+        commitment: ExecutedBlockCommitmentV2,
+    },
+    /// Entries are included in distinct executed blocks.
+    Distinct {
+        /// Invoice block commitment.
+        invoice: ExecutedBlockCommitmentV2,
+        /// Transfer block commitment.
+        transfer: ExecutedBlockCommitmentV2,
+    },
+}
+
+impl RefreshBlockCommitmentsV2 {
+    /// Canonicalizes equal commitments into the shared representation.
+    pub fn new(invoice: ExecutedBlockCommitmentV2, transfer: ExecutedBlockCommitmentV2) -> Self {
+        if invoice == transfer {
+            Self::Shared { commitment: invoice }
+        } else {
+            Self::Distinct { invoice, transfer }
         }
     }
+
+    /// Returns the Invoice block commitment.
+    pub const fn invoice(&self) -> &ExecutedBlockCommitmentV2 {
+        match self {
+            Self::Shared { commitment } => commitment,
+            Self::Distinct { invoice, .. } => invoice,
+        }
+    }
+
+    /// Returns the Transfer block commitment.
+    pub const fn transfer(&self) -> &ExecutedBlockCommitmentV2 {
+        match self {
+            Self::Shared { commitment } => commitment,
+            Self::Distinct { transfer, .. } => transfer,
+        }
+    }
+
+    pub(crate) fn validate_canonical(&self) -> Result<()> {
+        self.invoice()
+            .validate()
+            .map_err(|_| NodeError::InvalidLedgerArtifact)?;
+        self.transfer()
+            .validate()
+            .map_err(|_| NodeError::InvalidLedgerArtifact)?;
+        if matches!(self, Self::Distinct { invoice, transfer } if invoice == transfer) {
+            return Err(NodeError::InvalidLedgerArtifact);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutedEntryEvidenceV2 {
+    pub entry: ExecutedEntryV2,
+    pub inclusion_proof: EntryMerkleProofV2,
 }
 
 impl ExecutedEntryEvidenceV2 {
-    pub fn entry(&self) -> Result<&thunderbolt_ledger::ExecutedEntryV2> {
-        self.block
-            .entries()
-            .get(usize::try_from(self.entry_index).map_err(|_| NodeError::NumericRange)?)
-            .ok_or(NodeError::InvalidLedgerArtifact)
+    pub const fn entry(&self) -> &ExecutedEntryV2 {
+        &self.entry
     }
 }
 
-/// Bounded, verifier-authenticated summary of one finalized refresh pair.
-///
-/// `refresh_ordinal` and `previous_refresh_entry_hash` must come from Ledger
-/// application state committed by `transfer_app_hash`, never RPC metadata.
+/// Bounded, verifier-authenticated summary of one complete finalized block.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DurableFinalityCapability {
+#[serde(deny_unknown_fields)]
+pub struct DurableBlockFinalityCapability {
     verifier_profile: FinalityVerifierProfileId,
     ledger_chain_id: LedgerChainIdV2,
-    invoice_height: u64,
-    invoice_index: u32,
-    invoice_entry_hash: EntryHashV2,
-    transfer_height: u64,
-    transfer_index: u32,
-    transfer_entry_hash: EntryHashV2,
-    transfer_app_hash: AppHashV2,
-    refresh_ordinal: u64,
-    previous_refresh_entry_hash: EntryHashV2,
+    block_height: u64,
+    app_hash: AppHashV2,
     verifier_digest: FinalityDigest,
     attestation: Vec<u8>,
 }
 
-impl DurableFinalityCapability {
-    #[allow(clippy::too_many_arguments)]
+impl DurableBlockFinalityCapability {
     pub fn new(
         verifier_profile: FinalityVerifierProfileId,
         ledger_chain_id: LedgerChainIdV2,
-        invoice_height: u64,
-        invoice_index: u32,
-        invoice_entry_hash: EntryHashV2,
-        transfer_height: u64,
-        transfer_index: u32,
-        transfer_entry_hash: EntryHashV2,
-        transfer_app_hash: AppHashV2,
-        refresh_ordinal: u64,
-        previous_refresh_entry_hash: EntryHashV2,
+        block_height: u64,
+        app_hash: AppHashV2,
         verifier_digest: FinalityDigest,
         attestation: Vec<u8>,
     ) -> Result<Self> {
         let capability = Self {
             verifier_profile,
             ledger_chain_id,
-            invoice_height,
-            invoice_index,
-            invoice_entry_hash,
-            transfer_height,
-            transfer_index,
-            transfer_entry_hash,
-            transfer_app_hash,
-            refresh_ordinal,
-            previous_refresh_entry_hash,
+            block_height,
+            app_hash,
             verifier_digest,
             attestation,
         };
@@ -207,12 +296,11 @@ impl DurableFinalityCapability {
         self.verifier_profile
     }
     pub(crate) fn validate_shape(&self) -> Result<()> {
-        if self.invoice_height == 0
-            || self.transfer_height == 0
-            || self.refresh_ordinal == 0
+        if self.block_height == 0
             || self.attestation.is_empty()
             || self.attestation.len() > MAX_FINALITY_ATTESTATION_BYTES
-            || (self.invoice_height, self.invoice_index) >= (self.transfer_height, self.transfer_index)
+            || self.app_hash.is_zero()
+            || self.verifier_digest.as_bytes() == &[0; 32]
         {
             Err(NodeError::FinalityRejected)
         } else {
@@ -222,32 +310,11 @@ impl DurableFinalityCapability {
     pub fn ledger_chain_id(&self) -> &LedgerChainIdV2 {
         &self.ledger_chain_id
     }
-    pub const fn invoice_height(&self) -> u64 {
-        self.invoice_height
+    pub const fn block_height(&self) -> u64 {
+        self.block_height
     }
-    pub const fn invoice_index(&self) -> u32 {
-        self.invoice_index
-    }
-    pub const fn invoice_entry_hash(&self) -> &EntryHashV2 {
-        &self.invoice_entry_hash
-    }
-    pub const fn transfer_height(&self) -> u64 {
-        self.transfer_height
-    }
-    pub const fn transfer_index(&self) -> u32 {
-        self.transfer_index
-    }
-    pub const fn transfer_entry_hash(&self) -> &EntryHashV2 {
-        &self.transfer_entry_hash
-    }
-    pub const fn transfer_app_hash(&self) -> &AppHashV2 {
-        &self.transfer_app_hash
-    }
-    pub const fn refresh_ordinal(&self) -> u64 {
-        self.refresh_ordinal
-    }
-    pub const fn previous_refresh_entry_hash(&self) -> &EntryHashV2 {
-        &self.previous_refresh_entry_hash
+    pub const fn app_hash(&self) -> &AppHashV2 {
+        &self.app_hash
     }
     pub const fn verifier_digest(&self) -> FinalityDigest {
         self.verifier_digest
@@ -257,31 +324,139 @@ impl DurableFinalityCapability {
     }
 }
 
+/// Deduplicated durable finality attestations for a compact refresh pair.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "layout", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DurableFinalityCapability {
+    Shared {
+        block: DurableBlockFinalityCapability,
+    },
+    Distinct {
+        invoice: DurableBlockFinalityCapability,
+        transfer: DurableBlockFinalityCapability,
+    },
+}
+
+impl DurableFinalityCapability {
+    pub fn new(
+        blocks: &RefreshBlockCommitmentsV2,
+        invoice: DurableBlockFinalityCapability,
+        transfer: DurableBlockFinalityCapability,
+    ) -> Result<Self> {
+        invoice.validate_shape()?;
+        transfer.validate_shape()?;
+        let value = match blocks {
+            RefreshBlockCommitmentsV2::Shared { .. } if invoice == transfer => Self::Shared { block: invoice },
+            RefreshBlockCommitmentsV2::Distinct { .. } if invoice != transfer => Self::Distinct { invoice, transfer },
+            _ => return Err(NodeError::FinalityRejected),
+        };
+        Ok(value)
+    }
+
+    pub const fn invoice(&self) -> &DurableBlockFinalityCapability {
+        match self {
+            Self::Shared { block } => block,
+            Self::Distinct { invoice, .. } => invoice,
+        }
+    }
+
+    pub const fn transfer(&self) -> &DurableBlockFinalityCapability {
+        match self {
+            Self::Shared { block } => block,
+            Self::Distinct { transfer, .. } => transfer,
+        }
+    }
+
+    pub(crate) fn validate_canonical(&self, blocks: &RefreshBlockCommitmentsV2) -> Result<()> {
+        self.invoice().validate_shape()?;
+        self.transfer().validate_shape()?;
+        if matches!(
+            (self, blocks),
+            (Self::Shared { .. }, RefreshBlockCommitmentsV2::Shared { .. })
+        ) || matches!((self, blocks), (Self::Distinct { invoice, transfer }, RefreshBlockCommitmentsV2::Distinct { .. }) if invoice != transfer)
+        {
+            Ok(())
+        } else {
+            Err(NodeError::FinalityRejected)
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VerifiedRefreshRecordV2 {
+    pub blocks: RefreshBlockCommitmentsV2,
     pub invoice: ExecutedEntryEvidenceV2,
     pub transfer: ExecutedEntryEvidenceV2,
-    pub recipient_share: ShareEnvelopeV1,
-    pub threshold_distribution: ThresholdEnvelopeV1,
-    pub transfer_proof: TransferEnvelopeV1,
+    #[serde(with = "semantic_digest_serde")]
+    pub invoice_semantic_digest: [u8; 32],
+    #[serde(with = "semantic_digest_serde")]
+    pub transfer_semantic_digest: [u8; 32],
     pub finality: DurableFinalityCapability,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PendingInvoiceRecordV2 {
+    pub commitment: ExecutedBlockCommitmentV2,
+    pub invoice: ExecutedEntryEvidenceV2,
+    #[serde(with = "semantic_digest_serde")]
+    pub semantic_digest: [u8; 32],
+    pub finality: DurableBlockFinalityCapability,
+    pub expires_at_ms: u64,
+}
+
+/// Exact v2 artifacts parsed from authenticated Ledger events and cross-bound
+/// to compact finalized execution evidence.
+///
+/// Fields are private so callers cannot mint this capability from transport
+/// JSON. This capability does not claim proof validity or private-key/roster
+/// compatibility; the trusted runtime must establish both before mutation.
+#[derive(Clone, Debug)]
+pub struct VerifiedV2Refresh {
+    pub(crate) recipient_share: RecipientShareEnvelopeV2,
+    pub(crate) threshold_distribution: ThresholdEnvelopeV2,
+    pub(crate) transfer_proof: TransferEnvelopeV2,
+    pub(crate) commitment: thunderbolt_committee::CommittedTransfer,
+}
+
+impl VerifiedV2Refresh {
+    /// Returns the exact Recipient share proof from the committed Invoice.
+    pub const fn recipient_share(&self) -> &RecipientShareEnvelopeV2 {
+        &self.recipient_share
+    }
+
+    /// Returns the exact Committee threshold distribution from the Invoice.
+    pub const fn threshold_distribution(&self) -> &ThresholdEnvelopeV2 {
+        &self.threshold_distribution
+    }
+
+    /// Returns the exact Transfer proof from the consuming Transfer.
+    pub const fn transfer_proof(&self) -> &TransferEnvelopeV2 {
+        &self.transfer_proof
+    }
+
+    /// Returns the exact finality-bound event identity used for durable replay.
+    pub const fn commitment(&self) -> thunderbolt_committee::CommittedTransfer {
+        self.commitment
+    }
+}
+
+/// Trusted private-runtime result. It contains only public acknowledgement
+/// metadata and an explicit replay disposition, never share or nonce material.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeRefreshOutcome {
+    pub acknowledgement: AcknowledgementRecord,
+    pub replay: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LedgerCursor {
-    pub refresh_ordinal: u64,
-    pub previous_refresh_entry_hash: EntryHashV2,
-    pub block_height: u64,
-    pub block_index: u32,
-    pub app_hash: AppHashV2,
-    pub entry_hash: EntryHashV2,
-    pub finality_digest: FinalityDigest,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IngestDisposition {
-    Accepted,
-    Replay,
+    pub next_height: u64,
+    pub expected_previous_app_hash: AppHashV2,
+    pub processed_refresh_count: u64,
+    pub last_refresh_entry_hash: EntryHashV2,
+    pub last_finality: DurableBlockFinalityCapability,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -329,6 +504,7 @@ pub struct NodeStatus {
     pub cursor: Option<LedgerCursor>,
     pub signing_available: bool,
     pub finality_available: bool,
+    pub v2_runtime_available: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -340,7 +516,55 @@ pub enum ControlRequest {
 
 #[derive(Clone, Debug)]
 pub enum ControlResponse {
-    Status(NodeStatus),
+    Status(Box<NodeStatus>),
     Outbox(Vec<OutboxItem>),
     Retried { id: [u8; 32] },
+}
+
+mod semantic_digest_serde {
+    use serde::{Deserialize as _, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &[u8; 32], serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut encoded = String::with_capacity(64);
+        for byte in value {
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+        serializer.serialize_str(&encoded)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> std::result::Result<[u8; 32], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded = String::deserialize(deserializer)?;
+        if encoded.len() != 64
+            || !encoded
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(serde::de::Error::custom(
+                "semantic digest is not canonical lowercase hex",
+            ));
+        }
+        let mut output = [0_u8; 32];
+        for (index, pair) in encoded.as_bytes().chunks_exact(2).enumerate() {
+            let high = nibble(pair[0]).ok_or_else(|| serde::de::Error::custom("semantic digest hex"))?;
+            let low = nibble(pair[1]).ok_or_else(|| serde::de::Error::custom("semantic digest hex"))?;
+            output[index] = (high << 4) | low;
+        }
+        Ok(output)
+    }
+
+    fn nibble(value: u8) -> Option<u8> {
+        match value {
+            b'0'..=b'9' => Some(value - b'0'),
+            b'a'..=b'f' => Some(value - b'a' + 10),
+            _ => None,
+        }
+    }
 }

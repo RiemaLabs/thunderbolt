@@ -40,14 +40,16 @@ pub use floor_codec::{
 };
 pub use primitives::{FinalityVerifierProfileIdV2, RpcRequestDigestV2, TransportAcceptanceIdV2};
 pub use request::{
-    ChannelStatusRequestV2, HistoryCursorV2, HistoryPageLimitV2, HistoryRequestV2, RequestStatusRequestV2,
-    RpcRequestV2, SubmitProposalRequestV2, MAX_HISTORY_PAGE_ENTRIES,
+    ChannelStatusRequestV2, EntryLocationRequestV2, ExecutionRangeCursorV2, ExecutionRangeRequestV2, HistoryCursorV2,
+    HistoryPageLimitV2, HistoryRequestV2, RequestStatusRequestV2, RpcRequestV2, SubmitProposalRequestV2,
+    MAX_EXECUTION_RANGE_BLOCKS, MAX_EXECUTION_RANGE_ENCODED_BYTES, MAX_HISTORY_PAGE_ENTRIES,
 };
 pub use response::{
     AdmissionRejectionV2, AdmissionStatusV2, ChannelExecutionPositionV2, ChannelStatusResponseV2,
-    CorrelatedRpcResponseV2, ExecutedMetadataRecordV2, ExternalFinalityVerifierV2, FinalityCapabilityError,
-    FinalityStatusV2, FinalizedEntryBundleV2, HistoryResponseV2, RequestLifecycleV2, RequestStatusResponseV2,
-    RpcResponseV2, SubmitProposalResponseV2, VerifiedFinalizedEntryV2,
+    CorrelatedRpcResponseV2, EntryLocationResponseV2, ExecutedMetadataRecordV2, ExecutionLocationV2,
+    ExecutionRangeResponseV2, ExternalFinalityVerifierV2, FinalityCapabilityError, FinalityStatusV2,
+    FinalizedEntryBundleV2, HistoryResponseV2, RequestLifecycleV2, RequestStatusResponseV2, RpcResponseV2,
+    SubmitProposalResponseV2, VerifiedFinalizedEntryV2,
 };
 
 /// Version of the transport-neutral Ledger control-plane contract.

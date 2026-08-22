@@ -23,6 +23,8 @@ Three results are deliberately different:
 | `channel_status` | Ledger chain plus stable `ChannelContextIdV2` | Full channel binding, executed location, entry hash, state hash, canonical snapshot bytes, receipt availability | Materialized state observation |
 | `request_status` | Chain, channel context, participant, and request digest | Unknown, admitted, executed, or a compact finality-carrying entry bundle | Exact idempotency-key lookup |
 | `history` | Channel context, bounded page size, and global execution cursor | Bounded executed-metadata projection plus an optional next cursor | Ordered pagination |
+| `execution_range` | Exact chain/start/predecessor cursor, whole-block count, and byte cap | The exact globally contiguous whole blocks plus the mandatory next cursor | Execution-only range evidence |
+| `entry_location` | Exact chain, channel, entry hash, inclusive height, and app hash | The first execution location through that checkpoint, or `None` | Immutable first-location lookup |
 | `rollback_floor_cas` | The floor crate's exact chain-bound `FloorCasRequest` | Transport acceptance, explicit ambiguity, or `CheckpointCasOutcome` plus receipt | Independent rollback checkpoint |
 
 The actor in a proposal is always the BIP340 key, derived participant identifier, and typed role authenticated by `SignedProposalV2`. The RPC schema has no caller-selected actor name and no field for client-supplied verification evidence.
@@ -48,6 +50,7 @@ The rollback-floor RPC wrapper transports `FloorCasRequest::canonical_bytes()` a
 - Canonical snapshot bytes: 12 MiB
 - Opaque consensus receipt: 1 MiB
 - History page: 64 metadata records
+- Execution range: exactly 1 to 64 whole blocks and at most 23 MiB for the canonical block array
 - Ambiguity token: 16 to 256 bytes
 
 Length checks happen before JSON parsing. Nested Ledger, protocol, wire, floor, and keystore constructors enforce their own tighter bounds.
@@ -66,6 +69,21 @@ retains an explicit metadata reserve below the 4 MiB request ceiling.
 - application hash immediately before that height.
 
 Height one uses the zero application hash. Later heights require a non-zero predecessor application hash. Returned channel metadata is strictly ordered and an optional continuation cursor must move forward. Every page echoes the digest of the complete history request, so even an empty page cannot be replayed across a different chain, channel, cursor, or limit. The cursor, including its predecessor application hash, is an untrusted continuation hint that the server must revalidate against committed state. Completeness still requires a trusted or proven server view. A cursor is not a consensus receipt.
+
+`ExecutionRangeCursorV2` is separate from channel-filtered history. It contains
+the exact Ledger chain, next whole-block height, and predecessor app hash. An
+execution-range response must contain exactly the requested positive block
+count, including empty blocks, and a mandatory cursor immediately after its
+last block. It cannot end early, return an empty page, omit an empty block, or
+end midway through a block. Internal successors recheck height, app-hash, and
+monotonic-time continuity. The complete request digest binds chain, cursor,
+count, and byte cap.
+
+An entry-location request binds an inclusive historical height and the exact
+application hash at that height. A `None` response is therefore not portable
+to another checkpoint. A returned position remains deterministic execution
+evidence only; the client must fetch and match the pointed block and establish
+consensus finality separately.
 
 ## Adapter requirements
 
