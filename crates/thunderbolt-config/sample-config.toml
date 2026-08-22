@@ -1,0 +1,85 @@
+# Bitcoin Thunderbolt v1.0.0-rc.1 regtest configuration.
+#
+# Environment overrides use THUNDERBOLT_ and double underscores between nested
+# fields. Example: THUNDERBOLT_ADMIN__PORT=29736.
+# Bearer-token values never belong in this file. Store them in owner-only files
+# with mode 0400 or 0600.
+
+config_version = 1
+
+[node]
+id = "ledger-01"
+role = "ledger" # holder, committee, or ledger
+listen_address = "127.0.0.1"
+listen_port = 19735
+
+[deployment]
+environment = "development" # development, staging, or production
+network = "regtest"         # regtest, signet, testnet, or mainnet (mainnet is disabled in this RC)
+
+[paths]
+data_dir = "./data"
+log_dir = "./data/logs"
+database_path = "./data/thunderbolt.sqlite3"
+socket_path = "./data/thunderboltd.sock"
+
+[committee]
+members = 3
+signing_threshold = 2
+
+# The operator API is loopback-only by default. To bind it remotely, set
+# remote_http=true and configure both TLS paths below.
+[admin]
+enabled = true
+bind_address = "127.0.0.1"
+port = 19736
+remote_http = false
+
+[admin.tls]
+enabled = false
+# certificate_path = "/etc/bitcoin-thunderbolt/tls/admin.crt"
+# private_key_path = "/etc/bitcoin-thunderbolt/tls/admin.key"
+# client_ca_path = "/etc/bitcoin-thunderbolt/tls/client-ca.crt"
+
+[ledger]
+endpoint = "http://127.0.0.1:19736/"
+auth_token_file = "./data/auth/admin.token"
+
+[limits]
+max_request_header_bytes = 32768
+max_request_body_bytes = 1048576
+max_concurrent_requests = 256
+connect_timeout_ms = 5000
+request_timeout_ms = 30000
+idle_timeout_ms = 60000
+graceful_shutdown_timeout_ms = 30000
+
+[metrics]
+enabled = true
+bind_address = "127.0.0.1"
+port = 19090
+path = "/metrics"
+allow_remote = false
+
+[backup]
+enabled = false
+directory = "./data/backups"
+interval_seconds = 3600
+retention_count = 168
+verify_after_write = true
+
+[auth]
+enabled = true
+
+[[auth.tokens]]
+id = "local-administrator"
+token_file = "./data/auth/admin.token"
+scopes = ["admin"]
+
+# These flags are useful only for isolated development. Validation rejects all
+# of them in production and on mainnet.
+[development]
+allow_insecure_ledger_http = false
+allow_unauthenticated_admin = false
+accept_invalid_tls_certificates = false
+allow_ephemeral_storage = false

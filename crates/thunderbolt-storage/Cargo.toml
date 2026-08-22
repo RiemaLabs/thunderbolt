@@ -1,0 +1,24 @@
+[package]
+name = "thunderbolt-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Durable SQLite persistence for Bitcoin Thunderbolt nodes"
+license.workspace = true
+repository.workspace = true
+keywords = ["bitcoin", "sqlite", "storage", "thunderbolt"]
+categories = ["database", "cryptography::cryptocurrencies"]
+
+[lints]
+workspace = true
+
+[dependencies]
+rusqlite = { version = "0.40.2", features = ["backup", "bundled"] }
+serde = "1.0.217"
+serde_json = "1.0.145"
+sha2 = "0.10.9"
+tempfile = "3.27.0"
+thiserror = "2.0.16"
+thunderbolt-protocol = { path = "../thunderbolt-protocol" }
+
+[dev-dependencies]

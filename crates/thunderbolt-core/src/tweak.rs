@@ -2,7 +2,7 @@ use bitcoin::{
     hashes::{sha256, Hash},
     secp256k1::{ecdh, PublicKey, SecretKey},
 };
-use secp::{Point, Scalar};
+use secp::{MaybeScalar, Point, Scalar};
 
 pub struct Tweaker {
     secret_key_a: Scalar,
@@ -17,13 +17,16 @@ impl Tweaker {
         }
     }
 
-    pub fn compute_shared_secret(&self) -> Scalar {
-        let pubkey = PublicKey::from_slice(&self.p_pubkey_b.serialize_uncompressed()).unwrap();
-        let secret_key = SecretKey::from_slice(&self.secret_key_a.serialize()).unwrap();
+    pub fn compute_shared_secret(&self) -> crate::Result<Scalar> {
+        let pubkey = PublicKey::from_slice(&self.p_pubkey_b.serialize_uncompressed())
+            .map_err(|error| crate::ThunderboltError::InvalidPoint(error.to_string()))?;
+        let secret_key = SecretKey::from_slice(&self.secret_key_a.serialize())
+            .map_err(|error| crate::ThunderboltError::InvalidParameter(error.to_string()))?;
         let secret = ecdh::shared_secret_point(&pubkey, &secret_key);
         let hash = sha256::Hash::hash(&secret).to_byte_array();
-        let scalar = Scalar::from_slice(&hash).unwrap();
-        scalar
+        MaybeScalar::reduce_from(&hash)
+            .not_zero()
+            .map_err(|_| crate::ThunderboltError::CryptographicError("ECDH-derived tweak reduced to zero".to_string()))
     }
 }
 
@@ -42,8 +45,8 @@ mod tests {
             let p_pubkey_b = secret_key_b.base_point_mul();
             let tweaker_ab = Tweaker::new(secret_key_a, p_pubkey_b);
             let tweaker_ba = Tweaker::new(secret_key_b, p_pubkey_a);
-            let shared_secret_ab = tweaker_ab.compute_shared_secret();
-            let shared_secret_ba = tweaker_ba.compute_shared_secret();
+            let shared_secret_ab = tweaker_ab.compute_shared_secret().unwrap();
+            let shared_secret_ba = tweaker_ba.compute_shared_secret().unwrap();
             assert_eq!(shared_secret_ab, shared_secret_ba);
         }
     }

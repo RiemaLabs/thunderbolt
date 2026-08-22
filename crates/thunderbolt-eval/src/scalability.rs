@@ -2,9 +2,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use secp::Scalar;
-use thunderbolt_core::paillier::{
-    add_ciphertexts, decrypt_to_big_number, encrypt_plaintext, random_nonce_in_group, PaillierAccountLocal,
-};
+use thunderbolt_core::paillier::{add_ciphertexts, encrypt_plaintext, random_nonce_in_group, PaillierAccountLocal};
 use thunderbolt_core::zkp::types::{big_number_to_scalar, scalar_to_big_number};
 use thunderbolt_core::zkp::{
     prove_invoice, prove_transfer, verify_anchor_transition, verify_invoice, verify_transfer, InvoiceStatement,
@@ -117,9 +115,9 @@ fn run_transfer_chain(chain_length: usize) -> Result<(Vec<Duration>, Duration)> 
         let holder_bn = scalar_to_big_number(holder_secret);
         let holder_component = encrypt_plaintext(bob_account.public_key(), &holder_bn, &holder_nonce)?;
         let next_holder_ciphertext = add_ciphertexts(bob_account.public_key(), &holder_component, &bob_ciphertext)?;
-        let next_anchor = (current_anchor + delta).into_option().ok_or_else(|| {
-            ThunderboltError::InvalidStateTransition("anchor transition hit infinity".to_string())
-        })?;
+        let next_anchor = (current_anchor + delta)
+            .into_option()
+            .ok_or_else(|| ThunderboltError::InvalidStateTransition("anchor transition hit infinity".to_string()))?;
         let transfer_statement = TransferStatement {
             context: ProofContext::transfer(
                 format!("scalability-ctx-{step}").into_bytes(),
@@ -141,17 +139,12 @@ fn run_transfer_chain(chain_length: usize) -> Result<(Vec<Duration>, Duration)> 
         verify_transfer(&transfer_statement, &transfer_proof)?;
 
         // State update
-        let next_holder_secret = big_number_to_scalar(&decrypt_to_big_number(
-            bob_account.private_key(),
-            &next_holder_ciphertext,
-        )?)?;
-        let refresh_from_committee = big_number_to_scalar(&decrypt_to_big_number(
-            committee_account.private_key(),
-            &committee_ciphertext,
-        )?)?;
-        let next_committee_share = (committee_share - refresh_from_committee).not_zero().map_err(|_| {
-            ThunderboltError::InvalidStateTransition("committee share wrapped to zero".to_string())
-        })?;
+        let next_holder_secret = big_number_to_scalar(&bob_account.decrypt_big_number(&next_holder_ciphertext)?)?;
+        let refresh_from_committee =
+            big_number_to_scalar(&committee_account.decrypt_big_number(&committee_ciphertext)?)?;
+        let next_committee_share = (committee_share - refresh_from_committee)
+            .not_zero()
+            .map_err(|_| ThunderboltError::InvalidStateTransition("committee share wrapped to zero".to_string()))?;
 
         holder_secret = next_holder_secret;
         committee_share = next_committee_share;

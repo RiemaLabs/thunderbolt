@@ -1,0 +1,75 @@
+name: Feature request
+description: Propose a scoped change to Bitcoin Thunderbolt
+title: "feature: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Breaking protocol, wire, storage, trust-model, or role changes need a design discussion before implementation. Do not include confidential deployment details or security findings.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and proposals.
+          required: true
+        - label: This request is not a private security report.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the operator or protocol problem without assuming one implementation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the interface, state transition, or operator workflow you want.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - daemon or CLI
+        - protocol state or wire format
+        - cryptography
+        - Threshold Committee
+        - Thunderbolt Ledger
+        - Bitcoin settlement
+        - storage, backup, or recovery
+        - configuration or operations
+        - documentation or tooling
+        - research benchmark
+    validations:
+      required: true
+
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and trust-model effect
+      description: State which assumptions, invariants, roles, permissions, or failure modes change. Write "none identified" only after checking the threat model.
+    validations:
+      required: true
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and migration
+      description: Cover API, event format, protocol version, database, configuration, and rollout effects that apply.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

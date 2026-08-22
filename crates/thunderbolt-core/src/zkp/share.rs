@@ -3,7 +3,7 @@ use secp::Point;
 
 use crate::paillier::{
     add_ciphertexts, build_response_lhs, combine_response_nonce, compose_ciphertext, exponentiate_ciphertext,
-    random_nonce_in_group, validate_ciphertext, validate_nonce, validate_plaintext,
+    random_nonce_in_group, validate_ciphertext, validate_nonce, validate_plaintext, validate_protocol_encryption_key,
 };
 use crate::zkp::transcript::ProofTranscript;
 use crate::zkp::types::{
@@ -55,6 +55,7 @@ fn share_challenge(
 
 fn validate_statement(statement: &ShareEncryptionStatement) -> Result<()> {
     statement.context.expect_invoice()?;
+    validate_protocol_encryption_key(&statement.recipient_key)?;
     validate_ciphertext(&statement.recipient_key, &statement.ciphertext)?;
     Ok(())
 }

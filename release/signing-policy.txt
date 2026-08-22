@@ -1,0 +1,18 @@
+Bitcoin Thunderbolt release verification
+
+1. Build from a clean, reviewed, signed source commit with package-release.sh.
+2. Rebuild independently and review every artifact named by SHA256SUMS.
+3. Sign only SHA256SUMS with a dedicated maintainer release key:
+
+   scripts/sign-release.sh dist FULL_GPG_SECRET_KEY_FINGERPRINT
+
+4. Verify using the full fingerprint obtained through an independent trusted channel:
+
+   scripts/verify-release.sh dist FULL_GPG_PUBLIC_KEY_FINGERPRINT
+
+5. Publish the archives, SBOMs, SHA256SUMS, and SHA256SUMS.asc as immutable files.
+   Never replace an artifact under an existing version. Issue a new version instead.
+
+The repository does not define which key is trusted. Maintainers must publish and
+rotate the authorized release-key fingerprints through a separately controlled
+project channel before the first public release.

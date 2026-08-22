@@ -1,13 +1,19 @@
 [package]
 name = "thunderbolt-mock"
-version = "0.1.0"
-edition = "2021"
-description = "The mock implementation of Thunderbolt, including integration tests."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Research evaluation and regression harness for Thunderbolt"
+publish = false
+
+[lints]
+workspace = true
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-lazy_static = "1.5.0"
 bitcoin = { version = "0.32.5", features = ["serde"] }
 secp = { version = "0.5.0", features = ["rand", "secp256k1"] }
 musig2 = { version = "0.2.4", features = ["secp256k1"] }
@@ -16,4 +22,5 @@ bitcoin-utils = { path = "../bitcoin-utils" }
 thunderbolt-core = { path = "../thunderbolt-core" }
 
 [dev-dependencies]
+bitcoinconsensus = "0.106.0"
 tokio = { version = "1.42.0", features = ["macros"] }

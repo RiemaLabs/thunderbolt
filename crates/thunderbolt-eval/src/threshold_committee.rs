@@ -4,9 +4,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use secp::Scalar;
-use thunderbolt_core::paillier::{
-    add_ciphertexts, decrypt_to_big_number, encrypt_plaintext, random_nonce_in_group, PaillierAccountLocal,
-};
+use thunderbolt_core::paillier::{add_ciphertexts, encrypt_plaintext, random_nonce_in_group, PaillierAccountLocal};
 use thunderbolt_core::threshold::{
     create_threshold_refresh_distribution, verify_threshold_refresh_distribution, ThresholdCommittee,
 };
@@ -166,11 +164,7 @@ fn splitmix64(mut value: u64) -> u64 {
 
 /// Returns a multiplicative jitter factor in [0.8, 1.2] (±20% variance)
 /// using a deterministic PRNG seeded by committee shape, iteration, and member id.
-fn member_jitter_factor(
-    committee_shape: CommitteeShape,
-    iteration: usize,
-    member_id: u32,
-) -> f64 {
+fn member_jitter_factor(committee_shape: CommitteeShape, iteration: usize, member_id: u32) -> f64 {
     let seed = ((committee_shape.threshold as u64) << 48)
         ^ ((committee_shape.committee_size as u64) << 32)
         ^ ((iteration as u64) << 8)
@@ -296,10 +290,7 @@ fn prepare_committee_shape_iteration(
 
     // Stage 4: Bob decrypt
     let decrypt_start = Instant::now();
-    let next_holder_secret = big_number_to_scalar(&decrypt_to_big_number(
-        bob_account.private_key(),
-        &next_holder_ciphertext,
-    )?)?;
+    let next_holder_secret = big_number_to_scalar(&bob_account.decrypt_big_number(&next_holder_ciphertext)?)?;
     let bob_decrypt = decrypt_start.elapsed();
 
     // Stage 5: apply all refresh shares once; delay behavior is injected later in the benchmark harness.
@@ -314,8 +305,7 @@ fn prepare_committee_shape_iteration(
         let batch_delay = config.baseline_rtt * batch_index as u32;
         let deterministic_base = config.baseline_rtt + batch_delay + local_apply;
         let jitter_factor = member_jitter_factor(committee_shape, iteration, member_id);
-        let base_completion =
-            Duration::from_secs_f64(deterministic_base.as_secs_f64() * jitter_factor);
+        let base_completion = Duration::from_secs_f64(deterministic_base.as_secs_f64() * jitter_factor);
         base_responses.push(MemberResponse {
             member_id,
             base_completion,
@@ -380,8 +370,7 @@ fn stages_from_prepared_iteration(
         ));
     }
 
-    let joint_lock_after =
-        add_scalars(prepared.next_holder_secret, reconstructed_committee_secret)?.base_point_mul();
+    let joint_lock_after = add_scalars(prepared.next_holder_secret, reconstructed_committee_secret)?.base_point_mul();
     if prepared.joint_lock_before != joint_lock_after {
         return Err(ThunderboltError::InvalidStateTransition(
             "joint on-chain lock key changed after threshold committee refresh".to_string(),
@@ -427,8 +416,7 @@ pub fn run_threshold_committee_suite(
         for iteration in 0..config.iterations {
             let prepared = prepare_committee_shape_iteration(*committee_shape, iteration, &config)?;
             for (delayed_members, samples) in point_samples.iter_mut().enumerate() {
-                let stages =
-                    stages_from_prepared_iteration(&prepared, *committee_shape, delayed_members)?;
+                let stages = stages_from_prepared_iteration(&prepared, *committee_shape, delayed_members)?;
                 samples.committee_completion.push(stages.committee_completion);
                 samples.total_latency.push(stages.total);
             }
@@ -533,7 +521,10 @@ impl fmt::Display for ThresholdCommitteeBenchmarkReport {
         writeln!(f, "fanout: {}", self.fanout)?;
         writeln!(f, "response jitter: +/-20%")?;
         writeln!(f)?;
-        writeln!(f, "shape             f/(n-t)   delayed   total avg/p95 (ms)   committee avg/p95 (ms)")?;
+        writeln!(
+            f,
+            "shape             f/(n-t)   delayed   total avg/p95 (ms)   committee avg/p95 (ms)"
+        )?;
         writeln!(
             f,
             "--------------------------------------------------------------------------------"

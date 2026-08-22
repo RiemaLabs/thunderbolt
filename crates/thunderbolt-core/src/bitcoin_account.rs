@@ -26,7 +26,7 @@ impl BitcoinAccount for BitcoinAccountLocal {
     }
 
     fn sign(&self, message: &[u8]) -> Signature {
-        todo!()
+        self.account.sign_message(message)
     }
 }
 
@@ -39,7 +39,11 @@ impl BitcoinAccountLocal {
         self.account.get_pubkey()
     }
 
-    pub fn get_xpriv(&self) -> Xpriv {
-        self.account.xpriv.unwrap()
+    pub fn get_xpriv(&self) -> crate::Result<&Xpriv> {
+        self.account.master_xpriv().ok_or_else(|| {
+            crate::ThunderboltError::InvalidParameter(
+                "legacy PSBT signing requires an account derived from a BIP32 seed".to_string(),
+            )
+        })
     }
 }

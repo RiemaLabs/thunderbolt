@@ -6,7 +6,7 @@ fn preferred_protoc() -> Option<String> {
         .ok()
         .filter(|candidate| PathBuf::from(candidate).exists())
         .or_else(|| {
-            let helper = PathBuf::from("benchmarks/ensure_protoc.sh");
+            let helper = PathBuf::from("research/benchmarks/ensure_protoc.sh");
             if !helper.exists() {
                 return None;
             }
@@ -22,19 +22,19 @@ fn preferred_protoc() -> Option<String> {
             }
         })
         .or_else(|| {
-        std::env::var_os("PATH").and_then(|path| {
-            std::env::split_paths(&path)
-                .map(|dir| dir.join("protoc"))
-                .find(|candidate| candidate.exists())
-                .map(|candidate| candidate.display().to_string())
+            std::env::var_os("PATH").and_then(|path| {
+                std::env::split_paths(&path)
+                    .map(|dir| dir.join("protoc"))
+                    .find(|candidate| candidate.exists())
+                    .map(|candidate| candidate.display().to_string())
+            })
         })
-    })
 }
 
 use thunderbolt_mock::benchmark::{run_single_committee_benchmark, SingleCommitteeBenchmarkConfig};
 use thunderbolt_mock::comparison::{
-    format_groth16_comparison, format_lightning_comparison, format_local_lightning_comparison,
-    format_sp1_comparison, Groth16BenchmarkReport, LocalLightningBenchmarkReport, Sp1BenchmarkReport,
+    format_groth16_comparison, format_lightning_comparison, format_local_lightning_comparison, format_sp1_comparison,
+    Groth16BenchmarkReport, LocalLightningBenchmarkReport, Sp1BenchmarkReport,
 };
 
 fn main() {
@@ -72,7 +72,7 @@ fn main() {
     if with_local_lightning {
         let output = Command::new("python3")
             .args([
-                "benchmarks/local-lightning-benchmark/run_benchmark.py",
+                "research/benchmarks/local-lightning-benchmark/run_benchmark.py",
                 "--iterations",
                 &iterations.to_string(),
                 "--json",
@@ -95,7 +95,7 @@ fn main() {
         println!("{}", format_local_lightning_comparison(&report, &local_ln));
     }
 
-    let sp1_script_dir = PathBuf::from("benchmarks/sp1-transfer-benchmark/script");
+    let sp1_script_dir = PathBuf::from("research/benchmarks/sp1-transfer-benchmark/script");
     if sp1_script_dir.exists() {
         if with_sp1 {
             let mut command = Command::new("cargo");
@@ -153,11 +153,18 @@ fn main() {
         }
     }
 
-    let groth16_script_dir = PathBuf::from("benchmarks/groth16-transfer-benchmark/script");
+    let groth16_script_dir = PathBuf::from("research/benchmarks/groth16-transfer-benchmark/script");
     if groth16_script_dir.exists() {
         if with_groth16 {
             let output = Command::new("cargo")
-                .args(["run", "--release", "--", "--iterations", &iterations.to_string(), "--json"])
+                .args([
+                    "run",
+                    "--release",
+                    "--",
+                    "--iterations",
+                    &iterations.to_string(),
+                    "--json",
+                ])
                 .current_dir(&groth16_script_dir)
                 .output()
                 .expect("failed to launch Groth16 benchmark");

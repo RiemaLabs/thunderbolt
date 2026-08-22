@@ -1,0 +1,30 @@
+[package]
+name = "thunderbolt-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Hardened JSON control plane and reference ledger node for Bitcoin Thunderbolt"
+repository.workspace = true
+
+[dependencies]
+axum = { version = "0.8", features = ["json", "tokio"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+thunderbolt-config = { path = "../thunderbolt-config" }
+thunderbolt-protocol = { path = "../thunderbolt-protocol" }
+thunderbolt-storage = { path = "../thunderbolt-storage" }
+tokio = { version = "1.47", features = ["fs", "net", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tower = { version = "0.5", features = ["limit"] }
+tower-http = { version = "0.6", features = ["limit", "trace"] }
+tracing = "0.1"
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tempfile = "3.20"
+tokio = { version = "1.47", features = ["macros", "process", "rt-multi-thread", "signal", "time"] }
+
+[lints]
+workspace = true

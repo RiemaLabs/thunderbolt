@@ -29,18 +29,10 @@ pub fn is_valid_p2tr_address_str(address: &str, network: Network) -> bool {
     }
     let res = Address::from_str(address);
     match res {
-        Ok(addr) => {
-            let addr = addr.require_network(network);
-            if addr.is_err() {
-                false
-            } else {
-                let addr = addr.unwrap();
-                match addr.address_type() {
-                    Some(AddressType::P2tr) => true,
-                    _ => false,
-                }
-            }
-        }
+        Ok(addr) => addr
+            .require_network(network)
+            .map(|address| address.address_type() == Some(AddressType::P2tr))
+            .unwrap_or(false),
         Err(_) => false,
     }
 }
@@ -52,10 +44,15 @@ pub fn parse_btc_address(address: &str, network: Network) -> Result<Address, Add
 }
 
 pub fn extract_xonly_pubkey_from_p2tr_address(address: &Address) -> Result<XOnlyPublicKey, AddressError> {
+    if address.address_type() != Some(AddressType::P2tr) {
+        return Err(AddressError::Unstandard("address is not P2TR".to_string()));
+    }
     let script_pubkey = address.script_pubkey();
-    let script_pubkey_bytes = script_pubkey.to_bytes();
-    let xonly_pubkey_bytes = script_pubkey_bytes[2..].to_vec();
-    let xonly_pubkey = XOnlyPublicKey::from_slice(&xonly_pubkey_bytes)
+    let script_pubkey_bytes = script_pubkey.as_bytes();
+    let xonly_pubkey_bytes = script_pubkey_bytes
+        .get(2..34)
+        .ok_or_else(|| AddressError::Unstandard("P2TR script has an invalid length".to_string()))?;
+    let xonly_pubkey = XOnlyPublicKey::from_slice(xonly_pubkey_bytes)
         .map_err(|e| AddressError::Unstandard(format!("The address is not a valid taproot address: {:?}", e)))?;
     Ok(xonly_pubkey)
 }
@@ -81,7 +78,7 @@ pub fn generate_p2sh_address(network: Network, public_key: &PublicKey) -> Result
 
 pub fn generate_p2pkh_address(network: Network, public_key: &PublicKey) -> Address {
     Address::p2pkh(
-        &CompressedPublicKey::try_from(*public_key).expect("Could not compress public key"),
+        CompressedPublicKey::try_from(*public_key).expect("Could not compress public key"),
         network,
     )
 }
@@ -98,9 +95,8 @@ pub fn generate_p2tr_address(network: Network, public_key: &XOnlyPublicKey) -> A
         Network::Regtest => KnownHrp::Regtest,
         Network::Signet => KnownHrp::Testnets,
         Network::Testnet4 => KnownHrp::Testnets,
-        _ => unimplemented!("Network not supported"),
     };
-    Address::p2tr(&secp, public_key.clone(), None, hrp)
+    Address::p2tr(&secp, *public_key, None, hrp)
 }
 
 pub fn generate_p2tr_tweaked_address(network: Network, tweaked_key: TweakedPublicKey) -> Address {
@@ -110,7 +106,6 @@ pub fn generate_p2tr_tweaked_address(network: Network, tweaked_key: TweakedPubli
         Network::Regtest => KnownHrp::Regtest,
         Network::Signet => KnownHrp::Testnets,
         Network::Testnet4 => KnownHrp::Testnets,
-        _ => unimplemented!("Network not supported"),
     };
     Address::p2tr_tweaked(tweaked_key, hrp)
 }
@@ -132,7 +127,8 @@ pub fn generate_p2pkh_script_sig_script(sig: &ECDSASignature, public_key: &Publi
 pub fn generate_p2sh_script_sig_script(network: Network, public_key: &PublicKey) -> Result<ScriptBuf, AddressError> {
     let redeem_script = generate_redeem_script(network, public_key)?;
     let redeem_script_bytes: Vec<u8> = redeem_script.to_bytes();
-    let bytes: PushBytesBuf = PushBytesBuf::try_from(redeem_script_bytes).expect("Could not convert to PushBytesBuf");
+    let bytes: PushBytesBuf = PushBytesBuf::try_from(redeem_script_bytes)
+        .map_err(|error| AddressError::Unstandard(format!("redeem script is too large: {error}")))?;
     let script: ScriptBuf = Builder::new().push_slice(bytes).into_script();
     Ok(script)
 }
@@ -145,7 +141,7 @@ pub fn generate_tap_key_origins(
 ) -> BTreeMap<XOnlyPublicKey, (Vec<TapLeafHash>, KeySource)> {
     let mut tap_key_origins = BTreeMap::new();
     let fingerprint = d_xpriv.fingerprint(secp);
-    tap_key_origins.insert(x_pubkey.clone(), (leaf_hashes, (fingerprint, DerivationPath::master())));
+    tap_key_origins.insert(*x_pubkey, (leaf_hashes, (fingerprint, DerivationPath::master())));
     tap_key_origins
 }
 
@@ -157,6 +153,6 @@ pub fn generate_bip32_derivation(
     let mut bip32_derivation = BTreeMap::new();
     let secp_pubkey = &pubkey.inner;
     let fingerprint = d_xpriv.fingerprint(secp);
-    bip32_derivation.insert(secp_pubkey.clone(), (fingerprint, DerivationPath::master()));
+    bip32_derivation.insert(*secp_pubkey, (fingerprint, DerivationPath::master()));
     bip32_derivation
 }

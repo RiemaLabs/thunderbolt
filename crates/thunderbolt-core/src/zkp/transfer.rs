@@ -4,7 +4,7 @@ use secp::{MaybePoint, Point, Scalar};
 use crate::paillier::{
     add_ciphertexts, build_response_lhs, combine_response_nonce, compose_ciphertext, encrypt_plaintext,
     exponentiate_ciphertext, random_nonce_in_group, subtract_ciphertexts, validate_ciphertext, validate_nonce,
-    validate_plaintext,
+    validate_plaintext, validate_protocol_encryption_key,
 };
 use crate::zkp::transcript::ProofTranscript;
 use crate::zkp::types::{
@@ -39,6 +39,7 @@ pub struct TransferProof {
 
 fn validate_statement(statement: &TransferStatement) -> Result<()> {
     statement.context.expect_transfer()?;
+    validate_protocol_encryption_key(&statement.bob_key)?;
     validate_ciphertext(&statement.bob_key, &statement.invoice_ciphertext)?;
     validate_ciphertext(&statement.bob_key, &statement.next_holder_ciphertext)?;
     Ok(())

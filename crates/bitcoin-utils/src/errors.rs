@@ -1,6 +1,7 @@
 use bitcoin::address::{FromScriptError, P2shError, ParseError};
 use bitcoin::key::UncompressedPublicKeyError;
 use bitcoin::psbt::Error as PsbtError;
+use bitcoin::psbt::ExtractTxError;
 use bitcoin::sighash::TaprootError as TaprootSighashError;
 use bitcoin::Txid;
 use bitcoin::{bech32::DecodeError as Bech32DecodeError, secp256k1::Error as Secp256k1Error};
@@ -36,6 +37,9 @@ pub enum ConstructionError {
     #[error("PSBT error: {0}")]
     PsbtError(#[from] PsbtError),
 
+    #[error("could not extract a fully valid transaction from PSBT: {0}")]
+    ExtractTxError(#[source] Box<ExtractTxError>),
+
     #[error("Secp256k1 error: {0}")]
     Secp256k1Error(#[from] Secp256k1Error),
 
@@ -60,6 +64,35 @@ pub enum ConstructionError {
     #[error("invalid transaction `{0:?}`, invalid input count: `{1}` inputs are required but only `{2}` inputs given")]
     InvalidInputCount(Option<Txid>, usize, usize),
 
+    #[error(
+        "invalid transaction `{0:?}`, invalid output count: at least `{1}` outputs are required but only `{2}` given"
+    )]
+    InvalidOutputCount(Option<Txid>, usize, usize),
+
     #[error("invalid transaction `{0:?}`, calldata chunk too large")]
     CalldataChunkTooLarge(Option<Txid>),
+
+    #[error("transaction amount arithmetic overflowed while calculating {0}")]
+    ArithmeticOverflow(&'static str),
+
+    #[error("transaction output of {actual} sat is below the dust threshold of {minimum} sat")]
+    DustOutput { actual: u64, minimum: u64 },
+}
+
+impl From<ExtractTxError> for ConstructionError {
+    fn from(error: ExtractTxError) -> Self {
+        Self::ExtractTxError(Box::new(error))
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum AccountError {
+    #[error("seed is not valid hexadecimal: {0}")]
+    InvalidSeedHex(String),
+
+    #[error("could not derive a Bitcoin master key: {0}")]
+    InvalidMasterKey(String),
+
+    #[error("invalid secp256k1 secret key: {0}")]
+    InvalidSecretKey(#[from] Secp256k1Error),
 }

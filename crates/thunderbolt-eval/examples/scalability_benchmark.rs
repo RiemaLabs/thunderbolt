@@ -5,7 +5,7 @@ use thunderbolt_mock::scalability::{run_scalability_benchmark, ScalabilityBenchm
 
 fn main() {
     let mut chain_lengths = Vec::new();
-    let mut csv_path = PathBuf::from("artifacts/scalability-benchmark.csv");
+    let mut csv_path = PathBuf::from("research/artifacts/scalability-benchmark.csv");
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--lengths" {

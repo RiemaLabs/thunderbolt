@@ -32,8 +32,7 @@ impl TxidExt for Txid {
     fn random() -> Self {
         let mut rng = rand::rng();
         let random_bytes: [u8; 32] = rng.random();
-        let result = Txid::from_slice(&random_bytes).unwrap();
-        result
+        Txid::from_slice(&random_bytes).unwrap()
     }
 }
 
@@ -60,8 +59,7 @@ impl BlockHashExt for BlockHash {
     fn random() -> Self {
         let mut rng = rand::rng();
         let random_bytes: [u8; 32] = rng.random();
-        let result = BlockHash::from_slice(&random_bytes).unwrap();
-        result
+        BlockHash::from_slice(&random_bytes).unwrap()
     }
 }
 

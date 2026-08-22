@@ -1,8 +1,14 @@
 [package]
 name = "bitcoin-utils"
-version = "0.1.0"
-edition = "2021"
-description = "Utility functions and helpers for Bitcoin operations"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bitcoin transaction primitives used by the Thunderbolt protocol"
+
+[lints]
+workspace = true
 
 [dependencies]
 bitcoin = { version = "0.32.5", features = ["rand", "serde"] }
@@ -11,4 +17,4 @@ secp = { version = "0.5.0", features = ["rand", "secp256k1"] }
 thiserror = "2.0.12"
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.140"
-rand = { version = "0.9" }
+rand = { version = "0.9.3" }

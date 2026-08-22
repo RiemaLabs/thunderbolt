@@ -1,0 +1,25 @@
+# Checked against the canonical GitHub tag refs and crates.io on 2026-08-21.
+# Dependabot proposes updates; a maintainer must re-resolve every action tag to
+# its canonical commit before changing a workflow `uses:` line.
+
+[rust]
+toolchain = "1.90.0"
+
+[cargo_tools]
+cargo_audit = "0.22.2"
+cargo_deny = "0.20.2"
+cargo_semver_checks = "0.50.0"
+cargo_cyclonedx = "0.5.9"
+gitleaks = "8.30.0"
+gitleaks_linux_x64_sha256 = "79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e"
+
+[github_actions]
+actions_checkout_version = "v6.1.0"
+actions_checkout_sha = "d23441a48e516b6c34aea4fa41551a30e30af803"
+actions_upload_artifact_version = "v6.0.0"
+actions_upload_artifact_sha = "b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+
+[container_images]
+# Multi-platform manifest digests checked through the Docker Hub API.
+rust_1_90_0_bookworm = "sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f"
+debian_bookworm_slim = "sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241"

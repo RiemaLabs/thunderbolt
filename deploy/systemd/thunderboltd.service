@@ -1,0 +1,51 @@
+[Unit]
+Description=Bitcoin Thunderbolt node daemon
+Documentation=https://github.com/RiemaLabs/thunderbolt-lib/tree/release/1.0/docs
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=thunderbolt
+Group=thunderbolt
+UMask=0077
+ExecStartPre=/usr/local/bin/thunderboltd --config /etc/bitcoin-thunderbolt/thunderbolt.toml check
+ExecStart=/usr/local/bin/thunderboltd --config /etc/bitcoin-thunderbolt/thunderbolt.toml start --log-format json
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=30s
+TimeoutStopSec=45s
+WatchdogSec=0
+LoadCredential=admin.token:/etc/bitcoin-thunderbolt/admin.token
+
+StateDirectory=thunderbolt
+StateDirectoryMode=0700
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

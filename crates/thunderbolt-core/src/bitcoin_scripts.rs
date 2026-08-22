@@ -41,7 +41,7 @@ pub fn gen_prepare_taproot(
     let taproot = TaprootBuilder::new()
         .add_leaf(0, branch_0.clone())
         .expect("Unable to add leaf 0")
-        .finalize(&Secp256k1::new(), UNSPENDABLE_TAPROOT_PUBLIC_KEY.clone())
+        .finalize(&Secp256k1::new(), *UNSPENDABLE_TAPROOT_PUBLIC_KEY)
         .expect("Unable to finalize taproot");
     let control_block_0 = taproot
         .control_block(&(branch_0.clone(), LeafVersion::TapScript))

@@ -1,12 +1,10 @@
+use bitcoin::key::rand::thread_rng;
 use bitcoin::{Network, XOnlyPublicKey};
 use bitcoin_utils::account::AccountInfo;
-use lazy_static::lazy_static;
 use secp::{Point, Scalar};
 
-const COMMITTEE_SECRET: &str = "6148c7cec662b4161a960321c1a92e706bddd70dc05f3b46bde0031f9bc2b046";
-
-lazy_static! {
-    pub static ref COMMITTEE: AccountInfo = AccountInfo::new(Network::Testnet, COMMITTEE_SECRET);
+pub fn committee_account() -> AccountInfo {
+    AccountInfo::from_seed(Network::Regtest, &[0xd4; 32]).expect("fixed mock seed must derive")
 }
 
 pub struct MockCommittee {
@@ -23,12 +21,8 @@ impl MockCommittee {
         }
     }
 
-    // TODO: A deterministic nonce generation.
-    #[allow(unused_variables)]
-    pub fn gen_nonce(&mut self, user_pubkey: XOnlyPublicKey, user_nonce_index: usize) -> (usize, Point) {
-        // let mut rng = rand::thread_rng();
-        // let nonce = Scalar::random(&mut rng);
-        let nonce = Scalar::two();
+    pub fn gen_nonce(&mut self, _user_pubkey: XOnlyPublicKey, _user_nonce_index: usize) -> (usize, Point) {
+        let nonce = Scalar::random(&mut thread_rng());
         self.nonces.push(nonce);
         (self.nonces.len() - 1, nonce.base_point_mul())
     }
@@ -44,7 +38,7 @@ mod tests {
 
     #[test]
     fn test_print_committee_p2tr_address() {
-        let committee = MockCommittee::new(COMMITTEE.clone());
+        let committee = MockCommittee::new(committee_account());
         println!(
             "committee p2tr address: {}",
             committee.account.p2tr_address(Network::Testnet)

@@ -1,0 +1,73 @@
+# Signet service example. Create /etc/bitcoin-thunderbolt/admin.token separately;
+# systemd copies it into a private runtime credential for the daemon.
+config_version = 1
+
+[node]
+id = "ledger-01"
+role = "ledger"
+listen_address = "127.0.0.1"
+listen_port = 19735
+
+[deployment]
+environment = "production"
+network = "signet"
+
+[paths]
+data_dir = "/var/lib/thunderbolt"
+log_dir = "/var/lib/thunderbolt/logs"
+database_path = "/var/lib/thunderbolt/thunderbolt.sqlite3"
+socket_path = "/var/lib/thunderbolt/thunderboltd.sock"
+
+[committee]
+members = 3
+signing_threshold = 2
+
+[admin]
+enabled = true
+bind_address = "127.0.0.1"
+port = 19736
+remote_http = false
+
+[admin.tls]
+enabled = false
+
+[ledger]
+endpoint = "http://127.0.0.1:19736/"
+auth_token_file = "/run/credentials/thunderboltd.service/admin.token"
+
+[limits]
+max_request_header_bytes = 32768
+max_request_body_bytes = 1048576
+max_concurrent_requests = 256
+connect_timeout_ms = 5000
+request_timeout_ms = 30000
+idle_timeout_ms = 60000
+graceful_shutdown_timeout_ms = 30000
+
+[metrics]
+enabled = false
+bind_address = "127.0.0.1"
+port = 19090
+path = "/metrics"
+allow_remote = false
+
+[backup]
+enabled = true
+directory = "/var/lib/thunderbolt/backups"
+interval_seconds = 3600
+retention_count = 168
+verify_after_write = true
+
+[auth]
+enabled = true
+
+[[auth.tokens]]
+id = "local-administrator"
+token_file = "/run/credentials/thunderboltd.service/admin.token"
+scopes = ["admin"]
+
+[development]
+allow_insecure_ledger_http = false
+allow_unauthenticated_admin = false
+accept_invalid_tls_certificates = false
+allow_ephemeral_storage = false

@@ -1,0 +1,63 @@
+name: Research benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Slow research suite to run
+        required: true
+        default: regression
+        type: choice
+        options:
+          - regression
+          - evaluation
+          - lightning
+          - groth16
+          - sp1
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    name: ${{ inputs.suite }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+      - name: Research regression tests
+        if: inputs.suite == 'regression'
+        run: cargo test --locked --release --package thunderbolt-mock
+
+      - name: Evaluation benchmarks
+        if: inputs.suite == 'evaluation'
+        run: ARTIFACT_DIR="$RUNNER_TEMP/research-results" ./research/artifacts/reproduce-eval.sh
+
+      - name: Local Lightning comparison
+        if: inputs.suite == 'lightning'
+        run: python3 research/benchmarks/local-lightning-benchmark/run_benchmark.py --iterations 3 --json > "$RUNNER_TEMP/lightning.json"
+
+      - name: Groth16 comparison
+        if: inputs.suite == 'groth16'
+        working-directory: research/benchmarks/groth16-transfer-benchmark/script
+        run: cargo run --locked --release -- --iterations 1 --json > "$RUNNER_TEMP/groth16.json"
+
+      - name: SP1 comparison
+        if: inputs.suite == 'sp1'
+        run: OUTPUT_PATH="$RUNNER_TEMP/sp1.json" SP1_PROVE_ITERATIONS=1 ./research/artifacts/reproduce-sp1-proof-256bit.sh
+
+      - name: Collect results
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/research-upload"
+          find "$RUNNER_TEMP" -maxdepth 2 -type f \( -name '*.json' -o -name '*.csv' -o -name '*.txt' \) \
+            -exec cp {} "$RUNNER_TEMP/research-upload/" \;
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: always()
+        with:
+          name: research-${{ inputs.suite }}-${{ github.sha }}
+          path: ${{ runner.temp }}/research-upload
+          if-no-files-found: warn
+          retention-days: 14

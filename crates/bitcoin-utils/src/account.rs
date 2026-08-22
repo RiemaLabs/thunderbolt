@@ -1,7 +1,10 @@
+use std::fmt;
 use std::str::FromStr;
 
+use bitcoin::hashes::{sha256, Hash};
 use bitcoin::key::{Parity, TapTweak};
-use bitcoin::secp256k1::SecretKey;
+use bitcoin::secp256k1::schnorr::Signature;
+use bitcoin::secp256k1::{Message, SecretKey};
 use bitcoin::{
     bip32::Xpriv,
     hex::FromHex,
@@ -11,18 +14,30 @@ use bitcoin::{
 };
 use secp::{Point, Scalar};
 
+use crate::errors::AccountError;
 use crate::utils::{generate_p2sh_address, generate_p2tr_address, generate_p2wpkh_address, generate_p2wsh_address};
 
-#[derive(Debug, Clone)]
+/// Legacy in-memory account used by the transaction regression harness.
+/// Production nodes should use a locked keystore or external signer.
+#[derive(Clone)]
 pub struct AccountInfo {
-    pub secp: Secp256k1<All>,
-    pub xpriv: Option<Xpriv>,
+    secp: Secp256k1<All>,
+    xpriv: Option<Xpriv>,
 
     keypair: Keypair,
     tweaked_keypair: Keypair,
 
     public_key: PublicKey,
     x_pubkey: XOnlyPublicKey,
+}
+
+impl fmt::Debug for AccountInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AccountInfo")
+            .field("public_key", &self.public_key)
+            .field("has_master_key", &self.xpriv.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl AccountInfo {
@@ -42,40 +57,61 @@ impl AccountInfo {
         generate_p2wsh_address(network, &self.public_key)
     }
 
-    pub fn new(network: Network, seed: &str) -> Self {
+    pub fn new(network: Network, seed: &str) -> Result<Self, AccountError> {
+        let seed = Vec::from_hex(seed).map_err(|error| AccountError::InvalidSeedHex(error.to_string()))?;
+        Self::from_seed(network, &seed)
+    }
+
+    pub fn from_seed(network: Network, seed: &[u8]) -> Result<Self, AccountError> {
         let secp = Secp256k1::new();
-        let xpriv = Xpriv::new_master(network, &Vec::from_hex(seed).unwrap()).unwrap();
+        let xpriv =
+            Xpriv::new_master(network, seed).map_err(|error| AccountError::InvalidMasterKey(error.to_string()))?;
         let keypair = xpriv.to_keypair(&secp);
-        let tweaked_keypair = keypair.tap_tweak(&secp, None).to_inner();
+        let tweaked_keypair = keypair.tap_tweak(&secp, None).to_keypair();
         let private_key = PrivateKey::new(keypair.secret_key(), network);
         let public_key = PublicKey::from_private_key(&secp, &private_key);
         let (x_pubkey, _) = XOnlyPublicKey::from_keypair(&keypair);
-        AccountInfo {
+        Ok(AccountInfo {
             secp,
             xpriv: Some(xpriv),
             keypair,
             tweaked_keypair,
             public_key,
             x_pubkey,
-        }
+        })
     }
 
-    pub fn new_from_secret_key(secret_key: &str) -> Self {
+    pub fn new_from_secret_key(secret_key: &str) -> Result<Self, AccountError> {
         let secp = Secp256k1::new();
-        let secret_key = SecretKey::from_str(secret_key).unwrap();
+        let secret_key = SecretKey::from_str(secret_key)?;
         let keypair = Keypair::from_secret_key(&secp, &secret_key);
-        let tweaked_keypair = keypair.tap_tweak(&secp, None).to_inner();
+        let tweaked_keypair = keypair.tap_tweak(&secp, None).to_keypair();
         let public_key = keypair.public_key().into();
         let (x_pubkey, _) = XOnlyPublicKey::from_keypair(&keypair);
         let xpriv = None;
-        AccountInfo {
+        Ok(AccountInfo {
             secp,
             xpriv,
             keypair,
             tweaked_keypair,
             public_key,
             x_pubkey,
-        }
+        })
+    }
+
+    /// Signs a domain message after hashing it to the 32-byte BIP340 message
+    /// domain expected by libsecp256k1.
+    pub fn sign_message(&self, message: &[u8]) -> Signature {
+        let digest = sha256::Hash::hash(message).to_byte_array();
+        self.secp.sign_schnorr(&Message::from_digest(digest), &self.keypair)
+    }
+
+    /// Returns the BIP32 master key for the legacy PSBT builder.
+    ///
+    /// New node code should sign through a keystore or external signer instead
+    /// of exporting key material.
+    pub fn master_xpriv(&self) -> Option<&Xpriv> {
+        self.xpriv.as_ref()
     }
 
     pub fn get_tweaked_keypair(&self) -> Keypair {
@@ -133,7 +169,7 @@ mod tests {
     fn test_tweaked_keypair_match_p2tr() {
         for _ in 0..10 {
             let secret = format!("{:064x}", rand::random::<u128>() as u64);
-            let account = AccountInfo::new(Network::Testnet, &secret);
+            let account = AccountInfo::new(Network::Testnet, &secret).unwrap();
             let p2tr_address = account.p2tr_address(Network::Testnet);
             let (tweaked_x_pubkey, _) = account.get_tweaked_x_pubkey();
             assert_eq!(
@@ -148,7 +184,7 @@ mod tests {
     fn test_tweaked_pubkey_match_secret() {
         for _ in 0..10 {
             let secret = format!("{:064x}", rand::random::<u128>() as u64);
-            let account = AccountInfo::new(Network::Testnet, &secret);
+            let account = AccountInfo::new(Network::Testnet, &secret).unwrap();
 
             let tweaked_secret = account.get_tweaked_secret();
             let tweaked_public = account.get_tweaked_p_pubkey();
@@ -161,9 +197,24 @@ mod tests {
         let seed_hex = "000102030405060708090a0b0c0d0e0f";
         let network = Network::Bitcoin;
 
-        let account = AccountInfo::new(network, seed_hex);
+        let account = AccountInfo::new(network, seed_hex).unwrap();
         let p2tr_address = account.p2tr_address(network);
 
         assert!(!p2tr_address.to_string().is_empty());
+    }
+
+    #[test]
+    fn rejects_malformed_seed_without_panicking() {
+        assert!(AccountInfo::new(Network::Testnet, "not hex").is_err());
+    }
+
+    #[test]
+    fn signs_and_verifies_domain_messages() {
+        let account = AccountInfo::new(Network::Testnet, "000102030405060708090a0b0c0d0e0f").unwrap();
+        let digest = sha256::Hash::hash(b"bitcoin-thunderbolt/test").to_byte_array();
+        let message = Message::from_digest(digest);
+        let signature = account.sign_message(b"bitcoin-thunderbolt/test");
+        let (public_key, _) = account.get_x_pubkey();
+        assert!(account.secp.verify_schnorr(&signature, &message, &public_key).is_ok());
     }
 }

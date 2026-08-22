@@ -26,6 +26,7 @@ Session.vim
 ## Build
 /target
 /build
+/dist
 
 ## Temporary files
 *~
@@ -65,10 +66,10 @@ latex/
 .omx/
 .claude/
 autoresearch-results.tsv
-artifacts/threshold-committee-benchmark-new.csv
-benchmarks/sp1-transfer-benchmark/**/target/
-benchmarks/groth16-transfer-benchmark/**/target/
-benchmarks/.tools/
+research/artifacts/threshold-committee-benchmark-new.csv
+research/benchmarks/sp1-transfer-benchmark/**/target/
+research/benchmarks/groth16-transfer-benchmark/**/target/
+research/benchmarks/.tools/
 
 ## LaTeX build artifacts
 *.aux

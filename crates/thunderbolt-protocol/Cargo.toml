@@ -1,0 +1,21 @@
+[package]
+name = "thunderbolt-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Versioned wire and append-only ledger state types for Bitcoin Thunderbolt"
+keywords = ["bitcoin", "protocol", "ledger", "state-machine"]
+categories = ["cryptography::cryptocurrencies", "network-programming"]
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1.0.217", features = ["derive"] }
+sha2 = "0.10.8"
+thiserror = "2.0.12"
+
+[dev-dependencies]
+serde_json = "1.0"

@@ -181,10 +181,7 @@ pub struct Groth16BenchmarkReport {
     pub total: Groth16StageSummary,
 }
 
-pub fn format_groth16_comparison(
-    report: &SingleCommitteeBenchmarkReport,
-    groth16: &Groth16BenchmarkReport,
-) -> String {
+pub fn format_groth16_comparison(report: &SingleCommitteeBenchmarkReport, groth16: &Groth16BenchmarkReport) -> String {
     let ours = secs(report.total_offchain_transfer.average);
     let specialized_prove = secs(report.invoice_prove.average + report.transfer_prove.average);
     let specialized_verify = secs(report.invoice_verify.average + report.transfer_verify.average);

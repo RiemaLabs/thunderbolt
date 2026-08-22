@@ -1,0 +1,89 @@
+name: Bug report
+description: Report reproducible incorrect behavior in a supported RC
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Bitcoin Thunderbolt RC releases are for development and regtest. Mainnet is not approved.
+
+        Do not use this form for a security or privacy issue. Use the private report form on the Security tab. Never include a seed, private key, committee share, credential, wallet, database, or unredacted log.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and the changelog.
+          required: true
+        - label: This report does not contain a suspected security or privacy vulnerability.
+          required: true
+        - label: I removed all secrets and operator-identifying data.
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Output from the daemon or the full source commit.
+      placeholder: v1.0.0-rc.1 or a full commit identifier
+    validations:
+      required: true
+
+  - type: dropdown
+    id: network
+    attributes:
+      label: Bitcoin network
+      options:
+        - regtest
+        - signet
+        - testnet
+        - mainnet, unsupported
+        - not applicable
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, architecture, Rust version, and daemon role.
+      placeholder: macOS arm64, Rust 1.xx, ledger role
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Give the smallest exact sequence that reproduces the problem from a clean checkout.
+      placeholder: |
+        1. Build with ...
+        2. Start ...
+        3. Run ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: Include stable error codes and correlation identifiers when available.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs or artifacts
+      description: Paste only the minimum useful excerpt. Replace every secret value with a complete redaction label.
+      render: text

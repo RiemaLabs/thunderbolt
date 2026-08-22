@@ -1,0 +1,66 @@
+name: Release artifacts
+
+on:
+  pull_request:
+  push:
+    tags:
+      - "v[0-9]*.[0-9]*.[0-9]*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact version, including the v prefix
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify-packaging:
+    name: release archive and checksum gate
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+      - run: cargo install --locked --version 0.5.9 cargo-cyclonedx
+      - name: Build and verify an unsigned candidate
+        shell: bash
+        run: |
+          version="v$(cargo pkgid --package thunderboltd | sed 's/.*#//')"
+          ./scripts/package-release.sh "$version" dist
+          ./scripts/verify-release.sh --checksums-only dist
+          test -s dist/SIGNING-INSTRUCTIONS.txt
+
+  archive:
+    name: archives (${{ matrix.os }})
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+      - run: cargo install --locked --version 0.5.9 cargo-cyclonedx
+      - name: Package without publishing
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            version='${{ inputs.version }}'
+          else
+            version="${GITHUB_REF_NAME}"
+          fi
+          ./scripts/package-release.sh "$version" dist
+          ./scripts/verify-release.sh --checksums-only dist
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: unsigned-release-${{ matrix.os }}-${{ github.sha }}
+          path: dist
+          if-no-files-found: error
+          retention-days: 7

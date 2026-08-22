@@ -1,0 +1,44 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    target-branch: release/1.0
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Los_Angeles
+    open-pull-requests-limit: 10
+    groups:
+      rust-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: cargo
+    directory: /research/benchmarks/groth16-transfer-benchmark
+    target-branch: release/1.0
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directory: /research/benchmarks/sp1-transfer-benchmark
+    target-branch: release/1.0
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: release/1.0
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: docker
+    directory: /
+    target-branch: release/1.0
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5

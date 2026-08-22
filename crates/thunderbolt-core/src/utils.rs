@@ -16,7 +16,9 @@ pub fn schnorr_sign(secret_key: Scalar, nonce: Scalar, e: MaybeScalar) -> Signat
 
 // Faithfully implemented for https://github.com/bitcoin/bips/blob/master/bip-0340.mediawiki#verification
 pub fn schnorr_verify(x_pubkey: [u8; 32], msg: &[u8], signature: Signature) -> bool {
-    let pubkey = Point::lift_x(&x_pubkey).unwrap();
+    let Ok(pubkey) = Point::lift_x(&x_pubkey) else {
+        return false;
+    };
     let (r, s) = signature;
     let e = schnorr_compute_challenge(&pubkey, msg, &r);
     let p_r = s.base_point_mul() - e * pubkey;
@@ -42,7 +44,7 @@ mod tests {
     fn test_schnorr_verify() {
         for _ in 0..10 {
             let secret = format!("{:064x}", rand::random::<u128>() as u64);
-            let account = AccountInfo::new(Network::Testnet, &secret);
+            let account = AccountInfo::new(Network::Testnet, &secret).unwrap();
             let msg = b"Hello, world!";
 
             let pubkey = account.get_tweaked_p_pubkey();
@@ -70,8 +72,8 @@ mod tests {
         for _ in 0..10 {
             let secret0 = format!("{:064x}", rand::random::<u128>() as u64);
             let secret1 = format!("{:064x}", rand::random::<u128>() as u64);
-            let account0 = AccountInfo::new(Network::Testnet, &secret0);
-            let account1 = AccountInfo::new(Network::Testnet, &secret1);
+            let account0 = AccountInfo::new(Network::Testnet, &secret0).unwrap();
+            let account1 = AccountInfo::new(Network::Testnet, &secret1).unwrap();
             let msg = b"Hello, world!";
 
             let pubkey0 = account0.get_tweaked_p_pubkey();
@@ -113,7 +115,7 @@ mod tests {
     fn test_schnorr_verify_capability() {
         for _ in 0..10 {
             let secret = format!("{:064x}", rand::random::<u128>() as u64);
-            let account = AccountInfo::new(Network::Testnet, &secret);
+            let account = AccountInfo::new(Network::Testnet, &secret).unwrap();
             let msg = b"Hello, world!";
 
             let nonce = Scalar::random(&mut thread_rng());
@@ -129,5 +131,14 @@ mod tests {
             );
             assert!(veri_result);
         }
+    }
+
+    #[test]
+    fn schnorr_verify_rejects_malformed_public_key_without_panicking() {
+        assert!(!schnorr_verify(
+            [0xff; 32],
+            b"malformed",
+            ([0u8; 32], MaybeScalar::Zero),
+        ));
     }
 }

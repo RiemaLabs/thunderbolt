@@ -1,23 +1,32 @@
 use crate::{Result, ThunderboltError};
 use libpaillier::{unknown_order::BigNumber, Ciphertext, DecryptionKey, EncryptionKey, Nonce};
 
+/// The current RC uses 2048-bit Paillier moduli. The accepted paper evaluates
+/// 3072-bit Paillier; changing this constant requires a wire-version change.
+pub const PAILLIER_MODULUS_BYTES: usize = 256;
+const MIN_PAILLIER_MODULUS_BITS: usize = PAILLIER_MODULUS_BYTES * 8 - 1;
+const MAX_PAILLIER_MODULUS_BITS: usize = PAILLIER_MODULUS_BYTES * 8;
+
 pub trait PaillierAccount {
-    fn encrypt(&self, secret: &[u8], nonce: Nonce) -> Option<(Ciphertext, Nonce)>;
+    /// Encrypts with fresh CSPRNG-sampled randomness.
+    ///
+    /// Callers do not supply nonces because reusing or predicting a Paillier
+    /// nonce breaks semantic security.
+    fn encrypt(&self, secret: &[u8]) -> Result<(Ciphertext, Nonce)>;
     fn decrypt(&self, ciphertext: &Ciphertext) -> Option<Vec<u8>>;
 }
 
 pub struct PaillierAccountLocal {
-    nonce: Nonce,
     public_key: EncryptionKey,
     private_key: DecryptionKey,
 }
 
 impl PaillierAccount for PaillierAccountLocal {
-    fn encrypt(&self, secret: &[u8], nonce: Nonce) -> Option<(Ciphertext, Nonce)> {
+    fn encrypt(&self, secret: &[u8]) -> Result<(Ciphertext, Nonce)> {
         let plaintext = BigNumber::from_slice(secret);
-        encrypt_plaintext(&self.public_key, &plaintext, &nonce)
-            .ok()
-            .map(|ciphertext| (ciphertext, nonce))
+        let nonce = random_nonce_in_group(&self.public_key);
+        let ciphertext = encrypt_plaintext(&self.public_key, &plaintext, &nonce)?;
+        Ok((ciphertext, nonce))
     }
 
     fn decrypt(&self, ciphertext: &Ciphertext) -> Option<Vec<u8>> {
@@ -30,28 +39,17 @@ impl PaillierAccountLocal {
         let private_key = DecryptionKey::random()?;
         let public_key = EncryptionKey::from(&private_key);
         Some(Self {
-            nonce: Nonce::one(),
             public_key,
             private_key,
         })
-    }
-
-    pub fn current_nonce(&self) -> Nonce {
-        self.nonce.clone()
-    }
-
-    pub fn next_nonce(&mut self) -> Nonce {
-        let current = self.nonce.clone();
-        self.nonce += 1;
-        current
     }
 
     pub fn public_key(&self) -> &EncryptionKey {
         &self.public_key
     }
 
-    pub fn private_key(&self) -> &DecryptionKey {
-        &self.private_key
+    pub fn decrypt_big_number(&self, ciphertext: &Ciphertext) -> Result<BigNumber> {
+        decrypt_to_big_number(&self.private_key, ciphertext)
     }
 }
 
@@ -60,6 +58,21 @@ fn ensure_non_negative(label: &str, value: &BigNumber) -> Result<()> {
         return Err(ThunderboltError::OutOfRange(format!("{label} must be non-negative")));
     }
 
+    Ok(())
+}
+
+/// Rejects attacker-sized keys before any GCD or modular exponentiation.
+pub fn validate_protocol_encryption_key(pk: &EncryptionKey) -> Result<()> {
+    let bits = pk.n().bit_length();
+    if !(MIN_PAILLIER_MODULUS_BITS..=MAX_PAILLIER_MODULUS_BITS).contains(&bits)
+        || pk.to_bytes().len() != PAILLIER_MODULUS_BYTES
+        || pk.n().is_zero()
+        || (pk.n() % BigNumber::from(2u32)).is_zero()
+    {
+        return Err(ThunderboltError::InvalidParameter(format!(
+            "Paillier modulus must use the {MAX_PAILLIER_MODULUS_BITS}-bit RC parameter"
+        )));
+    }
     Ok(())
 }
 
@@ -240,5 +253,14 @@ mod tests {
 
         let invalid_ciphertext = BigNumber::zero();
         assert!(subtract_ciphertexts(&pk, &ciphertext, &invalid_ciphertext).is_err());
+    }
+
+    #[test]
+    fn rejects_wrong_sized_protocol_keys_before_expensive_verification() {
+        let small = EncryptionKey::from_n(BigNumber::from(17u32));
+        assert!(validate_protocol_encryption_key(&small).is_err());
+
+        let oversized = EncryptionKey::from_n((BigNumber::one() << 4096) + BigNumber::one());
+        assert!(validate_protocol_encryption_key(&oversized).is_err());
     }
 }

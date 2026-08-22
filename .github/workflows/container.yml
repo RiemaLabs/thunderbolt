@@ -1,0 +1,37 @@
+name: Container
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "release/**"
+  workflow_dispatch:
+
+concurrency:
+  group: container-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: non-root image build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Build without publishing
+        run: |
+          docker build \
+            --pull \
+            --build-arg VERSION=1.0.0-rc.1 \
+            --build-arg REVISION="${GITHUB_SHA}" \
+            --tag bitcoin-thunderbolt:ci \
+            .
+      - name: Inspect and smoke test
+        run: |
+          test "$(docker image inspect --format '{{.Config.User}}' bitcoin-thunderbolt:ci)" = "10001:10001"
+          docker run --rm bitcoin-thunderbolt:ci --version
+          docker run --rm --entrypoint /usr/local/bin/thunderbolt-cli bitcoin-thunderbolt:ci --version

@@ -2,9 +2,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use secp::Scalar;
-use thunderbolt_core::paillier::{
-    add_ciphertexts, decrypt_to_big_number, encrypt_plaintext, random_nonce_in_group, PaillierAccountLocal,
-};
+use thunderbolt_core::paillier::{add_ciphertexts, encrypt_plaintext, random_nonce_in_group, PaillierAccountLocal};
 use thunderbolt_core::zkp::types::big_number_to_scalar;
 use thunderbolt_core::zkp::{
     prove_invoice, prove_transfer, verify_anchor_transition, verify_invoice, verify_transfer, InvoiceStatement,
@@ -317,17 +315,11 @@ fn run_single_committee_iteration(
     let transfer_verify = transfer_verify_start.elapsed();
 
     let bob_decrypt_start = Instant::now();
-    let next_holder_secret = big_number_to_scalar(&decrypt_to_big_number(
-        bob_account.private_key(),
-        &next_holder_ciphertext,
-    )?)?;
+    let next_holder_secret = big_number_to_scalar(&bob_account.decrypt_big_number(&next_holder_ciphertext)?)?;
     let bob_decrypt = bob_decrypt_start.elapsed();
 
     let committee_update_start = Instant::now();
-    let refresh_from_committee = big_number_to_scalar(&decrypt_to_big_number(
-        committee_account.private_key(),
-        &committee_ciphertext,
-    )?)?;
+    let refresh_from_committee = big_number_to_scalar(&committee_account.decrypt_big_number(&committee_ciphertext)?)?;
     let next_committee_share = sub_scalars(committee_share, refresh_from_committee)?;
     let joint_lock_after = add_scalars(next_holder_secret, next_committee_share)?.base_point_mul();
     if joint_lock_before != joint_lock_after {

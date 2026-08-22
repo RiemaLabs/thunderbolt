@@ -218,8 +218,7 @@ pub fn create_threshold_refresh_distribution(
                 committed_point,
                 ciphertext: ciphertext.clone(),
             };
-            let proof =
-                prove_share_encryption(&statement, &ShareEncryptionWitness { secret: share, nonce })?;
+            let proof = prove_share_encryption(&statement, &ShareEncryptionWitness { secret: share, nonce })?;
             Ok(ThresholdEncryptedShare {
                 member_id: recipient.member_id,
                 encryption_key: recipient.encryption_key.clone(),

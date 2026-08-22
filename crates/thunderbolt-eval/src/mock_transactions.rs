@@ -1,5 +1,5 @@
 use bitcoin::key::Secp256k1;
-use bitcoin::secp256k1::schnorr::Signature;
+use bitcoin::taproot::Signature;
 use bitcoin::{Address, Network, Transaction};
 use bitcoin_utils::types::Utxo;
 use secp::Scalar;
@@ -28,51 +28,48 @@ fn prepare_context(
         sats_per_vbytes,
         fixed_amount,
     };
-    let tx_ctx = TxContext::initialize(&user_account, &committee_account, Network::Testnet, &prepare_info);
+    let tx_ctx = TxContext::initialize(&user_account, &committee_account, Network::Testnet, &prepare_info)
+        .expect("mock transaction fixture must construct");
     let signed_prepare_tx = tx_ctx.get_signed_prepare().clone();
     (tx_ctx, signed_prepare_tx)
 }
 
-fn empty_redeem_signatures(
+fn redeem_signatures(
     tx_ctx: &TxContext,
-    signed_prepare_tx: &Transaction,
     fixed_amount: u64,
+    redeem_psbt: &bitcoin::Psbt,
     committee: &MockCommittee,
     user: &MockUser,
 ) -> (Signature, Signature) {
     let secp = Secp256k1::new();
-    let redeem_psbt = tx_ctx
-        .construct_unsigned_redeem(signed_prepare_tx.compute_txid(), fixed_amount, vec![])
-        .unwrap();
 
     let c_signature = tx_ctx
-        .sign_redeem_script_path(
-            fixed_amount,
-            &redeem_psbt,
-            &secp,
-            &committee.account.get_tweaked_keypair(),
-        )
+        .sign_redeem_script_path(fixed_amount, redeem_psbt, &secp, &committee.account.get_keypair())
         .unwrap();
     let user_signature = tx_ctx
-        .sign_redeem_script_path(fixed_amount, &redeem_psbt, &secp, &user.account.get_tweaked_keypair())
+        .sign_redeem_script_path(fixed_amount, redeem_psbt, &secp, &user.account.get_keypair())
         .unwrap();
 
     (c_signature, user_signature)
 }
 
 fn scalar_from_sig(signature: &Signature) -> Scalar {
-    let bytes = signature.serialize();
+    let bytes = signature.signature.serialize();
     Scalar::from_slice(&bytes[32..64]).unwrap()
 }
 
 fn tweak_signature(signature: &Signature, tweaked_s: Scalar) -> Signature {
     let mut out = [0u8; 64];
-    let bytes = signature.serialize();
+    let bytes = signature.signature.serialize();
     out[0..32].copy_from_slice(&bytes[0..32]);
     out[32..64].copy_from_slice(&tweaked_s.serialize());
-    Signature::from_slice(&out).unwrap()
+    Signature {
+        signature: bitcoin::secp256k1::schnorr::Signature::from_slice(&out).unwrap(),
+        sighash_type: signature.sighash_type,
+    }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn prepare_redeem(
     user: MockUser,
     committee: MockCommittee,
@@ -83,7 +80,6 @@ pub fn prepare_redeem(
     receipient_address: Address,
     fixed_amount: u64,
 ) -> (Transaction, Transaction) {
-    let secp = Secp256k1::new();
     let (tx_ctx, signed_prepare_tx) = prepare_context(
         &user,
         &committee,
@@ -94,22 +90,23 @@ pub fn prepare_redeem(
         fixed_amount,
     );
 
-    let (c_signature, user_signature) =
-        empty_redeem_signatures(&tx_ctx, &signed_prepare_tx, fixed_amount, &committee, &user);
-
-    let outputs = tx_ctx.default_redeem_outputs(fixed_amount, receipient_address, sats_per_vbytes);
+    let outputs = tx_ctx
+        .default_redeem_outputs(fixed_amount, receipient_address, sats_per_vbytes)
+        .expect("mock redeem output must be standard");
     let mut redeem_psbt = tx_ctx
         .construct_unsigned_redeem(signed_prepare_tx.compute_txid(), fixed_amount, outputs)
         .unwrap();
+
+    let (c_signature, user_signature) = redeem_signatures(&tx_ctx, fixed_amount, &redeem_psbt, &committee, &user);
 
     let final_redeem_tx = tx_ctx
         .aggregate_redeem(&mut redeem_psbt, user_signature, c_signature)
         .unwrap();
 
-    let _ = secp;
     (signed_prepare_tx, final_redeem_tx)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn prepare_transfer_reassign_redeem(
     user_a: MockUser,
     user_b: MockUser,
@@ -132,8 +129,14 @@ pub fn prepare_transfer_reassign_redeem(
         fixed_amount,
     );
 
-    let (c_signature, user_signature) =
-        empty_redeem_signatures(&tx_ctx, &signed_prepare_tx, fixed_amount, &committee, &user_a);
+    let outputs = tx_ctx
+        .default_redeem_outputs(fixed_amount, receipient_address, sats_per_vbytes)
+        .expect("mock redeem output must be standard");
+    let mut redeem_psbt = tx_ctx
+        .construct_unsigned_redeem(signed_prepare_tx.compute_txid(), fixed_amount, outputs)
+        .unwrap();
+
+    let (c_signature, user_signature) = redeem_signatures(&tx_ctx, fixed_amount, &redeem_psbt, &committee, &user_a);
 
     let c_sig_aux_scalar = scalar_from_sig(&c_signature);
     let u_sig_aux_scalar = scalar_from_sig(&user_signature);
@@ -163,20 +166,16 @@ pub fn prepare_transfer_reassign_redeem(
         committee.account.get_tweaked_p_pubkey(),
     );
 
-    let tweaked_user_signature = u_sig_aux_scalar + tweaker_ab.compute_shared_secret()
-        - tweaker_ba.compute_shared_secret()
-        + tweaker_bc.compute_shared_secret()
-        - tweaker_cb.compute_shared_secret();
-    let tweaked_c_signature =
-        c_sig_aux_scalar + tweaker_comm_c.compute_shared_secret() - tweaker_c_comm.compute_shared_secret();
+    let tweaked_user_signature = u_sig_aux_scalar + tweaker_ab.compute_shared_secret().expect("mock tweak must derive")
+        - tweaker_ba.compute_shared_secret().expect("mock tweak must derive")
+        + tweaker_bc.compute_shared_secret().expect("mock tweak must derive")
+        - tweaker_cb.compute_shared_secret().expect("mock tweak must derive");
+    let tweaked_c_signature = c_sig_aux_scalar
+        + tweaker_comm_c.compute_shared_secret().expect("mock tweak must derive")
+        - tweaker_c_comm.compute_shared_secret().expect("mock tweak must derive");
 
     let final_tweaked_user_signature = tweak_signature(&user_signature, tweaked_user_signature.unwrap());
     let final_tweaked_c_signature = tweak_signature(&c_signature, tweaked_c_signature.unwrap());
-
-    let outputs = tx_ctx.default_redeem_outputs(fixed_amount, receipient_address, sats_per_vbytes);
-    let mut redeem_psbt = tx_ctx
-        .construct_unsigned_redeem(signed_prepare_tx.compute_txid(), fixed_amount, outputs)
-        .unwrap();
 
     let final_redeem_tx = tx_ctx
         .aggregate_redeem(

@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "release/**"
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  formatting:
+    name: formatting
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      # v6.1.0 resolved from the canonical actions/checkout tag on 2026-08-21.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - run: rustup component add rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy (warnings denied)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - run: rustup component add clippy
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  tests:
+    name: unit and integration tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - run: cargo test --workspace --all-features --locked --lib --bins --tests
+
+  documentation:
+    name: documentation tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - run: cargo test --workspace --all-features --locked --doc

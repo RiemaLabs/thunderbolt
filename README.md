@@ -1,145 +1,182 @@
-# Thunderbolt
+# Bitcoin Thunderbolt
 
-Thunderbolt is an off-chain Bitcoin transfer protocol that uses Sigma-protocol zero-knowledge proofs over Paillier encryption and secp256k1 elliptic curves. Transfers happen off-chain while preserving a fixed on-chain key, with support for both single-committee and threshold-committee configurations.
+Bitcoin Thunderbolt is the open source Rust implementation of Thunderbolt, a protocol for asynchronous off-chain transfer of Bitcoin UTXO ownership. A UTXO is locked once under a fixed public key shared by its current Holder and a Threshold Committee. Ownership can then pass between Holders without moving the UTXO on the Bitcoin Chain.
 
-This repository contains the core Rust implementation and the evaluation benchmarks described in the accompanying CCS 2026 paper.
+The paper "Thunderbolt: Fast Asynchronous Off-Chain Bitcoin Transfers" has been accepted to ACM CCS 2026. The paper was accepted, not this software product.
 
-## Repository Structure
+> Release status: `v1.0.0-rc.1`. Mainnet is disabled. This release includes the cryptographic core, versioned public messages, a deterministic Ledger state machine, durable SQLite storage, and a runnable Ledger daemon with a control CLI. It does not include Holder or committee runtimes, production proof verification, a Byzantine-fault-tolerant Thunderbolt Ledger, metrics, or Bitcoin settlement. Do not use it with real funds.
 
+## Why Thunderbolt
+
+Thunderbolt is built for a different transfer model from the Lightning Network:
+
+- The recipient does not need to be online at the same time as the current Holder.
+- A transfer does not need a routed channel graph or a capacity-sufficient path.
+- The same fixed-denomination UTXO can pass through an unbounded sequence of Holders.
+- The Bitcoin Chain sees channel Open and Finalize transactions, not each ownership transfer.
+
+Bitcoin Thunderbolt follows the proven operator shape of Lightning implementations: a long-running daemon owns state and keys, while a thin client controls it through an authenticated local interface. Thunderbolt does not implement the Lightning BOLT specifications and is not wire-compatible with Lightning nodes.
+
+## Roles
+
+| Role | Responsibility |
+| --- | --- |
+| Holder | Controls the current off-chain ownership secret. The Holder can transfer ownership or request Finalize. |
+| Recipient | Creates an invoice with a fresh secret. After a valid transfer and committee update, the Recipient becomes the next Holder. |
+| Threshold Committee | Holds the complementary share of the fixed lock key. At least `t` of `n` members update their shares and participate in finalization. |
+| Thunderbolt Ledger | Commits authenticated protocol entries in an append-only, per-channel order and makes them available to participants. It holds no Holder or committee secret. |
+| Bitcoin Chain | Acts as the settlement layer for Open and Finalize. It does not process the intermediate ownership transfers. |
+
+The paper assumes that at most `t - 1` committee members are corrupted and that at least `t` honest members remain responsive. The Thunderbolt Ledger must provide append-only persistence, a single order for each channel, and eventual inclusion and retrieval of valid entries.
+
+## Architecture
+
+The runnable RC is a single reference Ledger service:
+
+```text
+operator
+   |
+thunderbolt-cli
+   |
+authenticated loopback HTTP, port 19736 by default
+   |
+thunderboltd, Ledger role
+   |
+durable SQLite event log and channel snapshots
 ```
+
+`thunderbolt-cli` is a stateless operator tool. It reads the configured endpoint and bearer-token file, then calls the daemon's JSON API. `thunderboltd` accepts only `node.role = "ledger"` in this release. Holder and committee participants remain clients; their independent runtimes and the Bitcoin Core connection are target work.
+
+See [Architecture](docs/architecture.md) for component boundaries and the current implementation gap.
+
+## Channel lifecycle
+
+1. Open: the initial Holder and Threshold Committee derive the combined lock key and fund a Taproot UTXO on the Bitcoin Chain.
+2. Invoice: the Recipient publishes a fresh public delta, encrypted copies of the refresh secret, and an Invoice Consistency Proof to the Thunderbolt Ledger.
+3. Transfer: the current Holder verifies the invoice, creates the next ownership credential, updates the public anchor, and publishes a Transfer Consistency Proof.
+4. Committee update: committee members verify the committed entries and update their shares. The Recipient decrypts the credential and becomes the next Holder.
+5. Finalize: the current Holder proves ownership and joins at least `t` committee members to authorize the closing transaction on the Bitcoin Chain.
+
+Steps 2 through 4 may repeat without touching the Bitcoin Chain.
+
+## Build and test the current tree
+
+The repository pins its Rust toolchain in [`rust-toolchain`](rust-toolchain).
+
+```bash
+cargo build --workspace --release
+cargo test --workspace
+```
+
+The existing workspace contains:
+
+```text
 crates/
-  thunderbolt-core/    Core protocol: ZKP (invoice + transfer proofs), Paillier,
-                       threshold VESS, Bitcoin scripts and transactions
-  thunderbolt-eval/    Benchmarks and evaluation harness (published as thunderbolt-mock)
-  bitcoin-utils/       Bitcoin key management and address utilities
-benchmarks/
-  sp1-transfer-benchmark/       SP1 zkVM comparison benchmark (reduced-parameter)
-  groth16-transfer-benchmark/   Groth16 comparison benchmark
-  local-lightning-benchmark/    Local Lightning regtest comparison
-artifacts/             Pre-computed benchmark outputs and reproduction scripts
-CORE_ZKP.md            Detailed mathematical specification of the ZKP construction
+  thunderbolt-core/    Proofs, Paillier operations, threshold primitives,
+                       and Bitcoin transaction building blocks
+  thunderbolt-protocol/ Deterministic Ledger entries and channel reducer
+  thunderbolt-wire/    Bounded, versioned public proof-message encoding
+  thunderbolt-storage/ Durable SQLite Ledger entries and channel snapshots
+  thunderbolt-config/  Strict configuration and local token authorization
+  thunderbolt-node/    Loopback JSON API and Ledger service runtime
+  thunderboltd/        Reference Ledger daemon
+  thunderbolt-cli/     Operator control client
+  bitcoin-utils/       Bitcoin key, address, and account utilities
+  thunderbolt-eval/    Research benchmarks and regression harnesses
+research/benchmarks/   Lightning, Groth16, and SP1 comparison harnesses
+research/artifacts/    Published benchmark outputs and reproduction scripts
 ```
 
-## Prerequisites
+The research harness is useful for regression testing, but it is not a deployable multi-process network.
 
-- **Rust** toolchain (see `rust-toolchain` for the exact version, currently 1.90.0)
-- **Cargo** (comes with Rust)
+## Quickstart
 
-For the SP1 comparison benchmark (RQ3) only:
-- **SP1 toolchain** — install via [sp1up](https://docs.succinct.xyz/docs/getting-started/install):
-  ```bash
-  curl -L https://sp1up.succinct.xyz | bash
-  sp1up
-  ```
-  This installs the SP1 prover toolchain and the `cargo prove` subcommand. The benchmark pins SP1 SDK v6.0.1.
-- **Rust 1.91.1** — the SP1 benchmark workspace uses its own `rust-toolchain` file (1.91.1), separate from the main workspace (1.90.0). Rustup will install it automatically on first build.
-- **protoc** (Protocol Buffers compiler) — automatically bootstrapped by `benchmarks/ensure_protoc.sh` if not already installed.
-- **Docker** — required by the SP1 Gnark prover backend (`native-gnark` feature). Ensure Docker is running before starting the SP1 benchmark.
-
-## Building
+Build the release binaries, then initialize a no-clobber regtest instance:
 
 ```bash
-cargo build --release
+cargo build --workspace --release
+
+./target/release/thunderboltd \
+  --config ./thunderbolt.toml \
+  init --data-dir ./data --node-id thunderbolt-node
+
+./target/release/thunderboltd --config ./thunderbolt.toml check
+./target/release/thunderboltd \
+  --config ./thunderbolt.toml \
+  start --log-format pretty
 ```
 
-To run the test suite:
+The last command stays in the foreground. In another terminal:
 
 ```bash
-cargo test
+./target/release/thunderbolt-cli --config ./thunderbolt.toml health --ready
+./target/release/thunderbolt-cli --config ./thunderbolt.toml getinfo
+./target/release/thunderbolt-cli --config ./thunderbolt.toml config show
+./target/release/thunderbolt-cli --config ./thunderbolt.toml channel list
+./target/release/thunderbolt-cli --config ./thunderbolt.toml database integrity
+./target/release/thunderbolt-cli --config ./thunderbolt.toml database backup
+./target/release/thunderbolt-cli --config ./thunderbolt.toml stop
 ```
 
-## Reproducing the Evaluation
+Event submission fails closed because no production proof verifier is wired into the daemon. For a state-machine demonstration on development regtest only, start with `--development-allow-unverified-demo-events`. The daemon rejects client-supplied verification evidence and marks its own synthetic attestations as unverified demo data.
 
-All paper benchmarks can be reproduced with a single command:
+The container demo uses that explicit development mode:
 
 ```bash
-./artifacts/reproduce-eval.sh
+make regtest-up
+
+docker compose --file deploy/regtest/compose.yaml exec -T thunderboltd \
+  thunderbolt-cli \
+  --config /etc/bitcoin-thunderbolt/thunderbolt.toml \
+  health --ready
+
+make regtest-down
 ```
 
-This runs three benchmarks and writes results to `artifacts/`:
+The container does not run Bitcoin Core, Holder software, or committee nodes. It exercises the Ledger API and storage path only.
 
-| Benchmark | Output | Paper Section | Est. Time |
-|-----------|--------|---------------|-----------|
-| Single-committee microbenchmark (100 iter) | `single-committee-benchmark.txt` | RQ1 (Table 1) | ~2 min |
-| Scalability benchmark (chain lengths 1..1000) | `scalability-benchmark.csv` | RQ1 (scalability) | ~20 min |
-| Threshold-committee benchmark (4 shapes, 3 iter) | `threshold-committee-benchmark.{txt,csv}` | RQ2 (Figure 3) | ~15 min |
+For a hardened service wrapper and signet example, see [`thunderboltd.service`](deploy/systemd/thunderboltd.service), [`thunderbolt.sysusers`](deploy/systemd/thunderbolt.sysusers), and the [systemd configuration](deploy/systemd/thunderbolt.toml). These assets package the same reference Ledger and do not turn it into a production protocol deployment.
 
-Total estimated time: **~40 minutes** on a modern Apple Silicon or comparable x86-64 machine.
+## Security and limitations
 
-### Expected Results
+This RC is a protocol implementation under active hardening. It has not completed an external security audit and is not approved for mainnet funds.
 
-After running `reproduce-eval.sh`, verify:
+Important limits:
 
-- **RQ1 (Table 1):** `single-committee-benchmark.txt` should report a total off-chain transfer average of ~1.0s (within 0.8--1.3s depending on hardware). The nine stage names and relative proportions should match Table 1 in the paper.
-- **RQ1 (scalability):** `scalability-benchmark.csv` should show constant per-transfer latency (~1.0s) across all chain lengths from 1 to 1000, confirming O(1) cost.
-- **RQ2 (Figure 3):** `threshold-committee-benchmark.csv` should show committee communication latency growing roughly linearly with committee size, and degrading gracefully under non-responsive members. Compare with Figure 3 in the paper.
+- Finalization depends on a responsive threshold of committee members.
+- The unilateral-exit and off-chain splitting overlays discussed in the paper are not implemented.
+- Transfers cover ownership of a whole locked UTXO. They are not routed Lightning payments.
+- The base design does not promise transaction unlinkability.
+- A production Ledger must satisfy the paper's persistence, ordering, inclusion, and data-availability guarantees under the stated committee fault bound.
+- Safe operation also depends on durable encrypted state, correct backups, Bitcoin reorganization handling, nonce safety, authenticated transport, and operator discipline. These controls are release gates, not assumptions that may be skipped.
+- The current daemon uses authenticated loopback HTTP. The configured Unix socket path is reserved but not listened on. Remote control, metrics, Holder and committee runtimes, and Bitcoin settlement remain target work.
+- The manual database backup is verified but not encrypted by the daemon. Protect it at the filesystem or volume layer.
+- The RC wire codec enforces a 2048-bit Paillier modulus, while the accepted paper evaluates 3072-bit Paillier. The production parameter and wire version must be reconciled before mainnet approval.
 
-### Running Benchmarks Individually
+Read [Security](docs/security.md), [Threat model](docs/threat-model.md), and [SECURITY.md](SECURITY.md) before testing a deployment. Report suspected vulnerabilities privately. Do not open a public issue for a security report.
 
-**Single-committee microbenchmark:**
+## Documentation
 
-```bash
-cargo run -p thunderbolt-mock --release --example single_committee_benchmark -- 100
-```
+| Document | Purpose |
+| --- | --- |
+| [Architecture](docs/architecture.md) | Roles, processes, trust boundaries, and planned deployment shape |
+| [Operator guide](docs/operator-guide.md) | Safe setup, operation, monitoring, backup, and recovery |
+| [Configuration](docs/configuration.md) | Configuration sources, secure defaults, and target schema |
+| [Security](docs/security.md) | Operational controls and mainnet gates |
+| [Threat model](docs/threat-model.md) | Assets, adversaries, assumptions, guarantees, and exclusions |
+| [API](docs/api.md) | Control API, Ledger events, idempotency, and versioning |
+| [Release process](docs/release-process.md) | RC policy, verification, signing, and promotion gates |
+| [Publication checklist](docs/publication-checklist.md) | Legal, security, history, and repository publication gates |
+| [History sanitization](docs/history-sanitization.md) | Known historical secrets and generated build artifacts that must be removed before publication |
+| [Core ZKP](CORE_ZKP.md) | Mathematical specification of the proof construction |
+| [Research artifacts](research/artifacts/README.md) | Paper benchmark reproduction |
 
-**Scalability benchmark:**
+## Contributing
 
-```bash
-cargo run -p thunderbolt-mock --release --example scalability_benchmark -- --lengths 1,10,50,100,500,1000
-```
+Start with [CONTRIBUTING.md](CONTRIBUTING.md), [GOVERNANCE.md](GOVERNANCE.md), and the [Code of Conduct](CODE_OF_CONDUCT.md). Protocol, cryptography, persistence, and signing changes need focused review and tests for invalid as well as valid inputs.
 
-**Threshold-committee benchmark:**
-
-```bash
-cargo run -p thunderbolt-mock --release --example threshold_committee_benchmark -- 3 \
-  --shapes 3-of-5,11-of-15,34-of-50,67-of-100 --fanout 4
-```
-
-**SP1 comparison (RQ3):**
-
-Requires the SP1 toolchain and Docker (see Prerequisites above).
-
-```bash
-./artifacts/reproduce-sp1-proof-256bit.sh
-```
-
-Or run it manually:
-
-```bash
-cd benchmarks/sp1-transfer-benchmark/script
-PROTOC="$(bash ../../ensure_protoc.sh)" cargo run --release -- \
-  --prove --iterations 5 --paillier-bits 256 --json
-```
-
-Or run the combined comparison example from the repo root:
-
-```bash
-cargo run -p thunderbolt-mock --release --example compare_single_committee_transfer -- 1 \
-  --with-sp1 --sp1-paillier-bits 256
-```
-
-### Tuning Parameters
-
-The reproduction script accepts environment variables:
-
-```bash
-SINGLE_COMMITTEE_ITERATIONS=100 \
-THRESHOLD_COMMITTEE_ITERATIONS=3 \
-THRESHOLD_COMMITTEE_SHAPES=3-of-5,11-of-15,34-of-50,67-of-100 \
-SCALABILITY_LENGTHS=1,10,50,100,500,1000 \
-  ./artifacts/reproduce-eval.sh
-```
-
-## Core ZKP Construction
-
-Thunderbolt uses two NIZK proofs per transfer:
-
-1. **Invoice Consistency Proof** (`prove_invoice` / `verify_invoice`): proves that the public delta point and two Paillier ciphertexts (to Bob and the Committee) all encode the same refresh value.
-
-2. **Transfer Consistency Proof** (`prove_transfer` / `verify_transfer`): proves that Alice's contribution to the next holder ciphertext uses the actual current holder secret consistent with the public anchor.
-
-See [CORE_ZKP.md](CORE_ZKP.md) for the full mathematical specification.
+General questions and bug reports belong in the repository's public issues. Security reports follow [SECURITY.md](SECURITY.md).
 
 ## License
 
-Apache-2.0
+Bitcoin Thunderbolt is licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for project and third-party attributions.

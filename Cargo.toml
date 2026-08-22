@@ -1,7 +1,30 @@
 [workspace]
-default-members = ["crates/*"]
 members = ["crates/*"]
+default-members = [
+    "crates/bitcoin-utils",
+    "crates/thunderbolt-cli",
+    "crates/thunderbolt-config",
+    "crates/thunderbolt-core",
+    "crates/thunderbolt-node",
+    "crates/thunderbolt-protocol",
+    "crates/thunderbolt-storage",
+    "crates/thunderbolt-wire",
+    "crates/thunderboltd",
+]
 resolver = "2"
 
 [workspace.package]
+version = "1.0.0-rc.1"
+edition = "2021"
+rust-version = "1.90"
 license = "Apache-2.0"
+repository = "https://github.com/RiemaLabs/thunderbolt-lib"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+overflow-checks = true
+strip = "symbols"

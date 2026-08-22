@@ -24,16 +24,13 @@ fn parse_committee_shape(value: &str) -> Option<CommitteeShape> {
 fn main() {
     let mut iterations = 5usize;
     let mut committee_shapes = Vec::new();
-    let mut csv_path = PathBuf::from("artifacts/threshold-committee-benchmark.csv");
+    let mut csv_path = PathBuf::from("research/artifacts/threshold-committee-benchmark.csv");
     let mut fanout = 4usize;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--sizes" || arg == "--shapes" || arg == "--committees" {
             let value = args.next().expect("shape flag requires a comma-separated value");
-            committee_shapes = value
-                .split(',')
-                .filter_map(parse_committee_shape)
-                .collect();
+            committee_shapes = value.split(',').filter_map(parse_committee_shape).collect();
         } else if arg == "--csv" {
             csv_path = PathBuf::from(args.next().expect("--csv requires a file path"));
         } else if arg == "--fanout" {

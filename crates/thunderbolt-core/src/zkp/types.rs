@@ -13,6 +13,12 @@ const CURVE_ORDER_BYTES: [u8; 32] = [
 
 const STATISTICAL_SECURITY_PARAMETER: u32 = 128;
 
+/// Domain-separation identifiers are network-controlled inputs in a deployed
+/// verifier. Keeping them small prevents oversized transcripts from becoming
+/// an allocation or hashing denial of service.
+pub const MAX_CONTEXT_ID_BYTES: usize = 128;
+pub const MAX_INVOICE_ID_BYTES: usize = 128;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProofTag {
     Invoice,
@@ -67,6 +73,7 @@ impl ProofContext {
     }
 
     pub fn expect_invoice(&self) -> Result<()> {
+        self.validate_bounds()?;
         if self.step.is_some() {
             return Err(ThunderboltError::InvalidParameter(
                 "invoice proofs must not bind a step index".to_string(),
@@ -77,9 +84,24 @@ impl ProofContext {
     }
 
     pub fn expect_transfer(&self) -> Result<u64> {
+        self.validate_bounds()?;
         self.step.ok_or_else(|| {
             ThunderboltError::InvalidParameter("transfer proofs must bind an explicit step index".to_string())
         })
+    }
+
+    fn validate_bounds(&self) -> Result<()> {
+        if self.ctx_id.is_empty() || self.ctx_id.len() > MAX_CONTEXT_ID_BYTES {
+            return Err(ThunderboltError::InvalidParameter(format!(
+                "context id must contain 1..={MAX_CONTEXT_ID_BYTES} bytes"
+            )));
+        }
+        if self.inv_id.is_empty() || self.inv_id.len() > MAX_INVOICE_ID_BYTES {
+            return Err(ThunderboltError::InvalidParameter(format!(
+                "invoice id must contain 1..={MAX_INVOICE_ID_BYTES} bytes"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -114,6 +136,15 @@ pub struct IntegerResponse {
 impl IntegerResponse {
     pub fn new(integer: BigNumber) -> Result<Self> {
         ensure_non_negative("response z", &integer)?;
+        // z = alpha + c*x, where alpha is sampled below q^2 * 2^128 and
+        // c,x < q. One extra bit safely accommodates the sum while bounding
+        // verifier-controlled modular exponentiation.
+        let max_bits = masking_range().bit_length() + 1;
+        if integer.bit_length() > max_bits {
+            return Err(ThunderboltError::OutOfRange(format!(
+                "response z exceeds the {max_bits}-bit protocol bound"
+            )));
+        }
         let scalar_mod_q = reduce_big_number_mod_curve_order(&integer)?;
         Ok(Self { integer, scalar_mod_q })
     }
@@ -256,5 +287,23 @@ mod tests {
         let value = curve_order().clone() + BigNumber::from(11u32);
         let reduced = reduce_big_number_mod_curve_order(&value).unwrap();
         assert_eq!(reduced, MaybeScalar::Valid(scalar_from_u8(11)));
+    }
+
+    #[test]
+    fn proof_context_rejects_empty_and_oversized_identifiers() {
+        assert!(ProofContext::invoice([], b"invoice").expect_invoice().is_err());
+        assert!(ProofContext::invoice(b"channel", []).expect_invoice().is_err());
+        assert!(ProofContext::invoice(vec![1; MAX_CONTEXT_ID_BYTES + 1], b"invoice")
+            .expect_invoice()
+            .is_err());
+        assert!(ProofContext::transfer(b"channel", 1, vec![1; MAX_INVOICE_ID_BYTES + 1])
+            .expect_transfer()
+            .is_err());
+    }
+
+    #[test]
+    fn integer_response_rejects_excessive_values() {
+        let oversized = BigNumber::one() << (masking_range().bit_length() + 2);
+        assert!(IntegerResponse::new(oversized).is_err());
     }
 }

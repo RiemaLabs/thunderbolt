@@ -1,0 +1,91 @@
+name: Supply chain
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "release/**"
+  schedule:
+    - cron: "17 9 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: supply-chain-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cargo-audit:
+    name: cargo-audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - run: cargo install --locked --version 0.22.2 cargo-audit
+      - run: cargo audit --deny warnings
+
+  cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - run: cargo install --locked --version 0.20.2 cargo-deny
+      - run: cargo deny --locked check advisories bans licenses sources
+
+  gitleaks:
+    name: gitleaks (full history)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+      - name: Install checksum-verified Gitleaks
+        shell: bash
+        run: |
+          archive="$RUNNER_TEMP/gitleaks_8.30.0_linux_x64.tar.gz"
+          install_dir="$RUNNER_TEMP/gitleaks-8.30.0"
+          mkdir "$install_dir"
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --output "$archive" \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.0/gitleaks_8.30.0_linux_x64.tar.gz
+          echo "79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e  $archive" | sha256sum --check --strict
+          tar -xzf "$archive" -C "$install_dir" gitleaks
+          echo "$install_dir" >> "$GITHUB_PATH"
+      - run: gitleaks git --redact=100 --no-banner --verbose .
+
+  semver:
+    name: cargo-semver-checks
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+      - run: cargo install --locked --version 0.50.0 cargo-semver-checks
+      - run: cargo semver-checks --workspace --baseline-rev "${{ github.event.pull_request.base.sha }}"
+
+  sbom:
+    name: CycloneDX SBOM
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - run: cargo install --locked --version 0.5.9 cargo-cyclonedx
+      - run: ./scripts/generate-sbom.sh "$RUNNER_TEMP/bitcoin-thunderbolt-sbom"
+      # v6.0.0 resolved from the canonical actions/upload-artifact tag on 2026-08-21.
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: bitcoin-thunderbolt-sbom-${{ github.sha }}
+          path: ${{ runner.temp }}/bitcoin-thunderbolt-sbom/*.cdx.json
+          if-no-files-found: error
+          retention-days: 14
