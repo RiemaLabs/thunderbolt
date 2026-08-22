@@ -83,10 +83,12 @@ Host and operator
 
 - Mainnet is disabled in `v1.0.0-rc.1`.
 - The runnable server is a single reference Ledger. It does not implement the paper's Byzantine Ledger fault model.
-- The server has no production proof, signature, Bitcoin, or committee verifier. Its optional regtest demo mode inserts synthetic verification attestations.
+- The repository has Invoice and Transfer verification, Holder, one-share committee, encrypted Keystore, and Bitcoin Core libraries. The server does not call them. It has no production Open, signature, Bitcoin, or committee path, and its optional regtest demo mode inserts synthetic verification attestations.
 - Control uses bearer-authenticated loopback HTTP. The reserved Unix socket, remote control, and metrics are not implemented.
 - Manual SQLite backups are verified but not encrypted by the daemon.
 - The RC wire codec fixes Paillier values at 2048 bits, while the accepted paper evaluates 3072-bit Paillier.
+- Open has no reviewed DKG or provisioning ceremony that establishes the distributed committee state and its relationship to `P`.
+- Finalize has no concrete `R_own` proof or audited combined-key Holder plus FROST implementation under `P`.
 - Finalize is committee-dependent in the base protocol.
 - The unilateral-exit overlay described in the paper is not implemented.
 - Off-chain splitting is not implemented. A transfer moves ownership of the whole locked UTXO.

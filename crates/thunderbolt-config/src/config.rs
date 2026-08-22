@@ -100,6 +100,7 @@ impl Config {
         }
 
         validate_node_id(&self.node.id, &mut errors);
+        validate_deployment_id(&self.deployment.id, &mut errors);
         validate_port("node.listen_port", self.node.listen_port, &mut errors);
         if self.admin.enabled {
             validate_port("admin.port", self.admin.port, &mut errors);
@@ -280,6 +281,8 @@ impl Default for NodeConfig {
 pub struct DeploymentConfig {
     pub environment: Environment,
     pub network: Network,
+    /// Stable proof-domain identifier shared by every participant.
+    pub id: String,
 }
 
 impl Default for DeploymentConfig {
@@ -287,6 +290,7 @@ impl Default for DeploymentConfig {
         Self {
             environment: Environment::Development,
             network: Network::Regtest,
+            id: "thunderbolt-regtest-v1".to_owned(),
         }
     }
 }
@@ -316,6 +320,8 @@ impl Default for PathsConfig {
 pub struct CommitteeConfig {
     pub members: u16,
     pub signing_threshold: u16,
+    /// Monotonic roster and share epoch bound into protocol messages.
+    pub epoch: u64,
 }
 
 impl Default for CommitteeConfig {
@@ -323,6 +329,7 @@ impl Default for CommitteeConfig {
         Self {
             members: 3,
             signing_threshold: 2,
+            epoch: 1,
         }
     }
 }
@@ -667,6 +674,17 @@ fn validate_node_id(id: &str, errors: &mut Vec<String>) {
     }
 }
 
+fn validate_deployment_id(id: &str, errors: &mut Vec<String>) {
+    if id.is_empty() || id.len() > 64 {
+        errors.push("deployment.id must contain between 1 and 64 characters".to_owned());
+    } else if !id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        errors.push("deployment.id may contain only ASCII letters, digits, '.', '_' and '-'".to_owned());
+    }
+}
+
 fn validate_port(name: &str, port: u16, errors: &mut Vec<String>) {
     if port == 0 {
         errors.push(format!("{name} must be between 1 and 65535"));
@@ -716,6 +734,9 @@ fn validate_committee(committee: &CommitteeConfig, errors: &mut Vec<String>) {
     }
     if committee.signing_threshold == 0 || committee.signing_threshold > committee.members {
         errors.push("committee.signing_threshold must be between 1 and committee.members".to_owned());
+    }
+    if committee.epoch == 0 {
+        errors.push("committee.epoch must be positive".to_owned());
     }
 }
 
@@ -1020,6 +1041,16 @@ remote_http = false
 "#;
         let error = Config::from_toml_str(source).expect_err("public admin bind must fail");
         assert!(error.to_string().contains("admin.bind_address must be loopback"));
+    }
+
+    #[test]
+    fn deployment_id_and_committee_epoch_are_mandatory_proof_bindings() {
+        let mut config = Config::default();
+        config.deployment.id.clear();
+        config.committee.epoch = 0;
+        let error = config.validate().expect_err("missing proof bindings must fail");
+        assert!(error.to_string().contains("deployment.id"));
+        assert!(error.to_string().contains("committee.epoch"));
     }
 
     #[test]

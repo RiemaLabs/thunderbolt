@@ -237,3 +237,31 @@ fn codec_rejects_oversize_noncanonical_and_invalid_crypto_encodings() {
     };
     assert!(invalid_statement.validate_wire().is_err());
 }
+
+#[test]
+fn binding_accepts_full_outpoints_and_protocol_invoice_ids_without_truncation() {
+    assert!(BindingContext::invoice(
+        Network::Regtest,
+        b"deployment",
+        1,
+        [0x11; thunderbolt_wire::MAX_CHANNEL_ID_BYTES],
+        [0x22; thunderbolt_wire::MAX_INVOICE_ID_BYTES],
+    )
+    .is_ok());
+    assert!(BindingContext::invoice(
+        Network::Regtest,
+        b"deployment",
+        1,
+        [0x11; thunderbolt_wire::MAX_CHANNEL_ID_BYTES + 1],
+        b"invoice",
+    )
+    .is_err());
+    assert!(BindingContext::invoice(
+        Network::Regtest,
+        b"deployment",
+        1,
+        b"channel",
+        [0x22; thunderbolt_wire::MAX_INVOICE_ID_BYTES + 1],
+    )
+    .is_err());
+}

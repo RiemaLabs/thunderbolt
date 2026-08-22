@@ -1,6 +1,6 @@
 # Operator guide
 
-Bitcoin Thunderbolt `v1.0.0-rc.1` runs a reference Thunderbolt Ledger for development and regtest. Mainnet is disabled. The daemon does not yet run Holder or committee participants, verify the production proofs, connect to Bitcoin Core, or expose metrics.
+Bitcoin Thunderbolt `v1.0.0-rc.1` runs a reference Thunderbolt Ledger for development and regtest. Mainnet is disabled. The repository includes Holder, committee, Trusted Verifier, Keystore, and Bitcoin Core libraries, but the daemon does not construct or run them. It also does not expose metrics.
 
 ## What runs in this RC
 
@@ -11,6 +11,20 @@ Bitcoin Thunderbolt `v1.0.0-rc.1` runs a reference Thunderbolt Ledger for develo
 : A stateless client for health, node information, redacted configuration, channel and event reads, development event submission, database administration, and graceful stop.
 
 The daemon requires `[node].role = "ledger"`. It refuses Holder and committee roles. Those roles describe the protocol and remain target runtime work.
+
+## What is library-only
+
+Building the workspace also builds these non-executable components:
+
+| Crate | What it provides | What operators cannot do yet |
+| --- | --- | --- |
+| `thunderbolt-holder` | Local Holder and Recipient state transitions | Start a Holder daemon, create an Invoice through the CLI, or submit a Transfer automatically |
+| `thunderbolt-committee` | One-share committee update engine and signing-session guards | Start a committee daemon, run DKG, or produce and aggregate FROST shares |
+| `thunderbolt-verifier` | Trusted Invoice and Transfer verification | Enable production event submission in `thunderboltd` |
+| `thunderbolt-keystore` | Encrypted local vault and authenticated backup and restore | Unlock or manage participant secrets through the daemon or CLI |
+| `thunderbolt-bitcoin` | Validated Bitcoin Core RPC, chain tracking, and transaction policy checks | Connect the daemon to Bitcoin Core, fund a channel, or complete settlement |
+
+These libraries are implementation building blocks. Installing them does not create a Thunderbolt network or complete the lifecycle described in the paper.
 
 ## Build
 
@@ -203,9 +217,11 @@ Compatibility aliases `/live` and `/ready` are also available. The daemon marks 
 - The control transport is loopback HTTP, not the reserved Unix socket.
 - Remote control and built-in TLS are rejected.
 - Production proof, Bitcoin, and committee verification are not connected to event submission.
+- The Holder, committee, Trusted Verifier, Keystore, and Bitcoin Core libraries have no daemon or CLI integration.
 - Metrics settings are parsed but no metrics endpoint runs.
 - Backups are verified but not encrypted by the daemon.
 - The Compose profile is a Ledger and storage demonstration, not a Bitcoin regtest network.
 - The wire codec uses 2048-bit Paillier values, while the accepted paper evaluates 3072-bit Paillier.
+- Open has no reviewed DKG or provisioning ceremony. Finalize has no `R_own` proof or combined-key Holder plus FROST signing path under `P`.
 
-Holder and committee processes, Bitcoin settlement, threshold signing, encrypted secret storage, metrics, and a production Ledger fault model remain release work.
+Role processes, atomic participant storage adapters, Bitcoin settlement, threshold signing, metrics, and a production Ledger fault model remain release work. See [Production roadmap](roadmap.md).

@@ -239,6 +239,15 @@ impl ChannelId {
     pub const fn vout(&self) -> u32 {
         self.vout
     }
+
+    /// Returns the wire binding used by proof contexts: display-order txid
+    /// bytes followed by the output index in big-endian order.
+    pub fn canonical_bytes(&self) -> [u8; 36] {
+        let mut bytes = [0_u8; 36];
+        bytes[..32].copy_from_slice(self.txid.as_bytes());
+        bytes[32..].copy_from_slice(&self.vout.to_be_bytes());
+        bytes
+    }
 }
 
 impl fmt::Debug for ChannelId {
@@ -548,6 +557,9 @@ mod tests {
             let decoded: ChannelId = serde_json::from_str(&encoded).unwrap();
             assert_eq!(decoded, original);
             assert_eq!(original.to_string().parse::<ChannelId>().unwrap(), original);
+            let encoded = original.canonical_bytes();
+            assert_eq!(&encoded[..32], txid.as_bytes());
+            assert_eq!(&encoded[32..], &vout.to_be_bytes());
         }
     }
 

@@ -1,13 +1,17 @@
 [workspace]
 members = ["crates/*"]
 default-members = [
-    "crates/bitcoin-utils",
+    "crates/thunderbolt-bitcoin",
     "crates/thunderbolt-cli",
+    "crates/thunderbolt-committee",
     "crates/thunderbolt-config",
     "crates/thunderbolt-core",
+    "crates/thunderbolt-holder",
+    "crates/thunderbolt-keystore",
     "crates/thunderbolt-node",
     "crates/thunderbolt-protocol",
     "crates/thunderbolt-storage",
+    "crates/thunderbolt-verifier",
     "crates/thunderbolt-wire",
     "crates/thunderboltd",
 ]

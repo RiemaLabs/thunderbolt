@@ -19,7 +19,7 @@ secp = { version = "0.5.0", features = ["rand", "secp256k1"] }
 musig2 = { version = "0.2.4", features = ["secp256k1"] }
 
 bitcoin-utils = { path = "../bitcoin-utils" }
-thunderbolt-core = { path = "../thunderbolt-core" }
+thunderbolt-core = { path = "../thunderbolt-core", features = ["insecure-regression", "legacy-research"] }
 
 [dev-dependencies]
 bitcoinconsensus = "0.106.0"

@@ -4,7 +4,7 @@ Bitcoin Thunderbolt is the open source Rust implementation of Thunderbolt, a pro
 
 The paper "Thunderbolt: Fast Asynchronous Off-Chain Bitcoin Transfers" has been accepted to ACM CCS 2026. The paper was accepted, not this software product.
 
-> Release status: `v1.0.0-rc.1`. Mainnet is disabled. This release includes the cryptographic core, versioned public messages, a deterministic Ledger state machine, durable SQLite storage, and a runnable Ledger daemon with a control CLI. It does not include Holder or committee runtimes, production proof verification, a Byzantine-fault-tolerant Thunderbolt Ledger, metrics, or Bitcoin settlement. Do not use it with real funds.
+> Release status: `v1.0.0-rc.1`. Mainnet is disabled. This release includes the cryptographic core, versioned public messages, a deterministic Ledger state machine, durable SQLite storage, and libraries for Holder state, one-share committee state, trusted Invoice and Transfer verification, encrypted local secrets, and Bitcoin Core access. These libraries are not wired into `thunderboltd`. The runnable daemon remains a single reference Ledger with a control CLI. There is no complete Open-to-Finalize deployment, Byzantine-fault-tolerant Ledger, or mainnet support. Do not use it with real funds.
 
 ## Why Thunderbolt
 
@@ -45,7 +45,17 @@ thunderboltd, Ledger role
 durable SQLite event log and channel snapshots
 ```
 
-`thunderbolt-cli` is a stateless operator tool. It reads the configured endpoint and bearer-token file, then calls the daemon's JSON API. `thunderboltd` accepts only `node.role = "ledger"` in this release. Holder and committee participants remain clients; their independent runtimes and the Bitcoin Core connection are target work.
+`thunderbolt-cli` is a stateless operator tool. It reads the configured endpoint and bearer-token file, then calls the daemon's JSON API. `thunderboltd` accepts only `node.role = "ledger"` in this release. It does not construct a Holder engine, committee engine, Trusted Verifier, Keystore, or Bitcoin Core client.
+
+The repository now contains several libraries intended for those future role processes:
+
+| Library | Current boundary |
+| --- | --- |
+| `thunderbolt-holder` | Creates and tracks v1 Holder and Recipient credentials, single-committee invoices, and transfers behind a transactional vault trait. It has no threshold-Invoice path, networking, or daemon adapter. |
+| `thunderbolt-committee` | Models one independently stored committee share, verifies committed refresh inputs, and guards signing-session nonce state. It has no DKG, audited FROST signer, or signature aggregator. |
+| `thunderbolt-verifier` | Verifies bounded Invoice and Transfer artifacts against trusted deployment and Ledger state. It is not called by the current Ledger API and does not verify Open or Finalize. |
+| `thunderbolt-keystore` | Provides an encrypted, owner-only local vault with authenticated backup and restore. The daemon does not open it. |
+| `thunderbolt-bitcoin` | Provides a bounded Bitcoin Core RPC client, network checks, reorganization-aware cursors, and funding and closing validators. It has no wallet or signing API and is not connected to the daemon. |
 
 See [Architecture](docs/architecture.md) for component boundaries and the current implementation gap.
 
@@ -72,6 +82,11 @@ The existing workspace contains:
 
 ```text
 crates/
+  thunderbolt-bitcoin/ Validated Bitcoin Core RPC and chain tracking library
+  thunderbolt-holder/ Local Holder and Recipient state engine
+  thunderbolt-committee/ One-share committee member engine
+  thunderbolt-verifier/ Trusted Invoice and Transfer verification bridge
+  thunderbolt-keystore/ Encrypted participant secret vault
   thunderbolt-core/    Proofs, Paillier operations, threshold primitives,
                        and Bitcoin transaction building blocks
   thunderbolt-protocol/ Deterministic Ledger entries and channel reducer
@@ -149,9 +164,10 @@ Important limits:
 - The base design does not promise transaction unlinkability.
 - A production Ledger must satisfy the paper's persistence, ordering, inclusion, and data-availability guarantees under the stated committee fault bound.
 - Safe operation also depends on durable encrypted state, correct backups, Bitcoin reorganization handling, nonce safety, authenticated transport, and operator discipline. These controls are release gates, not assumptions that may be skipped.
-- The current daemon uses authenticated loopback HTTP. The configured Unix socket path is reserved but not listened on. Remote control, metrics, Holder and committee runtimes, and Bitcoin settlement remain target work.
+- The current daemon uses authenticated loopback HTTP. The configured Unix socket path is reserved but not listened on. Remote control, metrics, role-specific Holder and committee services, and Bitcoin settlement remain target work.
 - The manual database backup is verified but not encrypted by the daemon. Protect it at the filesystem or volume layer.
 - The RC wire codec enforces a 2048-bit Paillier modulus, while the accepted paper evaluates 3072-bit Paillier. The production parameter and wire version must be reconciled before mainnet approval.
+- The Open ceremony still needs a reviewed DKG or provisioning protocol. Finalize still needs an `R_own` proof and audited combined-key Holder plus FROST signing under the fixed key `P`.
 
 Read [Security](docs/security.md), [Threat model](docs/threat-model.md), and [SECURITY.md](SECURITY.md) before testing a deployment. Report suspected vulnerabilities privately. Do not open a public issue for a security report.
 
@@ -166,6 +182,7 @@ Read [Security](docs/security.md), [Threat model](docs/threat-model.md), and [SE
 | [Threat model](docs/threat-model.md) | Assets, adversaries, assumptions, guarantees, and exclusions |
 | [API](docs/api.md) | Control API, Ledger events, idempotency, and versioning |
 | [Release process](docs/release-process.md) | RC policy, verification, signing, and promotion gates |
+| [Production roadmap](docs/roadmap.md) | Protocol v2, multi-process regtest, cryptographic, and Ledger gates |
 | [Publication checklist](docs/publication-checklist.md) | Legal, security, history, and repository publication gates |
 | [History sanitization](docs/history-sanitization.md) | Known historical secrets and generated build artifacts that must be removed before publication |
 | [Core ZKP](CORE_ZKP.md) | Mathematical specification of the proof construction |

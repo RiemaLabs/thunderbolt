@@ -4,6 +4,7 @@
 //! decryption keys, holder secrets, refresh scalars, or committee shares.
 
 mod binding;
+mod binding_v2;
 mod codec;
 mod error;
 mod hex;
@@ -16,6 +17,10 @@ mod transfer;
 pub use binding::{
     BindingContext, ChannelId, DeploymentId, InvoiceId, MAX_CHANNEL_ID_BYTES, MAX_DEPLOYMENT_ID_BYTES,
     MAX_INVOICE_ID_BYTES, PROTOCOL_VERSION,
+};
+pub use binding_v2::{
+    AnchorParameterSuiteIdV2, ChannelBindingV2, CommitteeDescriptorDigestV2, FundingOutpointV2, OperationBindingV2,
+    ProtocolSuiteIdV2, BINDING_ID_BYTES, FUNDING_OUTPOINT_BYTES, PROTOCOL_VERSION_V2,
 };
 pub use codec::{
     from_json_slice, to_json_vec, CanonicalDigest, PaillierCiphertextHex, PaillierNonceHex, PaillierPublicKeyHex,

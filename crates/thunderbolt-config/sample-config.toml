@@ -16,6 +16,7 @@ listen_port = 19735
 [deployment]
 environment = "development" # development, staging, or production
 network = "regtest"         # regtest, signet, testnet, or mainnet (mainnet is disabled in this RC)
+id = "thunderbolt-regtest-v1"
 
 [paths]
 data_dir = "./data"
@@ -26,6 +27,7 @@ socket_path = "./data/thunderboltd.sock"
 [committee]
 members = 3
 signing_threshold = 2
+epoch = 1
 
 # The operator API is loopback-only by default. To bind it remotely, set
 # remote_http=true and configure both TLS paths below.

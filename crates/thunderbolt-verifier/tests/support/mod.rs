@@ -6,7 +6,7 @@ use bitcoin::Network;
 use libpaillier::{DecryptionKey, EncryptionKey};
 use secp::Scalar;
 use thunderbolt_core::paillier::{add_ciphertexts, encrypt_plaintext, random_nonce_in_group};
-use thunderbolt_core::threshold::{create_threshold_refresh_distribution, ThresholdCommittee};
+use thunderbolt_core::threshold::{create_threshold_refresh_distribution, ThresholdMemberPublicKey};
 use thunderbolt_core::zkp::types::{canonical_big_number_bytes, scalar_to_big_number};
 use thunderbolt_core::zkp::{
     prove_invoice, prove_share_encryption, prove_transfer, InvoiceStatement, InvoiceWitness, ShareEncryptionStatement,
@@ -258,9 +258,15 @@ fn build_threshold_fixture() -> ThresholdFixture {
     let committee = Committee::new(committee_id.clone(), 2, 2).expect("valid fixture committee");
     let open_snapshot = make_open_snapshot(channel_id, holder, committee, current_anchor);
 
-    let committee_core =
-        ThresholdCommittee::new(2, 2, anchor_base, scalar(19)).expect("generate fixture threshold committee");
-    let member_keys = committee_core.member_public_keys();
+    let member_keys = (1_u32..=2)
+        .map(|member_id| {
+            let secret = DecryptionKey::random().expect("generate fixture member key");
+            ThresholdMemberPublicKey {
+                member_id,
+                encryption_key: EncryptionKey::from(&secret),
+            }
+        })
+        .collect::<Vec<_>>();
     let committee_binding = CommitteeBinding::threshold(
         committee_id,
         2,

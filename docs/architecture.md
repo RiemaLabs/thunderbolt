@@ -51,9 +51,28 @@ The target runtime adds separate role processes:
 
 The reference Ledger does not satisfy the paper's Byzantine fault model. A production committee must keep one share per independently administered instance, and the production Ledger must establish its ordering and availability guarantees independently.
 
+## Landed library boundaries
+
+The workspace contains role libraries, but no executable composes them into a Thunderbolt network yet.
+
+`thunderbolt-holder`
+: A local Holder and Recipient state engine. It creates the v1 single-committee Invoice path and Transfers, retains old credentials after transfer, checks committed acknowledgements, and stores private transitions through a transactional vault trait. It has no threshold-Invoice adapter, network client, service loop, or `thunderboltd` integration.
+
+`thunderbolt-committee`
+: A one-share committee member engine. It accepts a committed Transfer binding, verifies the matching threshold refresh and transfer, updates only its local Shamir share, and records replay-safe acknowledgements. Its signing API protects nonce lifecycle, but the crate does not implement DKG, FROST aggregation, or finalization under the fixed key `P`.
+
+`thunderbolt-verifier`
+: A narrow bridge from bounded public Invoice and Transfer artifacts to trusted verification evidence. It checks deployment, committee, channel, invoice, step, and prior-Ledger bindings. It has no Open or Finalize verifier and is not called by the current node.
+
+`thunderbolt-keystore`
+: An encrypted file vault for Holder or committee-member secrets. It authenticates the vault identity and record set, uses owner-only no-follow files, and provides no-clobber backup and restore. The current daemon never opens the vault, and the role engines still need runtime storage adapters.
+
+`thunderbolt-bitcoin`
+: A fail-closed Bitcoin Core boundary for regtest, signet, and testnet3. It validates network and genesis, bounds RPC work, tracks a reorganization-aware chain cursor, and checks funding and closing transactions. It deliberately has no wallet or signing API.
+
 ### Bitcoin Core
 
-Bitcoin Core is the target production chain backend. No Bitcoin backend is connected to `thunderboltd` in this RC. The future runtime must use a validated backend for funding state, transaction broadcast, fee estimation, confirmation tracking, mempool changes, and reorganizations.
+The `thunderbolt-bitcoin` library provides the validated Bitcoin Core boundary, but no Bitcoin backend is connected to `thunderboltd` in this RC. The future runtime must persist its chain cursor and use the backend for funding state, transaction broadcast, fee estimation, confirmation tracking, mempool changes, and reorganizations.
 
 ## Control plane and target protocol plane
 
@@ -93,7 +112,7 @@ The reducer rejects duplicate invoice identifiers, skipped or repeated sequences
 
 The current Ledger database contains public protocol entries and materialized channel snapshots. It uses SQLite WAL, full synchronization, immutable-entry triggers, migration checksums, hash-chain replay, integrity checking, and no-clobber verified backup. It does not store Holder secrets, committee shares, decryption keys, or signing material.
 
-Future Holder and committee databases need authenticated encryption at rest. Threshold-signing nonce state must be persisted before a partial signature leaves the process, and a crash must never make a nonce reusable.
+The Keystore and role-engine vault traits establish the local encryption and transaction boundaries. The daemon still needs durable adapters that update secret state, Ledger cursors, acknowledgements, and outbound work atomically. Threshold-signing nonce state must be persisted before a partial signature leaves the process, and a crash must never make a nonce reusable.
 
 The current manual backup is verified but not encrypted by the daemon. Operators must protect the destination at the filesystem or volume layer. Production backups must be encrypted, versioned, and verified through a restore drill.
 
@@ -110,21 +129,21 @@ The implementation must preserve these protocol invariants at each accepted tran
 
 ## Current implementation boundary
 
-The current tree has the cryptographic proof implementation, bounded wire types, a deterministic channel reducer, durable public Ledger storage, strict configuration and token authorization, a loopback Ledger daemon, a control CLI, research benchmarks, and regression tests. The proof benchmark path still creates all protocol participants in one process. Threshold timing and network behavior in the evaluation crate are simulations.
+The current tree has the cryptographic proof implementation, bounded wire types, a deterministic channel reducer, durable public Ledger storage, strict configuration and token authorization, a loopback Ledger daemon, a control CLI, and the Holder, committee, Trusted Verifier, Keystore, and Bitcoin Core libraries described above. The proof benchmark path still creates all protocol participants in one process. Threshold timing and network behavior in the evaluation crate are simulations.
 
 The following remain release gates:
 
 - reconcile the current 2048-bit Paillier wire parameter with the paper's 3072-bit evaluation parameter
-- integrate real proof, signature, Bitcoin, and quorum verification before Ledger submission
+- wire trusted proof, Bitcoin, signature, and quorum verification into the same atomic Ledger append transaction
 - bind network, deployment, committee epoch, and actor signatures into the event contract
-- add durable encrypted Holder and committee state with migration and recovery tests
-- one committee share per process
-- threshold Open and Finalize signing with nonce-reuse protection
+- add durable Holder and committee runtime adapters with migrations and recovery tests
+- specify and implement the Open DKG or provisioning ceremony
+- add an `R_own` proof and combined-key Holder plus FROST Finalize path under `P`
 - a Ledger that meets the required fault model
 - an integrated Bitcoin Core settlement path
 - authenticated protocol transport and a production local control transport
-- Holder and committee runtimes
+- Holder and committee daemon services with durable outboxes and Ledger consumers
 - metrics and production observability
 - restart, replay, duplicate, out-of-order, and reorganization tests
 
-See [Publication checklist](publication-checklist.md) and [Release process](release-process.md) for the gates that prevent an RC from being labeled mainnet-ready.
+See [Production roadmap](roadmap.md), [Publication checklist](publication-checklist.md), and [Release process](release-process.md) for the gates that prevent an RC from being labeled mainnet-ready.

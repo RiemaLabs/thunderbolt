@@ -1,11 +1,19 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
+
+#[cfg(any(test, feature = "insecure-regression"))]
+use std::collections::BTreeMap;
 
 use bitcoin::key::rand::thread_rng;
-use libpaillier::{Ciphertext, DecryptionKey, EncryptionKey};
+#[cfg(any(test, feature = "insecure-regression"))]
+use libpaillier::DecryptionKey;
+use libpaillier::{Ciphertext, EncryptionKey};
 use rayon::prelude::*;
 use secp::{MaybePoint, MaybeScalar, Point, Scalar};
 
-use crate::paillier::{decrypt_to_big_number, encrypt_plaintext, random_nonce_in_group};
+#[cfg(any(test, feature = "insecure-regression"))]
+use crate::paillier::decrypt_to_big_number;
+use crate::paillier::{encrypt_plaintext, random_nonce_in_group};
+#[cfg(any(test, feature = "insecure-regression"))]
 use crate::zkp::types::{big_number_to_scalar, curve_order, scalar_to_big_number};
 use crate::zkp::{
     prove_share_encryption, verify_share_encryption, ProofContext, ShareEncryptionProof, ShareEncryptionStatement,
@@ -37,6 +45,7 @@ pub struct ThresholdRefreshDistribution {
     pub encrypted_shares: Vec<ThresholdEncryptedShare>,
 }
 
+#[cfg(any(test, feature = "insecure-regression"))]
 #[derive(Clone, Debug)]
 pub struct ThresholdMemberUpdate {
     pub member_id: u32,
@@ -44,6 +53,7 @@ pub struct ThresholdMemberUpdate {
     pub updated_share: Scalar,
 }
 
+#[cfg(any(test, feature = "insecure-regression"))]
 #[derive(Debug)]
 struct ThresholdCommitteeMember {
     member_id: u32,
@@ -52,6 +62,11 @@ struct ThresholdCommitteeMember {
     share: Scalar,
 }
 
+/// Single-process committee fixture for regression tests only.
+///
+/// This type intentionally disappears from normal builds because it owns all
+/// member decryption keys and signing shares in one process.
+#[cfg(any(test, feature = "insecure-regression"))]
 #[derive(Debug)]
 pub struct ThresholdCommittee {
     threshold: usize,
@@ -137,6 +152,7 @@ fn sample_polynomial(secret: Scalar, degree: usize, member_ids: &[u32]) -> Resul
     }
 }
 
+#[cfg(any(test, feature = "insecure-regression"))]
 fn lagrange_coefficient_at_zero(member_ids: &[u32], member_id: u32) -> Result<Scalar> {
     let x_i = scalar_from_u32(member_id)?;
     let mut numerator = Scalar::one();
@@ -298,6 +314,7 @@ pub fn verify_threshold_refresh_distribution(distribution: &ThresholdRefreshDist
     Ok(())
 }
 
+#[cfg(any(test, feature = "insecure-regression"))]
 impl ThresholdCommittee {
     pub fn new(threshold: usize, committee_size: usize, anchor_base: Point, committee_secret: Scalar) -> Result<Self> {
         if threshold == 0 || committee_size < threshold {

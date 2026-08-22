@@ -1,12 +1,18 @@
+#[cfg(feature = "legacy-research")]
 pub mod bitcoin_account;
+#[cfg(feature = "legacy-research")]
 pub mod bitcoin_scripts;
+#[cfg(feature = "legacy-research")]
 pub mod bitcoin_tx;
 pub mod errors;
 pub mod paillier;
 pub mod threshold;
 pub mod traits;
+#[cfg(feature = "legacy-research")]
 pub mod tweak;
+#[cfg(feature = "legacy-research")]
 pub mod user;
+#[cfg(feature = "legacy-research")]
 pub mod utils;
 pub mod zkp;
 

@@ -2,6 +2,8 @@
 
 Bitcoin Thunderbolt moves control of Bitcoin and must be operated as security-critical software. `v1.0.0-rc.1` is a reference Ledger for development and regtest. Mainnet is disabled.
 
+The workspace contains an encrypted Keystore, a one-share committee engine, a Holder engine, a Trusted Verifier, and a validated Bitcoin Core client. These are libraries, not active daemon defenses. `thunderboltd` does not load them, so their presence does not make the current service a complete or production-safe protocol deployment.
+
 This guide covers deployment controls. The protocol assumptions are in [Threat model](threat-model.md), and private vulnerability reporting is in [SECURITY.md](../SECURITY.md).
 
 ## Key and share handling
@@ -48,6 +50,8 @@ Ledger signatures do not replace consensus guarantees. Consensus transport authe
 
 The current Ledger commits the immutable event and derived public channel snapshot in one SQLite transaction before acknowledging success. It does not store Holder secrets, committee shares, or signing material.
 
+`thunderbolt-keystore` supplies an encrypted local vault with authenticated backup and restore. The Holder and committee engines define transactional vault boundaries. Runtime adapters still need to atomically coordinate sealed secret updates with Ledger cursors, committed acknowledgements, and outbound work before either role can run safely as a daemon.
+
 `database backup` creates a verified SQLite backup but does not encrypt it. Protect the backup directory with filesystem or encrypted-volume controls. Production backups must be encrypted and include enough metadata to identify the network, daemon identity, schema version, last event hash, and channel sequence.
 
 Prevent two running daemons from using the same identity or database. A copied database can cause stale-state signing or nonce reuse even if the copies never run at the same time.
@@ -61,6 +65,8 @@ Restore rules:
 5. Enable mutations only after every channel reaches a known committed sequence.
 
 ## Bitcoin settlement
+
+`thunderbolt-bitcoin` provides bounded Bitcoin Core RPC, network and genesis validation, a reorganization-aware chain cursor, and pure funding and closing-transaction checks. It is not connected to `thunderboltd`, contains no wallet or signing code, and does not complete Open or Finalize.
 
 - Use a validated Bitcoin Core backend for production.
 - Bind all channel state to the selected Bitcoin network and funding outpoint.
@@ -103,7 +109,10 @@ Mainnet stays disabled until all of these gates pass:
 - production review of the deterministic event state machine and canonical wire format
 - encrypted durable storage, migrations, backup, verified restore, and crash recovery
 - integrated Open, Transfer, committee update, and Finalize settlement path
-- one committee share per process and safe threshold signing
+- reviewed Open DKG or provisioning, including consistency between committee shares and the fixed lock key
+- concrete `R_own` verification for the current Holder and exact closing context
+- combined-key Holder plus FROST signing under `P`, with audited nonce lifecycle and aggregation
+- one independently administered committee process per share
 - Ledger implementation that meets the documented fault model
 - Bitcoin Core confirmation, fee, mempool, and reorganization handling
 - authenticated transport and least-privilege control access
@@ -114,6 +123,8 @@ Mainnet stays disabled until all of these gates pass:
 - signed release artifacts and an operator rollback plan
 
 Passing unit tests or reproducing paper benchmarks does not satisfy these gates.
+
+See [Production roadmap](roadmap.md) for the order in which the runtime, protocol v2, and deployment gates are intended to land.
 
 ## Development demo warning
 

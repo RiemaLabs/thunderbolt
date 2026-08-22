@@ -1,6 +1,6 @@
 # API and event contract
 
-Bitcoin Thunderbolt `v1.0.0-rc.1` exposes a loopback JSON API through `thunderboltd` and a thin client named `thunderbolt-cli`. The current server is a reference Thunderbolt Ledger. Holder, committee, Bitcoin settlement, remote administration, metrics, and a signed protocol transport remain target work.
+Bitcoin Thunderbolt `v1.0.0-rc.1` exposes a loopback JSON API through `thunderboltd` and a thin client named `thunderbolt-cli`. The current server is a reference Thunderbolt Ledger. The workspace also contains Holder, committee, Trusted Verifier, Keystore, and Bitcoin Core libraries, but none of them add an HTTP route or change the daemon's Ledger-only role.
 
 ## Control transport
 
@@ -109,7 +109,19 @@ The reducer checks lifecycle, sequence, previous hash, actor role, channel-lifet
 
 The RC codec fixes Paillier values at 2048 bits. The accepted paper evaluates 3072-bit Paillier. The project must reconcile that parameter and version the encoding before mainnet approval.
 
-## Target full protocol contract
+## Library APIs not exposed by the daemon
+
+The following APIs are available to runtime developers, not to `thunderbolt-cli` users:
+
+- `HolderEngine` creates and records the v1 single-committee Invoice path and Transfer state behind `SecretVault` and `VaultTransaction`. It does not create the threshold-Invoice and VESS package required by a committee deployment.
+- `CommitteeMemberEngine` owns one committee share and consumes only a verified committed Transfer binding. `CommitteeSigner` defines fail-closed nonce handling but supplies no FROST implementation or aggregator.
+- `TrustedVerifier` verifies Invoice and Transfer artifacts against a `DeploymentContext`, a channel snapshot, and trusted Ledger time. It does not verify Open, `R_own`, Finalize, actor signatures, or Bitcoin state.
+- `Vault` encrypts typed participant secrets and authenticates backup and restore operations. It is not a Holder or committee service by itself.
+- `BitcoinCoreClient` validates the selected Bitcoin network before use and provides bounded chain, funding, fee, broadcast, and closing checks. It has no wallet or signing interface.
+
+The current `POST /v1/channels/{id}/events` handler does not call any of these APIs. Safe startup therefore still rejects event submission unless the explicit development-regtest demo mode is enabled.
+
+## Protocol v2 contract
 
 The production event envelope needs fields equivalent to:
 
@@ -131,6 +143,8 @@ actor_signature
 
 The signature digest must define a fixed Bitcoin Thunderbolt domain, hash-format version, integer widths, byte order, length encoding, optional-field encoding, and exact field order. Implementations must reject non-canonical values and share checked golden vectors.
 
+The node must verify a proposal inside the same storage write transaction that selects the current channel snapshot, referenced Invoice, and trusted Ledger time. Verifying first and appending later would allow the head or expiry decision to change between the two operations.
+
 The full runtime also needs control operations for wallet initialization and locking, encrypted backup and restore, Open, invoice creation, Transfer, Finalize, event subscriptions, committee update, threshold signing, heartbeat, and resharing. Those operations are not part of the current CLI or HTTP server.
 
 Before committing a production event, the node must verify:
@@ -145,3 +159,5 @@ Before committing a production event, the node must verify:
 - a fully acknowledged Holder state before forwarding or finalization
 
 Any incompatible event encoding or signature change requires a new protocol version, new vectors, migration analysis, and a coordinated activation plan.
+
+The remaining stages are tracked in [Production roadmap](roadmap.md).

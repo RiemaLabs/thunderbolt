@@ -32,6 +32,7 @@ listen_port = 19735
 [deployment]
 environment = "development"
 network = "regtest"
+id = "thunderbolt-regtest-v1"
 
 [paths]
 data_dir = "./data"
@@ -42,6 +43,7 @@ socket_path = "./data/thunderboltd.sock"
 [committee]
 members = 3
 signing_threshold = 2
+epoch = 1
 
 [admin]
 enabled = true
@@ -73,6 +75,8 @@ The configuration library fills omitted limit, metrics, backup, TLS, and develop
 `node.role`
 : `holder`, `committee`, or `ledger` at the configuration layer. `thunderboltd start` in this RC requires `ledger` and rejects the other roles.
 
+The Holder and committee libraries do not change this rule. No current configuration value can turn `thunderboltd` into a Holder or committee process.
+
 `node.listen_address` and `node.listen_port`
 : Reserved listener for future protocol traffic. It must not overlap the administrative or metrics endpoint. The current daemon serves only the administrative loopback address and port.
 
@@ -84,6 +88,9 @@ The configuration library fills omitted limit, metrics, backup, TLS, and develop
 `deployment.network`
 : `regtest`, `signet`, `testnet`, or `mainnet`. The `v1.0.0-rc.1` validator rejects mainnet in every environment. Regtest is the documented development profile unless a release note explicitly supports another test network.
 
+`deployment.id`
+: A stable 1 to 64 byte ASCII identifier bound into every proof context. Every Holder, committee member, verifier, and Ledger replica in one deployment must use the same value.
+
 ### `paths`
 
 `paths.data_dir`, `log_dir`, `database_path`, and `socket_path` locate local state. Production paths must be absolute, must not contain `..`, and must remain inside the configured data directory where required. The data directory cannot be the filesystem root.
@@ -94,7 +101,11 @@ The Unix socket path is reserved for the target local control interface. The cur
 
 `committee.members` accepts 1 through 1024 members. `committee.signing_threshold` must be at least 1 and cannot exceed the member count. These values describe expected topology but do not contain any share.
 
+`committee.epoch` is a positive monotonic roster and share version. Protocol messages from another epoch fail closed even when their proofs are otherwise valid.
+
 A production node must also verify membership, threshold, and epoch against a signed committee descriptor. Local TOML cannot change committee membership on its own.
+
+`thunderbolt-committee` can validate and operate on one provisioned member package, but the daemon does not construct that engine and the project does not yet define the production DKG or provisioning ceremony.
 
 ### `admin` and `admin.tls`
 

@@ -9,8 +9,10 @@ use crate::{Result, WireError};
 
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const MAX_DEPLOYMENT_ID_BYTES: usize = 64;
-pub const MAX_CHANNEL_ID_BYTES: usize = 32;
-pub const MAX_INVOICE_ID_BYTES: usize = 32;
+/// Canonical Bitcoin outpoint width: 32-byte txid plus 4-byte vout.
+pub const MAX_CHANNEL_ID_BYTES: usize = 36;
+/// Matches the protocol-layer invoice identifier bound.
+pub const MAX_INVOICE_ID_BYTES: usize = 128;
 
 pub type DeploymentId = HexBytes<1, MAX_DEPLOYMENT_ID_BYTES>;
 pub type ChannelId = HexBytes<1, MAX_CHANNEL_ID_BYTES>;
