@@ -513,6 +513,16 @@ impl ThresholdCommittee {
         }
     }
 
+    /// Reconstructs the full committee signing secret from any `threshold`
+    /// member shares.
+    ///
+    /// SECURITY: this deliberately breaks the t-of-n trust boundary — the
+    /// result is the complete committee secret. It exists for regression tests
+    /// and isolated regtest fixtures only. No production daemon, RPC handler or
+    /// network-reachable code path may call this: a single memory disclosure or
+    /// RCE in a process that reaches this method yields every member share at
+    /// once. Production members must each hold exactly one share
+    /// (`ThresholdMember`) and must never reconstruct.
     pub fn reconstruct_secret(&self, member_ids: &[u32]) -> Result<Scalar> {
         if member_ids.len() < self.threshold {
             return Err(ThunderboltError::ThresholdNotMet {

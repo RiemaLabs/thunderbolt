@@ -120,7 +120,16 @@ impl PaillierAccount for PaillierAccountLocal {
 
     fn decrypt(&self, ciphertext: &Ciphertext) -> Option<Vec<u8>> {
         match self.profile {
-            PaillierModulusProfile::LegacyRc2048V1 => self.private_key.decrypt(ciphertext),
+            // Validate the ciphertext before handing it to libpaillier even on the
+            // legacy profile. `self.private_key.decrypt` performs no range or gcd
+            // check, and this ciphertext can originate from the wire; an
+            // out-of-range or non-invertible value reaches the modular
+            // exponentiation path and can panic or force unbounded work.
+            PaillierModulusProfile::LegacyRc2048V1 => {
+                let pk = EncryptionKey::from(&self.private_key);
+                validate_ciphertext(&pk, ciphertext).ok()?;
+                self.private_key.decrypt(ciphertext)
+            }
             PaillierModulusProfile::ProtocolV2Production3072 => {
                 decrypt_to_big_number_with_profile(self.profile, &self.private_key, ciphertext)
                     .ok()
