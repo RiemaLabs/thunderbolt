@@ -65,15 +65,35 @@ jobs:
         with:
           fetch-depth: 0
       - run: cargo install --locked --version 0.5.9 cargo-cyclonedx
-      - name: Package without publishing
+      - name: Resolve release version
+        id: version
         shell: bash
+        env:
+          # Pass the untrusted input through the environment instead of
+          # interpolating `${{ inputs.version }}` straight into the script body,
+          # which would allow command injection into this `run:` block.
+          DISPATCH_VERSION: ${{ inputs.version }}
         run: |
+          set -euo pipefail
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            version='${{ inputs.version }}'
+            version="${DISPATCH_VERSION}"
           else
             version="${GITHUB_REF_NAME}"
           fi
-          ./scripts/package-release.sh "$version" dist
+          # Reject anything that is not a plain version token before it is used
+          # to build a package name or a release path.
+          if [[ ! "$version" =~ ^[0-9A-Za-z][0-9A-Za-z.+_-]*$ ]]; then
+            echo "::error::refusing to package with unsupported version token" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Package without publishing
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          ./scripts/package-release.sh "$RELEASE_VERSION" dist
           ./scripts/verify-release.sh --checksums-only dist
           archive="$(find dist -maxdepth 1 -type f -name '*.tar.gz' ! -name '*-source.tar.gz' -print)"
           install -d "$RUNNER_TEMP/release-smoke"

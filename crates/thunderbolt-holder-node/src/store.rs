@@ -52,7 +52,12 @@ impl DurableFileIdentity {
         #[cfg(unix)]
         let path_bytes = path.as_os_str().as_bytes();
         #[cfg(not(unix))]
-        let path_bytes = path.as_os_str().to_string_lossy().as_bytes();
+        // `to_string_lossy()` returns a temporary Cow that is dropped at the end of
+        // this statement, so borrowing its bytes directly failed to compile with
+        // E0716. Bind the owned string first so the borrow stays valid.
+        let path_lossy = path.as_os_str().to_string_lossy();
+        #[cfg(not(unix))]
+        let path_bytes = path_lossy.as_bytes();
         hasher.update(
             u64::try_from(path_bytes.len())
                 .map_err(|_| HolderNodeError::OutOfRange)?
